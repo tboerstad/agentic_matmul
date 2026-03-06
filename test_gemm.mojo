@@ -1,6 +1,6 @@
 from std.testing import assert_almost_equal, TestSuite
 from matrix import Matrix
-from gemm import matmul_naive
+from gemm import matmul_naive, matmul_tiled
 
 
 # A = [[0, 1], [2, 3]], B = [[5, 6], [7, 8]], expected C = [[7, 8], [31, 36]]
@@ -70,6 +70,48 @@ def test_non_square() raises:
 
     var c = Matrix(2, 2)
     matmul_naive(c, a, b)
+
+    assert_almost_equal(c[0, 0], 58.0)
+    assert_almost_equal(c[0, 1], 64.0)
+    assert_almost_equal(c[1, 0], 139.0)
+    assert_almost_equal(c[1, 1], 154.0)
+
+
+# --- matmul_tiled tests (exercises TileTensor boundary clamping) ---
+
+
+# Same 2x2 as test_basic_2x2 but through the tiled path
+def test_tiled_2x2() raises:
+    var a = Matrix(2, 2)
+    a[0, 0] = 0.0; a[0, 1] = 1.0
+    a[1, 0] = 2.0; a[1, 1] = 3.0
+
+    var b = Matrix(2, 2)
+    b[0, 0] = 5.0; b[0, 1] = 6.0
+    b[1, 0] = 7.0; b[1, 1] = 8.0
+
+    var c = Matrix(2, 2)
+    matmul_tiled(c, a, b)
+
+    assert_almost_equal(c[0, 0], 7.0)
+    assert_almost_equal(c[0, 1], 8.0)
+    assert_almost_equal(c[1, 0], 31.0)
+    assert_almost_equal(c[1, 1], 36.0)
+
+
+# Non-square through the tiled path (boundary tiles with TILE=32 on 2x3 * 3x2)
+def test_tiled_non_square() raises:
+    var a = Matrix(2, 3)
+    a[0, 0] = 1.0; a[0, 1] = 2.0; a[0, 2] = 3.0
+    a[1, 0] = 4.0; a[1, 1] = 5.0; a[1, 2] = 6.0
+
+    var b = Matrix(3, 2)
+    b[0, 0] = 7.0; b[0, 1] = 8.0
+    b[1, 0] = 9.0; b[1, 1] = 10.0
+    b[2, 0] = 11.0; b[2, 1] = 12.0
+
+    var c = Matrix(2, 2)
+    matmul_tiled(c, a, b)
 
     assert_almost_equal(c[0, 0], 58.0)
     assert_almost_equal(c[0, 1], 64.0)

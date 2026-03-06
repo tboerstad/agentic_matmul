@@ -22,9 +22,11 @@ struct TileTensor[dtype: DType = DType.float64, origin: MutOrigin = MutAnyOrigin
         self._stride = stride
 
     fn __getitem__(self, row: Int, col: Int) -> Scalar[Self.dtype]:
+        debug_assert(row < self.rows and col < self.cols, "TileTensor index out of bounds")
         return self._ptr[row * self._stride + col]
 
     fn __setitem__(self, row: Int, col: Int, val: Scalar[Self.dtype]):
+        debug_assert(row < self.rows and col < self.cols, "TileTensor index out of bounds")
         self._ptr[row * self._stride + col] = val
 
 
