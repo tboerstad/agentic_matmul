@@ -1,119 +1,176 @@
 from std.testing import assert_almost_equal, TestSuite
 
 
-fn gemm(
+struct Matrix[cols: Int](Movable):
+    var data: List[Float64]
+    var rows: Int
+
+    fn __init__(out self, rows: Int):
+        self.rows = rows
+        self.data = List[Float64](length=rows * Self.cols, fill=0.0)
+
+    fn __getitem__(self, row: Int) -> SIMD[DType.float64, Self.cols]:
+        return (self.data.unsafe_ptr() + row * Self.cols).load[width=Self.cols]()
+
+    fn __setitem__(mut self, row: Int, val: SIMD[DType.float64, Self.cols]):
+        (self.data.unsafe_ptr() + row * Self.cols).store(val)
+
+
+fn gemm[N: Int, K: Int](
     trans_a: Bool,
     trans_b: Bool,
     m: Int,
-    n: Int,
-    k: Int,
     alpha: Float64,
     beta: Float64,
-    a: List[Float64],
-    lda: Int,
-    b: List[Float64],
-    ldb: Int,
-    c: List[Float64],
-    ldc: Int,
-) -> List[Float64]:
-    var result = List[Float64](capacity=m * ldc)
-    for i in range(m * ldc):
-        result.append(c[i])
+    a: Matrix[K],
+    b: Matrix[N],
+    c: Matrix[N],
+) -> Matrix[N]:
+    var result = Matrix[N](rows=m)
 
-    for i in range(m):
-        for j in range(n):
-            var dot: Float64 = 0.0
-            for p in range(k):
-                var a_val: Float64
-                if trans_a:
-                    a_val = a[p * lda + i]
-                else:
-                    a_val = a[i * lda + p]
-
-                var b_val: Float64
-                if trans_b:
-                    b_val = b[j * ldb + p]
-                else:
-                    b_val = b[p * ldb + j]
-
-                dot += a_val * b_val
-
-            result[i * ldc + j] = alpha * dot + beta * c[i * ldc + j]
+    if not trans_a and not trans_b:
+        for i in range(m):
+            var acc = SIMD[DType.float64, N](0)
+            for p in range(K):
+                acc += a[i][p] * b[p]
+            result[i] = alpha * acc + beta * c[i]
+    elif trans_a and not trans_b:
+        for i in range(m):
+            var acc = SIMD[DType.float64, N](0)
+            for p in range(K):
+                acc += a[p][i] * b[p]
+            result[i] = alpha * acc + beta * c[i]
+    elif not trans_a and trans_b:
+        for i in range(m):
+            var acc = SIMD[DType.float64, N](0)
+            for p in range(K):
+                for j in range(N):
+                    acc[j] += a[i][p] * b[j][p]
+            result[i] = alpha * acc + beta * c[i]
+    else:
+        for i in range(m):
+            var acc = SIMD[DType.float64, N](0)
+            for p in range(K):
+                for j in range(N):
+                    acc[j] += a[p][i] * b[j][p]
+            result[i] = alpha * acc + beta * c[i]
 
     return result^
 
 
 # A = [[0, 1], [2, 3]], B = [[5, 6], [7, 8]], expected C = [[7, 8], [31, 36]]
 def test_basic_2x2() raises:
-    var a: List[Float64] = [0.0, 1.0, 2.0, 3.0]
-    var b: List[Float64] = [5.0, 6.0, 7.0, 8.0]
-    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
-    var r = gemm(False, False, 2, 2, 2, 1.0, 0.0, a, 2, b, 2, c, 2)
-    assert_almost_equal(r[0], 7.0)
-    assert_almost_equal(r[1], 8.0)
-    assert_almost_equal(r[2], 31.0)
-    assert_almost_equal(r[3], 36.0)
+    var a = Matrix[2](rows=2)
+    a[0] = SIMD[DType.float64, 2](0.0, 1.0)
+    a[1] = SIMD[DType.float64, 2](2.0, 3.0)
+
+    var b = Matrix[2](rows=2)
+    b[0] = SIMD[DType.float64, 2](5.0, 6.0)
+    b[1] = SIMD[DType.float64, 2](7.0, 8.0)
+
+    var c = Matrix[2](rows=2)
+
+    var r = gemm[2, 2](False, False, 2, 1.0, 0.0, a, b, c)
+    assert_almost_equal(r[0][0], 7.0)
+    assert_almost_equal(r[0][1], 8.0)
+    assert_almost_equal(r[1][0], 31.0)
+    assert_almost_equal(r[1][1], 36.0)
 
 
 # alpha=2 should scale every output element by 2
 def test_alpha_scaling() raises:
-    var a: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
-    var b: List[Float64] = [3.0, 4.0, 5.0, 6.0]
-    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
-    var r = gemm(False, False, 2, 2, 2, 2.0, 0.0, a, 2, b, 2, c, 2)
-    assert_almost_equal(r[0], 6.0)
-    assert_almost_equal(r[1], 8.0)
-    assert_almost_equal(r[2], 10.0)
-    assert_almost_equal(r[3], 12.0)
+    var a = Matrix[2](rows=2)
+    a[0] = SIMD[DType.float64, 2](1.0, 0.0)
+    a[1] = SIMD[DType.float64, 2](0.0, 1.0)
+
+    var b = Matrix[2](rows=2)
+    b[0] = SIMD[DType.float64, 2](3.0, 4.0)
+    b[1] = SIMD[DType.float64, 2](5.0, 6.0)
+
+    var c = Matrix[2](rows=2)
+
+    var r = gemm[2, 2](False, False, 2, 2.0, 0.0, a, b, c)
+    assert_almost_equal(r[0][0], 6.0)
+    assert_almost_equal(r[0][1], 8.0)
+    assert_almost_equal(r[1][0], 10.0)
+    assert_almost_equal(r[1][1], 12.0)
 
 
 # beta=1 should accumulate into an existing C
 def test_beta_accumulate() raises:
-    var a: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
-    var b: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
-    var c: List[Float64] = [10.0, 20.0, 30.0, 40.0]
-    var r = gemm(False, False, 2, 2, 2, 1.0, 1.0, a, 2, b, 2, c, 2)
+    var a = Matrix[2](rows=2)
+    a[0] = SIMD[DType.float64, 2](1.0, 0.0)
+    a[1] = SIMD[DType.float64, 2](0.0, 1.0)
+
+    var b = Matrix[2](rows=2)
+    b[0] = SIMD[DType.float64, 2](1.0, 0.0)
+    b[1] = SIMD[DType.float64, 2](0.0, 1.0)
+
+    var c = Matrix[2](rows=2)
+    c[0] = SIMD[DType.float64, 2](10.0, 20.0)
+    c[1] = SIMD[DType.float64, 2](30.0, 40.0)
+
+    var r = gemm[2, 2](False, False, 2, 1.0, 1.0, a, b, c)
     # I*I = I, so result = 1*I + 1*C = I + C
-    assert_almost_equal(r[0], 11.0)
-    assert_almost_equal(r[1], 20.0)
-    assert_almost_equal(r[2], 30.0)
-    assert_almost_equal(r[3], 41.0)
+    assert_almost_equal(r[0][0], 11.0)
+    assert_almost_equal(r[0][1], 20.0)
+    assert_almost_equal(r[1][0], 30.0)
+    assert_almost_equal(r[1][1], 41.0)
 
 
 # trans_a=True: op(A) = A^T
 # A = [[1, 2], [3, 4]] stored row-major -> trans gives [[1, 3], [2, 4]]
 # B = identity -> result = A^T
 def test_trans_a() raises:
-    var a: List[Float64] = [1.0, 2.0, 3.0, 4.0]
-    var b: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
-    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
-    var r = gemm(True, False, 2, 2, 2, 1.0, 0.0, a, 2, b, 2, c, 2)
-    assert_almost_equal(r[0], 1.0)
-    assert_almost_equal(r[1], 3.0)
-    assert_almost_equal(r[2], 2.0)
-    assert_almost_equal(r[3], 4.0)
+    var a = Matrix[2](rows=2)
+    a[0] = SIMD[DType.float64, 2](1.0, 2.0)
+    a[1] = SIMD[DType.float64, 2](3.0, 4.0)
+
+    var b = Matrix[2](rows=2)
+    b[0] = SIMD[DType.float64, 2](1.0, 0.0)
+    b[1] = SIMD[DType.float64, 2](0.0, 1.0)
+
+    var c = Matrix[2](rows=2)
+
+    var r = gemm[2, 2](True, False, 2, 1.0, 0.0, a, b, c)
+    assert_almost_equal(r[0][0], 1.0)
+    assert_almost_equal(r[0][1], 3.0)
+    assert_almost_equal(r[1][0], 2.0)
+    assert_almost_equal(r[1][1], 4.0)
 
 
 # trans_b=True: op(B) = B^T
 # A = identity, B = [[1, 2], [3, 4]] -> B^T = [[1, 3], [2, 4]]
 def test_trans_b() raises:
-    var a: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
-    var b: List[Float64] = [1.0, 2.0, 3.0, 4.0]
-    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
-    var r = gemm(False, True, 2, 2, 2, 1.0, 0.0, a, 2, b, 2, c, 2)
-    assert_almost_equal(r[0], 1.0)
-    assert_almost_equal(r[1], 3.0)
-    assert_almost_equal(r[2], 2.0)
-    assert_almost_equal(r[3], 4.0)
+    var a = Matrix[2](rows=2)
+    a[0] = SIMD[DType.float64, 2](1.0, 0.0)
+    a[1] = SIMD[DType.float64, 2](0.0, 1.0)
+
+    var b = Matrix[2](rows=2)
+    b[0] = SIMD[DType.float64, 2](1.0, 2.0)
+    b[1] = SIMD[DType.float64, 2](3.0, 4.0)
+
+    var c = Matrix[2](rows=2)
+
+    var r = gemm[2, 2](False, True, 2, 1.0, 0.0, a, b, c)
+    assert_almost_equal(r[0][0], 1.0)
+    assert_almost_equal(r[0][1], 3.0)
+    assert_almost_equal(r[1][0], 2.0)
+    assert_almost_equal(r[1][1], 4.0)
 
 
 # 1x1 degenerate: scalar multiply
 def test_1x1() raises:
-    var a: List[Float64] = [3.0]
-    var b: List[Float64] = [7.0]
-    var c: List[Float64] = [0.0]
-    var r = gemm(False, False, 1, 1, 1, 1.0, 0.0, a, 1, b, 1, c, 1)
-    assert_almost_equal(r[0], 21.0)
+    var a = Matrix[1](rows=1)
+    a[0] = SIMD[DType.float64, 1](3.0)
+
+    var b = Matrix[1](rows=1)
+    b[0] = SIMD[DType.float64, 1](7.0)
+
+    var c = Matrix[1](rows=1)
+
+    var r = gemm[1, 1](False, False, 1, 1.0, 0.0, a, b, c)
+    assert_almost_equal(r[0][0], 21.0)
 
 
 def main() raises:

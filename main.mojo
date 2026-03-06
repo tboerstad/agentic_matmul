@@ -1,3 +1,26 @@
+struct Matrix[cols: Int](Movable):
+    """Contiguous row-major matrix with comptime column width.
+
+    Backed by a flat List[Float64] of rows*cols elements.
+    Rows are loaded/stored as SIMD[DType.float64, cols] vectors via the
+    underlying pointer, so row-wide arithmetic is fully vectorized.
+    M (number of rows) is runtime-sized.
+    """
+
+    var data: List[Float64]
+    var rows: Int
+
+    fn __init__(out self, rows: Int):
+        self.rows = rows
+        self.data = List[Float64](length=rows * Self.cols, fill=0.0)
+
+    fn __getitem__(self, row: Int) -> SIMD[DType.float64, Self.cols]:
+        return (self.data.unsafe_ptr() + row * Self.cols).load[width=Self.cols]()
+
+    fn __setitem__(mut self, row: Int, val: SIMD[DType.float64, Self.cols]):
+        (self.data.unsafe_ptr() + row * Self.cols).store(val)
+
+
 fn matmul2x2(
     a: SIMD[DType.float64, 4],
     b: SIMD[DType.float64, 4],
@@ -10,49 +33,62 @@ fn matmul2x2(
     return SIMD[DType.float64, 4](c00, c01, c10, c11)
 
 
-fn gemm(
+fn gemm[N: Int, K: Int](
     trans_a: Bool,
     trans_b: Bool,
     m: Int,
-    n: Int,
-    k: Int,
     alpha: Float64,
     beta: Float64,
-    a: List[Float64],
-    lda: Int,
-    b: List[Float64],
-    ldb: Int,
-    c: List[Float64],
-    ldc: Int,
-) -> List[Float64]:
-    # Computes C = alpha * op(A) * op(B) + beta * C
-    # op(X) = X if trans == False, X^T if trans == True
-    # All matrices are row-major flat buffers.
-    var result = List[Float64](capacity=m * ldc)
-    for i in range(m * ldc):
-        result.append(c[i])
+    a: Matrix[K],
+    b: Matrix[N],
+    c: Matrix[N],
+) -> Matrix[N]:
+    """C(m x N) = alpha * op(A) * op(B) + beta * C.
 
-    for i in range(m):
-        for j in range(n):
-            var dot: Float64 = 0.0
-            for p in range(k):
-                var a_val: Float64
-                if trans_a:
-                    a_val = a[p * lda + i]  # A^T: row p, col i -> A[p][i]
-                else:
-                    a_val = a[i * lda + p]  # A: row i, col p
+    N and K are comptime — each row is a fixed-width SIMD vector.
+    M (number of output rows) is runtime.
 
-                var b_val: Float64
-                if trans_b:
-                    b_val = b[j * ldb + p]  # B^T: row j, col p -> B[j][p]
-                else:
-                    b_val = b[p * ldb + j]  # B: row p, col j
+    Layout assumptions depending on transpose flags:
+      trans_a=False: A is m x K  (a.rows == m)
+      trans_a=True:  A is K x m  (a.rows == K), read transposed
+      trans_b=False: B is K x N  (b.rows == K)
+      trans_b=True:  B is N x K stored; logical B^T is K x N
+                     b.rows == N, b[j][p] gives element (j, p)
+    """
+    var result = Matrix[N](rows=m)
 
-                dot += a_val * b_val
+    if not trans_a and not trans_b:
+        # Fast path: broadcast A[i][p] * full SIMD row B[p]
+        for i in range(m):
+            var acc = SIMD[DType.float64, N](0)
+            for p in range(K):
+                acc += a[i][p] * b[p]
+            result[i] = alpha * acc + beta * c[i]
+    elif trans_a and not trans_b:
+        # A^T[i][p] = A[p][i]; B rows still SIMD
+        for i in range(m):
+            var acc = SIMD[DType.float64, N](0)
+            for p in range(K):
+                acc += a[p][i] * b[p]
+            result[i] = alpha * acc + beta * c[i]
+    elif not trans_a and trans_b:
+        # B stored N x K, B^T[p][j] = B[j][p]
+        for i in range(m):
+            var acc = SIMD[DType.float64, N](0)
+            for p in range(K):
+                for j in range(N):
+                    acc[j] += a[i][p] * b[j][p]
+            result[i] = alpha * acc + beta * c[i]
+    else:
+        # Both transposed
+        for i in range(m):
+            var acc = SIMD[DType.float64, N](0)
+            for p in range(K):
+                for j in range(N):
+                    acc[j] += a[p][i] * b[j][p]
+            result[i] = alpha * acc + beta * c[i]
 
-            result[i * ldc + j] = alpha * dot + beta * c[i * ldc + j]
-
-    return result
+    return result^
 
 
 fn main():
@@ -61,25 +97,30 @@ fn main():
     # matmul2x2 demo
     # A = [[0, 1], [2, 3]]
     # B = [[5, 6], [7, 8]]
-    var a = SIMD[DType.float64, 4](0.0, 1.0, 2.0, 3.0)
-    var b = SIMD[DType.float64, 4](5.0, 6.0, 7.0, 8.0)
+    var a_simd = SIMD[DType.float64, 4](0.0, 1.0, 2.0, 3.0)
+    var b_simd = SIMD[DType.float64, 4](5.0, 6.0, 7.0, 8.0)
 
-    var c = matmul2x2(a, b)
+    var c_simd = matmul2x2(a_simd, b_simd)
 
     print("A = [[0, 1], [2, 3]]")
     print("B = [[5, 6], [7, 8]]")
     print("C = A * B =")
-    print("  [[", c[0], ",", c[1], "],")
-    print("   [", c[2], ",", c[3], "]]")
+    print("  [[", c_simd[0], ",", c_simd[1], "],")
+    print("   [", c_simd[2], ",", c_simd[3], "]]")
 
-    # gemm demo: same multiplication via GEMM
-    # C = 1.0 * A * B + 0.0 * C
-    var ga = List[Float64](0.0, 1.0, 2.0, 3.0)
-    var gb = List[Float64](5.0, 6.0, 7.0, 8.0)
-    var gc = List[Float64](0.0, 0.0, 0.0, 0.0)
+    # gemm demo: same multiplication via Matrix-based GEMM
+    var a = Matrix[2](rows=2)
+    a[0] = SIMD[DType.float64, 2](0.0, 1.0)
+    a[1] = SIMD[DType.float64, 2](2.0, 3.0)
 
-    var gr = gemm(False, False, 2, 2, 2, 1.0, 0.0, ga, 2, gb, 2, gc, 2)
+    var b = Matrix[2](rows=2)
+    b[0] = SIMD[DType.float64, 2](5.0, 6.0)
+    b[1] = SIMD[DType.float64, 2](7.0, 8.0)
+
+    var c = Matrix[2](rows=2)
+
+    var gr = gemm[2, 2](False, False, 2, 1.0, 0.0, a, b, c)
 
     print("\nGEMM: C = 1.0 * A * B + 0.0 * C")
-    print("  [[", gr[0], ",", gr[1], "],")
-    print("   [", gr[2], ",", gr[3], "]]")
+    print("  [[", gr[0][0], ",", gr[0][1], "],")
+    print("   [", gr[1][0], ",", gr[1][1], "]]")
