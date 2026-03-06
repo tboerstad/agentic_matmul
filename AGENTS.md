@@ -22,6 +22,25 @@
 - The Mojo compiler and runtime are installed in `.venv/` via `uv`
 - Always activate the venv before running `mojo` commands
 
+## Project structure
+
+- `matrix.mojo` — `Matrix[dtype]` struct (row-major, flat `List` backing)
+- `gemm.mojo` — matmul kernels:
+  - `matmul_naive` — simple i-j-k triple-nested loop (baseline)
+  - `matmul_tiled` — cache-blocked version with 32×32 tiles and i-p-j loop order
+  - `matmul` — alias that points to `matmul_tiled`
+- `bench_matmul.mojo` — benchmarks naive vs tiled on Qwen 2.5 VL 3B shapes
+- `test_gemm.mojo` — correctness tests (uses `matmul` alias)
+- `main.mojo` — small demo
+
+## Running tests and benchmarks
+
+```
+source .venv/bin/activate
+mojo test_gemm.mojo       # correctness tests
+mojo bench_matmul.mojo    # naive vs tiled benchmark
+```
+
 ## Creating a Pull Request
 
 To create a PR link without needing `gh` CLI, use the GitHub compare URL format:
