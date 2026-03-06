@@ -11,6 +11,7 @@
 - Import from `std`: `from std.collections import List`
 - Use `SIMD[DType.float64, N]` for fixed-size arrays
 - Declare functions with `fn`, variables with `var`
+- Return owned `List` values with `^` (e.g. `return result^`); without it the compiler rejects the implicit copy
 
 ## Development
 
