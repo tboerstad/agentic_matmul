@@ -15,7 +15,6 @@
 - Use `mut` (not `inout`) for mutable function parameters: `fn foo(mut x: List[Float64])`
 - Use `comptime if` (not `@parameter if`) for compile-time branching on parameter values
 - Inside a struct, reference its parameters with `Self.` prefix: `List[Scalar[Self.dtype]]`, not `List[Scalar[dtype]]`
-- Don't name a module `main.mojo` if you need to import from it — `from main import foo` conflicts with `main()` entry point resolution
 
 ## Development
 
