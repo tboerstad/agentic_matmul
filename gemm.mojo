@@ -1,4 +1,4 @@
-from matrix import Matrix
+from matrix import Matrix, make_tile_tensor
 from buffer import NDBuffer, DimList
 from layout import TileTensor
 
@@ -6,83 +6,83 @@ from layout import TileTensor
 fn matmul_naive[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
-    # Computes C = A * op(B)  —  simple triple-nested loop (ijk order).
-    # Uses TileTensor views over the raw matrix data for element access.
-    var m = a.rows
-    var n = c.cols
-    var k = a.cols
+    """C = A * op(B) — simple triple-nested loop via TileTensor views."""
+    var tt_a = make_tile_tensor(a.ptr, a.rows, a.cols)
+    var tt_b = make_tile_tensor(b.ptr, b.rows, b.cols)
+    var tt_c = make_tile_tensor(c.ptr, c.rows, c.cols)
 
-    var tt_a = TileTensor(NDBuffer[dtype, 2](a.ptr, DimList(m, k)))
-    var tt_b = TileTensor(NDBuffer[dtype, 2](b.ptr, DimList(b.rows, b.cols)))
-    var tt_c = TileTensor(NDBuffer[dtype, 2](c.ptr, DimList(m, n)))
+    var m = tt_a.dim(0)
+    var k = tt_a.dim(1)
+    var n = tt_c.dim(1)
 
     for i in range(m):
         for j in range(n):
             var dot = Scalar[dtype](0)
             for p in range(k):
-                var a_val = tt_a[i, p]
-
                 comptime if transpose_b:
-                    dot += a_val * tt_b[j, p]
+                    dot += tt_a[i, p] * tt_b[j, p]
                 else:
-                    dot += a_val * tt_b[p, j]
-
+                    dot += tt_a[i, p] * tt_b[p, j]
             tt_c[i, j] = dot
 
 
 fn matmul_tiled[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
-    # Computes C = A * op(B)  —  tiled / cache-blocked version.
-    #
-    # Key optimizations over naive:
-    #   1. Loop tiling: process TILE x TILE sub-blocks so data fits in L1/L2 cache
-    #   2. Accumulate into a local register variable before writing back to C
-    #   3. Loop order i→p→j inside tiles keeps A[i,p] reads sequential and
-    #      reuses each loaded A element across the full j-tile
-    #
-    # Uses TileTensor views for element access.
+    """C = A * op(B) — cache-blocked using TileTensor.slice() for sub-tiles.
+
+    Uses TileTensor abstractions:
+      - fill() to zero-initialize C
+      - slice() to extract sub-tile views for each block
+      - dim() to query tile dimensions (handles edge tiles automatically)
+      - 0-based local indexing within each sub-tile
+    """
     comptime TILE = 32
 
-    var m = a.rows
-    var n = c.cols
-    var k = a.cols
+    var tt_a = make_tile_tensor(a.ptr, a.rows, a.cols)
+    var tt_b = make_tile_tensor(b.ptr, b.rows, b.cols)
+    var tt_c = make_tile_tensor(c.ptr, c.rows, c.cols)
 
-    var tt_a = TileTensor(NDBuffer[dtype, 2](a.ptr, DimList(m, k)))
-    var tt_b = TileTensor(NDBuffer[dtype, 2](b.ptr, DimList(b.rows, b.cols)))
-    var tt_c = TileTensor(NDBuffer[dtype, 2](c.ptr, DimList(m, n)))
+    var m = tt_a.dim(0)
+    var k = tt_a.dim(1)
+    var n = tt_c.dim(1)
 
-    # Zero out C (tiles accumulate with +=)
-    for idx in range(m * n):
-        c.store(idx, Scalar[dtype](0))
+    # Zero C via TileTensor fill
+    tt_c.fill(Scalar[dtype](0))
 
-    # Tile over all three dimensions
     for i0 in range(0, m, TILE):
-        var i_end = i0 + TILE
-        if i_end > m:
-            i_end = m
+        var i1 = min(i0 + TILE, m)
         for p0 in range(0, k, TILE):
-            var p_end = p0 + TILE
-            if p_end > k:
-                p_end = k
+            var p1 = min(p0 + TILE, k)
             for j0 in range(0, n, TILE):
-                var j_end = j0 + TILE
-                if j_end > n:
-                    j_end = n
+                var j1 = min(j0 + TILE, n)
 
-                # Micro-kernel: multiply the (i0:i_end, p0:p_end) block of A
-                # with the (p0:p_end, j0:j_end) block of B, accumulating into C
-                for i in range(i0, i_end):
-                    for p in range(p0, p_end):
-                        var a_val = tt_a[i, p]
-                        for j in range(j0, j_end):
-                            comptime if transpose_b:
-                                tt_c[i, j] = tt_c[i, j] + a_val * tt_b[j, p]
-                            else:
-                                tt_c[i, j] = tt_c[i, j] + a_val * tt_b[p, j]
+                # Slice out sub-tile views — local indices are 0-based
+                var a_tile = tt_a.slice((i0, i1), (p0, p1))
+                var c_tile = tt_c.slice((i0, i1), (j0, j1))
+
+                var ti = c_tile.dim(0)
+                var tp = a_tile.dim(1)
+                var tj = c_tile.dim(1)
+
+                comptime if transpose_b:
+                    # B is (N, K); slice rows=j, cols=p
+                    var b_tile = tt_b.slice((j0, j1), (p0, p1))
+                    for i in range(ti):
+                        for p in range(tp):
+                            var a_val = a_tile[i, p]
+                            for j in range(tj):
+                                c_tile[i, j] += a_val * b_tile[j, p]
+                else:
+                    # B is (K, N); slice rows=p, cols=j
+                    var b_tile = tt_b.slice((p0, p1), (j0, j1))
+                    for i in range(ti):
+                        for p in range(tp):
+                            var a_val = a_tile[i, p]
+                            for j in range(tj):
+                                c_tile[i, j] += a_val * b_tile[p, j]
 
 
-# Default matmul points to the tiled version
 fn matmul[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
