@@ -6,6 +6,12 @@
 2. Activate the venv: `source .venv/bin/activate`
 3. Verify the setup works: `mojo main.mojo`
 
+## Mojo 101
+
+- Import from `std`: `from std.collections import List`
+- Use `SIMD[DType.float64, N]` for fixed-size arrays
+- Declare functions with `fn`, variables with `var`
+
 ## Development
 
 - Mojo source files use the `.mojo` extension
