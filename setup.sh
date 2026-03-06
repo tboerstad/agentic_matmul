@@ -13,10 +13,10 @@ if [ ! -f pyproject.toml ]; then
     uv init
 fi
 
-# Create venv and install mojo nightly
+# Create venv and install modular (includes mojo + max)
 uv venv
 source .venv/bin/activate
-uv pip install mojo --index https://whl.modular.com/nightly/simple/ --prerelease allow
+uv pip install modular --index https://whl.modular.com/nightly/simple/ --prerelease allow
 
 echo ""
 echo "Setup complete! To get started:"

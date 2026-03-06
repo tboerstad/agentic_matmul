@@ -1,14 +1,18 @@
-struct Matrix[dtype: DType = DType.float64]:
-    """A simple 2D CPU matrix backed by a flat row-major buffer.
+from memory import UnsafePointer, memset_zero
+from buffer import NDBuffer, DimList
+from layout import TileTensor
 
-    Inspired by NDBuffer but stripped to essentials:
+
+struct Matrix[dtype: DType = DType.float64]:
+    """A 2D matrix backed by UnsafePointer with TileTensor views for computation.
+
     - Always rank-2 (rows x cols)
     - Parameterized dtype (defaults to float64)
-    - Row-major layout
+    - Row-major layout via TileTensor from max
     - CPU only
     """
 
-    var data: List[Scalar[Self.dtype]]
+    var ptr: UnsafePointer[Scalar[Self.dtype]]
     var rows: Int
     var cols: Int
 
@@ -18,25 +22,54 @@ struct Matrix[dtype: DType = DType.float64]:
         """Allocate a zero-filled rows x cols matrix."""
         self.rows = rows
         self.cols = cols
-        self.data = List[Scalar[Self.dtype]](capacity=rows * cols)
-        for _ in range(rows * cols):
-            self.data.append(Scalar[Self.dtype](0))
+        self.ptr = UnsafePointer[Scalar[Self.dtype]].alloc(rows * cols)
+        memset_zero(self.ptr, rows * cols)
 
-    # --- element access ---------------------------------------------------------
+    fn __copyinit__(out self, other: Self):
+        self.rows = other.rows
+        self.cols = other.cols
+        var n = self.rows * self.cols
+        self.ptr = UnsafePointer[Scalar[Self.dtype]].alloc(n)
+        for i in range(n):
+            self.ptr[i] = other.ptr[i]
+
+    fn __moveinit__(out self, owned other: Self):
+        self.rows = other.rows
+        self.cols = other.cols
+        self.ptr = other.ptr
+        other.ptr = UnsafePointer[Scalar[Self.dtype]]()
+
+    fn __del__(owned self):
+        if self.ptr:
+            self.ptr.free()
+
+    # --- element access via TileTensor ------------------------------------------
 
     fn __getitem__(self, row: Int, col: Int) -> Scalar[Self.dtype]:
-        return self.data[row * self.cols + col]
+        return self.ptr[row * self.cols + col]
 
     fn __setitem__(mut self, row: Int, col: Int, val: Scalar[Self.dtype]):
-        self.data[row * self.cols + col] = val
+        self.ptr[row * self.cols + col] = val
 
     # --- flat buffer access (for matmul kernels) --------------------------------
 
     fn load(self, idx: Int) -> Scalar[Self.dtype]:
-        return self.data[idx]
+        return self.ptr[idx]
 
     fn store(mut self, idx: Int, val: Scalar[Self.dtype]):
-        self.data[idx] = val
+        self.ptr[idx] = val
+
+    # --- TileTensor view --------------------------------------------------------
+
+    fn tile_tensor(self) -> TileTensor[mut=False, dtype=Self.dtype]:
+        """Return an immutable TileTensor view over this matrix's data."""
+        var buf = NDBuffer[Self.dtype, 2](self.ptr, DimList(self.rows, self.cols))
+        return TileTensor(buf)
+
+    fn mut_tile_tensor(mut self) -> TileTensor[mut=True, dtype=Self.dtype]:
+        """Return a mutable TileTensor view over this matrix's data."""
+        var buf = NDBuffer[Self.dtype, 2](self.ptr, DimList(self.rows, self.cols))
+        return TileTensor(buf)
 
     # --- properties -------------------------------------------------------------
 
@@ -51,7 +84,7 @@ struct Matrix[dtype: DType = DType.float64]:
             for j in range(self.cols):
                 if j > 0:
                     line += ", "
-                line += String(self.data[i * self.cols + j])
+                line += String(self.ptr[i * self.cols + j])
             line += "]"
             print(line)
 

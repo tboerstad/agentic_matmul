@@ -1,25 +1,33 @@
 from matrix import Matrix
+from buffer import NDBuffer, DimList
+from layout import TileTensor
 
 
 fn matmul_naive[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
     # Computes C = A * op(B)  —  simple triple-nested loop (ijk order).
+    # Uses TileTensor views over the raw matrix data for element access.
     var m = a.rows
     var n = c.cols
     var k = a.cols
+
+    var tt_a = TileTensor(NDBuffer[dtype, 2](a.ptr, DimList(m, k)))
+    var tt_b = TileTensor(NDBuffer[dtype, 2](b.ptr, DimList(b.rows, b.cols)))
+    var tt_c = TileTensor(NDBuffer[dtype, 2](c.ptr, DimList(m, n)))
+
     for i in range(m):
         for j in range(n):
             var dot = Scalar[dtype](0)
             for p in range(k):
-                var a_val = a[i, p]
+                var a_val = tt_a[i, p]
 
                 comptime if transpose_b:
-                    dot += a_val * b[j, p]
+                    dot += a_val * tt_b[j, p]
                 else:
-                    dot += a_val * b[p, j]
+                    dot += a_val * tt_b[p, j]
 
-            c[i, j] = dot
+            tt_c[i, j] = dot
 
 
 fn matmul_tiled[dtype: DType = DType.float64, *, transpose_b: Bool = False](
@@ -32,11 +40,17 @@ fn matmul_tiled[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     #   2. Accumulate into a local register variable before writing back to C
     #   3. Loop order i→p→j inside tiles keeps A[i,p] reads sequential and
     #      reuses each loaded A element across the full j-tile
+    #
+    # Uses TileTensor views for element access.
     comptime TILE = 32
 
     var m = a.rows
     var n = c.cols
     var k = a.cols
+
+    var tt_a = TileTensor(NDBuffer[dtype, 2](a.ptr, DimList(m, k)))
+    var tt_b = TileTensor(NDBuffer[dtype, 2](b.ptr, DimList(b.rows, b.cols)))
+    var tt_c = TileTensor(NDBuffer[dtype, 2](c.ptr, DimList(m, n)))
 
     # Zero out C (tiles accumulate with +=)
     for idx in range(m * n):
@@ -60,12 +74,12 @@ fn matmul_tiled[dtype: DType = DType.float64, *, transpose_b: Bool = False](
                 # with the (p0:p_end, j0:j_end) block of B, accumulating into C
                 for i in range(i0, i_end):
                     for p in range(p0, p_end):
-                        var a_val = a[i, p]
+                        var a_val = tt_a[i, p]
                         for j in range(j0, j_end):
                             comptime if transpose_b:
-                                c[i, j] = c[i, j] + a_val * b[j, p]
+                                tt_c[i, j] = tt_c[i, j] + a_val * tt_b[j, p]
                             else:
-                                c[i, j] = c[i, j] + a_val * b[p, j]
+                                tt_c[i, j] = tt_c[i, j] + a_val * tt_b[p, j]
 
 
 # Default matmul points to the tiled version
