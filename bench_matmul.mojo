@@ -1,4 +1,4 @@
-from gemm import matmul
+from gemm import matmul_naive, matmul_tiled
 from matrix import Matrix
 import std.benchmark
 from time import perf_counter_ns
@@ -17,59 +17,117 @@ fn fill(mut m: Matrix, seed: Int):
 
 fn main() raises:
     var t_start = perf_counter_ns()
-    print("=== matmul benchmark (Qwen 2.5 VL 3B shapes) ===\n")
+    print("=== matmul benchmark: naive vs tiled (Qwen 2.5 VL 3B shapes) ===\n")
 
-    # --- 1x11008x2048 (single-token decode, MLP gate/up projection) ---
+    # ---- 1x11008x2048 (single-token decode) ---------------------------------
+
+    comptime M1 = 1
+    comptime N1 = 11008
+    comptime K1 = 2048
+
     @parameter
-    fn bench_decode():
-        comptime M = 1
-        comptime N = 11008
-        comptime K = 2048
-        var a = Matrix(M, K)
-        var b = Matrix(K, N)
-        var c = Matrix(M, N)
+    fn bench_decode_naive():
+        var a = Matrix(M1, K1)
+        var b = Matrix(K1, N1)
+        var c = Matrix(M1, N1)
         fill(a, 17)
         fill(b, 13)
-        matmul(c, a, b)
+        matmul_naive(c, a, b)
 
-    var r_dec = std.benchmark.run[bench_decode]()
-    var mean_dec = r_dec.mean("s")
+    @parameter
+    fn bench_decode_tiled():
+        var a = Matrix(M1, K1)
+        var b = Matrix(K1, N1)
+        var c = Matrix(M1, N1)
+        fill(a, 17)
+        fill(b, 13)
+        matmul_tiled(c, a, b)
+
+    print("--- 1x11008x2048 (decode) ---")
+
+    var r_naive_1 = std.benchmark.run[bench_decode_naive]()
+    var s_naive_1 = r_naive_1.mean("s")
     print(
-        "1x11008x2048   :",
-        r_dec.mean("ms"),
+        "  naive :",
+        r_naive_1.mean("ms"),
         "ms |",
-        gflops(1, 11008, 2048, mean_dec),
+        gflops(M1, N1, K1, s_naive_1),
         "GFLOPS",
     )
 
-    # --- 96x11008x2048 (prefill batch, MLP gate/up projection) ---
-    @parameter
-    fn bench_prefill():
-        comptime M = 96
-        comptime N = 11008
-        comptime K = 2048
-        var a = Matrix(M, K)
-        var b = Matrix(K, N)
-        var c = Matrix(M, N)
-        fill(a, 17)
-        fill(b, 13)
-        matmul(c, a, b)
-
-    var r_pre = std.benchmark.run[bench_prefill]()
-    var mean_pre = r_pre.mean("s")
+    var r_tiled_1 = std.benchmark.run[bench_decode_tiled]()
+    var s_tiled_1 = r_tiled_1.mean("s")
     print(
-        "96x11008x2048 :",
-        r_pre.mean("ms"),
+        "  tiled :",
+        r_tiled_1.mean("ms"),
         "ms |",
-        gflops(96, 11008, 2048, mean_pre),
+        gflops(M1, N1, K1, s_tiled_1),
         "GFLOPS",
     )
 
-    print("\n--- full reports ---\n")
-    print("1x11008x2048 (decode):")
-    r_dec.print()
-    print("\n96x11008x2048 (prefill):")
-    r_pre.print()
+    var speedup_1 = s_naive_1 / s_tiled_1
+    print("  speedup:", speedup_1, "x\n")
+
+    # ---- 96x11008x2048 (prefill batch) --------------------------------------
+
+    comptime M2 = 96
+    comptime N2 = 11008
+    comptime K2 = 2048
+
+    @parameter
+    fn bench_prefill_naive():
+        var a = Matrix(M2, K2)
+        var b = Matrix(K2, N2)
+        var c = Matrix(M2, N2)
+        fill(a, 17)
+        fill(b, 13)
+        matmul_naive(c, a, b)
+
+    @parameter
+    fn bench_prefill_tiled():
+        var a = Matrix(M2, K2)
+        var b = Matrix(K2, N2)
+        var c = Matrix(M2, N2)
+        fill(a, 17)
+        fill(b, 13)
+        matmul_tiled(c, a, b)
+
+    print("--- 96x11008x2048 (prefill) ---")
+
+    var r_naive_2 = std.benchmark.run[bench_prefill_naive]()
+    var s_naive_2 = r_naive_2.mean("s")
+    print(
+        "  naive :",
+        r_naive_2.mean("ms"),
+        "ms |",
+        gflops(M2, N2, K2, s_naive_2),
+        "GFLOPS",
+    )
+
+    var r_tiled_2 = std.benchmark.run[bench_prefill_tiled]()
+    var s_tiled_2 = r_tiled_2.mean("s")
+    print(
+        "  tiled :",
+        r_tiled_2.mean("ms"),
+        "ms |",
+        gflops(M2, N2, K2, s_tiled_2),
+        "GFLOPS",
+    )
+
+    var speedup_2 = s_naive_2 / s_tiled_2
+    print("  speedup:", speedup_2, "x\n")
+
+    # ---- full reports --------------------------------------------------------
+
+    print("--- full reports ---\n")
+    print("1x11008x2048 naive:")
+    r_naive_1.print()
+    print("\n1x11008x2048 tiled:")
+    r_tiled_1.print()
+    print("\n96x11008x2048 naive:")
+    r_naive_2.print()
+    print("\n96x11008x2048 tiled:")
+    r_tiled_2.print()
 
     var t_end = perf_counter_ns()
     var elapsed_s = Float64(t_end - t_start) / 1e9
