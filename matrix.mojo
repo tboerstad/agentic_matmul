@@ -62,6 +62,11 @@ struct Matrix[dtype: DType = DType.float64]:
             self.cols,
         )
 
+    fn zero(mut self):
+        """Set all elements to zero."""
+        for idx in range(self.rows * self.cols):
+            self.data[idx] = Scalar[Self.dtype](0)
+
     fn numel(self) -> Int:
         return self.rows * self.cols
 

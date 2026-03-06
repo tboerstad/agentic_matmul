@@ -1,4 +1,5 @@
 from matrix import Matrix
+from std.math import ceildiv
 
 
 fn matmul_naive[dtype: DType = DType.float64, *, transpose_b: Bool = False](
@@ -29,13 +30,11 @@ fn matmul_tiled[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     var m = a.rows
     var n = c.cols
     var k = a.cols
-    var num_i = (m + TILE - 1) // TILE
-    var num_p = (k + TILE - 1) // TILE
-    var num_j = (n + TILE - 1) // TILE
+    var num_i = ceildiv(m, TILE)
+    var num_p = ceildiv(k, TILE)
+    var num_j = ceildiv(n, TILE)
 
-    # Zero out C (tiles accumulate with +=)
-    for idx in range(m * n):
-        c.data[idx] = Scalar[dtype](0)
+    c.zero()
 
     for i0 in range(num_i):
         for p0 in range(num_p):
