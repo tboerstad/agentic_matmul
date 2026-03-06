@@ -37,10 +37,10 @@ fn matmul_tiled[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     c.zero()
 
     for i0 in range(num_i):
-        for p0 in range(num_p):
-            var a_tile = a.tile(TILE, TILE, i0, p0)
-            for j0 in range(num_j):
-                var c_tile = c.tile(TILE, TILE, i0, j0)
+        for j0 in range(num_j):
+            var c_tile = c.tile(TILE, TILE, i0, j0)
+            for p0 in range(num_p):
+                var a_tile = a.tile(TILE, TILE, i0, p0)
                 comptime if transpose_b:
                     var b_tile = b.tile(TILE, TILE, j0, p0)
                     for i in range(c_tile.rows):
