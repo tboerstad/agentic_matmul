@@ -1,4 +1,4 @@
-from testing import assert_almost_equal, TestSuite
+from std.testing import assert_almost_equal, TestSuite
 
 
 fn gemm(
@@ -40,14 +40,14 @@ fn gemm(
 
             result[i * ldc + j] = alpha * dot + beta * c[i * ldc + j]
 
-    return result
+    return result^
 
 
 # A = [[0, 1], [2, 3]], B = [[5, 6], [7, 8]], expected C = [[7, 8], [31, 36]]
 def test_basic_2x2() raises:
-    var a = List[Float64](0.0, 1.0, 2.0, 3.0)
-    var b = List[Float64](5.0, 6.0, 7.0, 8.0)
-    var c = List[Float64](0.0, 0.0, 0.0, 0.0)
+    var a: List[Float64] = [0.0, 1.0, 2.0, 3.0]
+    var b: List[Float64] = [5.0, 6.0, 7.0, 8.0]
+    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
     var r = gemm(False, False, 2, 2, 2, 1.0, 0.0, a, 2, b, 2, c, 2)
     assert_almost_equal(r[0], 7.0)
     assert_almost_equal(r[1], 8.0)
@@ -57,9 +57,9 @@ def test_basic_2x2() raises:
 
 # alpha=2 should scale every output element by 2
 def test_alpha_scaling() raises:
-    var a = List[Float64](1.0, 0.0, 0.0, 1.0)  # identity
-    var b = List[Float64](3.0, 4.0, 5.0, 6.0)
-    var c = List[Float64](0.0, 0.0, 0.0, 0.0)
+    var a: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
+    var b: List[Float64] = [3.0, 4.0, 5.0, 6.0]
+    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
     var r = gemm(False, False, 2, 2, 2, 2.0, 0.0, a, 2, b, 2, c, 2)
     assert_almost_equal(r[0], 6.0)
     assert_almost_equal(r[1], 8.0)
@@ -69,9 +69,9 @@ def test_alpha_scaling() raises:
 
 # beta=1 should accumulate into an existing C
 def test_beta_accumulate() raises:
-    var a = List[Float64](1.0, 0.0, 0.0, 1.0)  # identity
-    var b = List[Float64](1.0, 0.0, 0.0, 1.0)  # identity
-    var c = List[Float64](10.0, 20.0, 30.0, 40.0)
+    var a: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
+    var b: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
+    var c: List[Float64] = [10.0, 20.0, 30.0, 40.0]
     var r = gemm(False, False, 2, 2, 2, 1.0, 1.0, a, 2, b, 2, c, 2)
     # I*I = I, so result = 1*I + 1*C = I + C
     assert_almost_equal(r[0], 11.0)
@@ -84,9 +84,9 @@ def test_beta_accumulate() raises:
 # A = [[1, 2], [3, 4]] stored row-major -> trans gives [[1, 3], [2, 4]]
 # B = identity -> result = A^T
 def test_trans_a() raises:
-    var a = List[Float64](1.0, 2.0, 3.0, 4.0)
-    var b = List[Float64](1.0, 0.0, 0.0, 1.0)  # identity
-    var c = List[Float64](0.0, 0.0, 0.0, 0.0)
+    var a: List[Float64] = [1.0, 2.0, 3.0, 4.0]
+    var b: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
+    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
     var r = gemm(True, False, 2, 2, 2, 1.0, 0.0, a, 2, b, 2, c, 2)
     assert_almost_equal(r[0], 1.0)
     assert_almost_equal(r[1], 3.0)
@@ -97,9 +97,9 @@ def test_trans_a() raises:
 # trans_b=True: op(B) = B^T
 # A = identity, B = [[1, 2], [3, 4]] -> B^T = [[1, 3], [2, 4]]
 def test_trans_b() raises:
-    var a = List[Float64](1.0, 0.0, 0.0, 1.0)  # identity
-    var b = List[Float64](1.0, 2.0, 3.0, 4.0)
-    var c = List[Float64](0.0, 0.0, 0.0, 0.0)
+    var a: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
+    var b: List[Float64] = [1.0, 2.0, 3.0, 4.0]
+    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
     var r = gemm(False, True, 2, 2, 2, 1.0, 0.0, a, 2, b, 2, c, 2)
     assert_almost_equal(r[0], 1.0)
     assert_almost_equal(r[1], 3.0)
@@ -109,9 +109,9 @@ def test_trans_b() raises:
 
 # 1x1 degenerate: scalar multiply
 def test_1x1() raises:
-    var a = List[Float64](3.0)
-    var b = List[Float64](7.0)
-    var c = List[Float64](0.0)
+    var a: List[Float64] = [3.0]
+    var b: List[Float64] = [7.0]
+    var c: List[Float64] = [0.0]
     var r = gemm(False, False, 1, 1, 1, 1.0, 0.0, a, 1, b, 1, c, 1)
     assert_almost_equal(r[0], 21.0)
 
