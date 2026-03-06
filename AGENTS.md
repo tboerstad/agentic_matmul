@@ -22,6 +22,10 @@
 - The Mojo compiler and runtime are installed in `.venv/` via `uv`
 - Always activate the venv before running `mojo` commands
 
+## Style preferences
+
+- When providing links to the user, always use raw plain text — never wrap in markdown bold (`**`) or other formatting
+
 ## Creating a Pull Request
 
 To create a PR link without needing `gh` CLI, use the GitHub compare URL format:
