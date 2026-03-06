@@ -13,14 +13,14 @@ fn matmul2x2(
 fn main():
     print("Hello from Mojo!")
 
-    # A = [[1, 2], [3, 4]]
+    # A = [[0, 1], [2, 3]]
     # B = [[5, 6], [7, 8]]
-    var a = SIMD[DType.float64, 4](1.0, 2.0, 3.0, 4.0)
+    var a = SIMD[DType.float64, 4](0.0, 1.0, 2.0, 3.0)
     var b = SIMD[DType.float64, 4](5.0, 6.0, 7.0, 8.0)
 
     var c = matmul2x2(a, b)
 
-    print("A = [[1, 2], [3, 4]]")
+    print("A = [[0, 1], [2, 3]]")
     print("B = [[5, 6], [7, 8]]")
     print("C = A * B =")
     print("  [[", c[0], ",", c[1], "],")
