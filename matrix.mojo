@@ -1,28 +1,46 @@
-struct Matrix[dtype: DType = DType.float64]:
-    """A simple 2D CPU matrix backed by a flat row-major buffer.
+from std.memory import UnsafePointer
 
-    Inspired by NDBuffer but stripped to essentials:
-    - Always rank-2 (rows x cols)
-    - Parameterized dtype (defaults to float64)
-    - Row-major layout
-    - CPU only
+
+struct TileTensor[dtype: DType = DType.float64, origin: MutOrigin = MutAnyOrigin]:
+    """A lightweight view into a rectangular sub-block of a Matrix.
+
+    Provides local (row, col) indexing within the tile while mapping
+    to the correct position in the parent matrix's storage.  Boundary
+    tiles are automatically clamped so rows/cols never exceed the
+    parent dimensions.
     """
+
+    var _ptr: UnsafePointer[Scalar[Self.dtype], origin=Self.origin]
+    var rows: Int
+    var cols: Int
+    var _stride: Int
+
+    fn __init__(out self, ptr: UnsafePointer[Scalar[Self.dtype], origin=Self.origin], rows: Int, cols: Int, stride: Int):
+        self._ptr = ptr
+        self.rows = rows
+        self.cols = cols
+        self._stride = stride
+
+    fn __getitem__(self, row: Int, col: Int) -> Scalar[Self.dtype]:
+        return self._ptr[row * self._stride + col]
+
+    fn __setitem__(self, row: Int, col: Int, val: Scalar[Self.dtype]):
+        self._ptr[row * self._stride + col] = val
+
+
+struct Matrix[dtype: DType = DType.float64]:
+    """A simple 2D CPU matrix backed by a flat row-major buffer."""
 
     var data: List[Scalar[Self.dtype]]
     var rows: Int
     var cols: Int
 
-    # --- constructors -----------------------------------------------------------
-
     fn __init__(out self, rows: Int, cols: Int):
-        """Allocate a zero-filled rows x cols matrix."""
         self.rows = rows
         self.cols = cols
         self.data = List[Scalar[Self.dtype]](capacity=rows * cols)
         for _ in range(rows * cols):
             self.data.append(Scalar[Self.dtype](0))
-
-    # --- element access ---------------------------------------------------------
 
     fn __getitem__(self, row: Int, col: Int) -> Scalar[Self.dtype]:
         return self.data[row * self.cols + col]
@@ -30,20 +48,22 @@ struct Matrix[dtype: DType = DType.float64]:
     fn __setitem__(mut self, row: Int, col: Int, val: Scalar[Self.dtype]):
         self.data[row * self.cols + col] = val
 
-    # --- flat buffer access (for matmul kernels) --------------------------------
+    fn tile(mut self, tile_h: Int, tile_w: Int, i: Int, j: Int) -> TileTensor[Self.dtype]:
+        """Return a TileTensor view of the (i, j)-th tile of size tile_h x tile_w.
 
-    fn load(self, idx: Int) -> Scalar[Self.dtype]:
-        return self.data[idx]
-
-    fn store(mut self, idx: Int, val: Scalar[Self.dtype]):
-        self.data[idx] = val
-
-    # --- properties -------------------------------------------------------------
+        Boundary tiles are clamped to the matrix dimensions.
+        """
+        var row0 = i * tile_h
+        var col0 = j * tile_w
+        return TileTensor[Self.dtype](
+            self.data.unsafe_ptr() + row0 * self.cols + col0,
+            min(tile_h, self.rows - row0),
+            min(tile_w, self.cols - col0),
+            self.cols,
+        )
 
     fn numel(self) -> Int:
         return self.rows * self.cols
-
-    # --- display ----------------------------------------------------------------
 
     fn print(self):
         for i in range(self.rows):
@@ -54,25 +74,3 @@ struct Matrix[dtype: DType = DType.float64]:
                 line += String(self.data[i * self.cols + j])
             line += "]"
             print(line)
-
-
-fn main():
-    # float64 (default)
-    var m = Matrix(2, 3)
-    m[0, 0] = 1.0
-    m[0, 1] = 2.0
-    m[0, 2] = 3.0
-    m[1, 0] = 4.0
-    m[1, 1] = 5.0
-    m[1, 2] = 6.0
-    print("Matrix[float64] 2x3:")
-    m.print()
-
-    # float32
-    var m32 = Matrix[DType.float32](2, 2)
-    m32[0, 0] = 1.0
-    m32[0, 1] = 2.0
-    m32[1, 0] = 3.0
-    m32[1, 1] = 4.0
-    print("Matrix[float32] 2x2:")
-    m32.print()
