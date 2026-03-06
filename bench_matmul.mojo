@@ -1,10 +1,17 @@
 from gemm import matmul
+from matrix import Matrix
 import std.benchmark
 
 
 fn gflops(n: Int, secs: Float64) -> Float64:
     """GFLOPS for an NxN matmul: 2*N^3 FLOPs."""
     return (2.0 * Float64(n) * Float64(n) * Float64(n)) / (secs * 1e9)
+
+
+fn fill(mut m: Matrix, seed: Int):
+    for i in range(m.rows):
+        for j in range(m.cols):
+            m[i, j] = Scalar[m.dtype]((i * m.cols + j) % seed) * 0.1
 
 
 fn main() raises:
@@ -14,17 +21,12 @@ fn main() raises:
     @parameter
     fn bench_128():
         comptime N = 128
-        var a = List[Float64](capacity=N * N)
-        var b = List[Float64](capacity=N * N)
-        var c = List[Float64](capacity=N * N)
-        for _ in range(N * N):
-            a.append(0.0)
-            b.append(0.0)
-            c.append(0.0)
-        for i in range(N * N):
-            a[i] = Float64(i % 17) * 0.1
-            b[i] = Float64(i % 13) * 0.1
-        matmul(c, a, b, m=N, n=N, k=N)
+        var a = Matrix(N, N)
+        var b = Matrix(N, N)
+        var c = Matrix(N, N)
+        fill(a, 17)
+        fill(b, 13)
+        matmul(c, a, b)
 
     var r128 = std.benchmark.run[bench_128]()
     var mean128 = r128.mean("s")
@@ -34,17 +36,12 @@ fn main() raises:
     @parameter
     fn bench_256():
         comptime N = 256
-        var a = List[Float64](capacity=N * N)
-        var b = List[Float64](capacity=N * N)
-        var c = List[Float64](capacity=N * N)
-        for _ in range(N * N):
-            a.append(0.0)
-            b.append(0.0)
-            c.append(0.0)
-        for i in range(N * N):
-            a[i] = Float64(i % 17) * 0.1
-            b[i] = Float64(i % 13) * 0.1
-        matmul(c, a, b, m=N, n=N, k=N)
+        var a = Matrix(N, N)
+        var b = Matrix(N, N)
+        var c = Matrix(N, N)
+        fill(a, 17)
+        fill(b, 13)
+        matmul(c, a, b)
 
     var r256 = std.benchmark.run[bench_256]()
     var mean256 = r256.mean("s")
@@ -54,17 +51,12 @@ fn main() raises:
     @parameter
     fn bench_512():
         comptime N = 512
-        var a = List[Float64](capacity=N * N)
-        var b = List[Float64](capacity=N * N)
-        var c = List[Float64](capacity=N * N)
-        for _ in range(N * N):
-            a.append(0.0)
-            b.append(0.0)
-            c.append(0.0)
-        for i in range(N * N):
-            a[i] = Float64(i % 17) * 0.1
-            b[i] = Float64(i % 13) * 0.1
-        matmul(c, a, b, m=N, n=N, k=N)
+        var a = Matrix(N, N)
+        var b = Matrix(N, N)
+        var c = Matrix(N, N)
+        fill(a, 17)
+        fill(b, 13)
+        matmul(c, a, b)
 
     var r512 = std.benchmark.run[bench_512]()
     var mean512 = r512.mean("s")

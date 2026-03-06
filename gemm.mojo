@@ -1,27 +1,23 @@
-fn matmul[*, transpose_b: Bool = False](
-    mut c: List[Float64],
-    a: List[Float64],
-    b: List[Float64],
-    m: Int,
-    n: Int,
-    k: Int,
+from matrix import Matrix
+
+
+fn matmul[dtype: DType = DType.float64, *, transpose_b: Bool = False](
+    mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
     # Computes C = A * op(B)
     # op(B) = B if transpose_b == False, B^T if transpose_b == True
-    # All matrices are row-major flat buffers.
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
     for i in range(m):
         for j in range(n):
-            var dot: Float64 = 0.0
+            var dot = Scalar[dtype](0)
             for p in range(k):
-                var a_val = a[i * k + p]
-
-                var b_val: Float64
+                var a_val = a[i, p]
 
                 comptime if transpose_b:
-                    b_val = b[j * k + p]
+                    dot += a_val * b[j, p]
                 else:
-                    b_val = b[p * n + j]
+                    dot += a_val * b[p, j]
 
-                dot += a_val * b_val
-
-            c[i * n + j] = dot
+            c[i, j] = dot
