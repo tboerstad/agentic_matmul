@@ -2,7 +2,7 @@ from std.testing import assert_almost_equal, TestSuite
 
 
 fn matmul[*, transpose_b: Bool = False](
-    inout c: List[Float64],
+    mut c: List[Float64],
     a: List[Float64],
     b: List[Float64],
     m: Int,
@@ -17,8 +17,7 @@ fn matmul[*, transpose_b: Bool = False](
 
                 var b_val: Float64
 
-                @parameter
-                if transpose_b:
+                comptime if transpose_b:
                     b_val = b[j * k + p]
                 else:
                     b_val = b[p * n + j]

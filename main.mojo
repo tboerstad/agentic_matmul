@@ -1,5 +1,5 @@
 fn matmul[*, transpose_b: Bool = False](
-    inout c: List[Float64],
+    mut c: List[Float64],
     a: List[Float64],
     b: List[Float64],
     m: Int,
@@ -17,8 +17,7 @@ fn matmul[*, transpose_b: Bool = False](
 
                 var b_val: Float64
 
-                @parameter
-                if transpose_b:
+                comptime if transpose_b:
                     b_val = b[j * k + p]
                 else:
                     b_val = b[p * n + j]
@@ -33,9 +32,9 @@ fn main():
 
     # matmul demo
     # A = [[0, 1], [2, 3]], B = [[5, 6], [7, 8]]
-    var a = List[Float64](0.0, 1.0, 2.0, 3.0)
-    var b = List[Float64](5.0, 6.0, 7.0, 8.0)
-    var c = List[Float64](0.0, 0.0, 0.0, 0.0)
+    var a: List[Float64] = [0.0, 1.0, 2.0, 3.0]
+    var b: List[Float64] = [5.0, 6.0, 7.0, 8.0]
+    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
 
     matmul(c, a, b, m=2, n=2, k=2)
 
