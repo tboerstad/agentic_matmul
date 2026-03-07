@@ -15,6 +15,8 @@
 - Use `mut` (not `inout`) for mutable function parameters: `fn foo(mut x: List[Float64])`
 - Use `comptime if` (not `@parameter if`) for compile-time branching on parameter values
 - Inside a struct, reference its parameters with `Self.` prefix: `List[Scalar[Self.dtype]]`, not `List[Scalar[dtype]]`
+- Use `vectorize[simd_width](size, closure)` from `std.algorithm.functional` to auto-vectorize loops with automatic remainder handling — no manual SIMD + scalar tail loop needed
+- Closures passed to `vectorize` use the `unified {mut}` syntax: `fn name[width: Int](i: Int) unified {mut}:` — `unified` means it works in both parametric and runtime contexts, `{mut}` allows capturing and mutating enclosing variables
 
 ## Development
 
@@ -28,15 +30,24 @@
 
 ## Creating a Pull Request
 
-To create a PR link without needing `gh` CLI, use the GitHub compare URL format:
+Use the GitHub REST API with `$GH_TOKEN` (available in the environment) to create PRs directly:
+
+```bash
+curl -s -X POST "https://api.github.com/repos/tboerstad/agentic_matmul/pulls" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -d '{
+  "title": "PR title here",
+  "head": "claude/your-branch-name",
+  "base": "main",
+  "body": "## Summary\n- Description of changes\n\n## Test plan\n- [ ] Testing steps"
+}'
+```
+
+The response JSON includes `html_url` — provide that link to the user.
+
+For a quick comparison link (no PR creation), use:
 
 ```
-https://github.com/[owner]/[repo]/compare/[base-branch]...[feature-branch]
+https://github.com/tboerstad/agentic_matmul/compare/main...claude/your-branch-name
 ```
-
-Example:
-```
-https://github.com/tboerstad/agentic_matmul/compare/main...claude/update-a-matrix-constants-b1TaV
-```
-
-This link allows you to review all changes between branches and create a PR directly from GitHub.
