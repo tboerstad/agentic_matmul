@@ -1,97 +1,25 @@
-/home/user/agentic_matmul/bench_matmul.mojo:4:6: warning: Implicit standard library imports are deprecated and will be removed in a future release; fully qualify with 'std.' instead
-from time import perf_counter_ns
-     ^
-     std.
-=== matmul benchmark: naive vs tiled vs simd (Qwen 2.5 VL 3B shapes) ===
+=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs unrolled vs comptime (Qwen 2.5 VL 3B shapes) ===
 
 --- 1x11008x2048 (decode) ---
-  naive : 299.4185538461538 ms | 0.1505877555709769 GFLOPS
-  tiled : 80.22080747333334 ms | 0.562058266678358 GFLOPS
-  simd  : 79.66241184 ms | 0.5659980279100724 GFLOPS
-  speedup (naive/tiled): 3.7324300674196693 x
-  speedup (naive/simd) : 3.758592627694083 x
-  speedup (tiled/simd) : 1.007009524572955 x
+  naive : 285.69054746341465 ms | 0.15782380061340337 GFLOPS
+  tiled : 82.1531021780822 ms | 0.548838288568357 GFLOPS
+  simd  : 65.20772405853658 ms | 0.6914636057459095 GFLOPS
+  parallel: 64.64586386341463 ms | 0.6974733618729985 GFLOPS
+  regblk : 64.81142552682927 ms | 0.695691656733196 GFLOPS
+  packed : 63.723706112195124 ms | 0.7075666302367046 GFLOPS
+  unrolled: 67.26280852 ms | 0.6703372783875542 GFLOPS
+  comptime: 69.7018278 ms | 0.6468807120722305 GFLOPS
+  speedup (naive/tiled)      : 3.47753815606533 x
+  speedup (naive/simd)       : 4.381237830152635 x
+  speedup (naive/parallel)   : 4.419316726388382 x
+  speedup (naive/regblk)     : 4.408027522016939 x
+  speedup (naive/packed)     : 4.483269490955433 x
+  speedup (naive/unrolled)   : 4.247377618471982 x
+  speedup (naive/comptime)   : 4.098752593449416 x
+  speedup (unrolled/comptime): 0.9650078146157309 x
 
 --- 96x11008x2048 (prefill) ---
-  naive : 23767.41378 ms | 0.1821200139008141 GFLOPS
-  tiled : 1242.2096129 ms | 3.48453407786376 GFLOPS
-  simd  : 483.71781341935485 ms | 8.94844392312554 GFLOPS
-  speedup (naive/tiled): 19.133174895107913 x
-  speedup (naive/simd) : 49.13487392988575 x
-  speedup (tiled/simd) : 2.568046035185141 x
-
---- full reports ---
-
-1x11008x2048 naive:
---------------------------------------------------------------------------------
-Benchmark Report (s)
---------------------------------------------------------------------------------
-Mean: 0.29941855384615385
-Total: 11.6773236
-Iters: 39
-Warmup Total: 0.703834587
-Fastest Mean: 0.29805511573684207
-Slowest Mean: 0.30071382005
-
-
-1x11008x2048 tiled:
---------------------------------------------------------------------------------
-Benchmark Report (s)
---------------------------------------------------------------------------------
-Mean: 0.08022080747333334
-Total: 12.033121121
-Iters: 150
-Warmup Total: 0.132367845
-Fastest Mean: 0.07822150315789474
-Slowest Mean: 0.08174732053846154
-
-
-1x11008x2048 simd:
---------------------------------------------------------------------------------
-Benchmark Report (s)
---------------------------------------------------------------------------------
-Mean: 0.07966241184
-Total: 11.949361776
-Iters: 150
-Warmup Total: 0.071991687
-Fastest Mean: 0.07941750958333332
-Slowest Mean: 0.07979971762162162
-
-
-96x11008x2048 naive:
---------------------------------------------------------------------------------
-Benchmark Report (s)
---------------------------------------------------------------------------------
-Mean: 23.76741378
-Total: 71.30224134
-Iters: 3
-Warmup Total: 23.580391264
-Fastest Mean: 23.76741378
-Slowest Mean: 23.76741378
-
-
-96x11008x2048 tiled:
---------------------------------------------------------------------------------
-Benchmark Report (s)
---------------------------------------------------------------------------------
-Mean: 1.2422096129
-Total: 12.422096129
-Iters: 10
-Warmup Total: 2.878565814
-Fastest Mean: 1.2422096129000002
-Slowest Mean: 1.2422096129000002
-
-
-96x11008x2048 simd:
---------------------------------------------------------------------------------
-Benchmark Report (s)
---------------------------------------------------------------------------------
-Mean: 0.4837178134193549
-Total: 14.995252216
-Iters: 31
-Warmup Total: 0.474723554
-Fastest Mean: 0.480302220625
-Slowest Mean: 0.48736111239999996
-
-
-=== total benchmark wall time: 466.172198456 s ===
+  naive : 24279.149396666664 ms | 0.17828144047724634 GFLOPS
+  tiled : 1264.1626949 ms | 3.4240226716565165 GFLOPS
+  simd  : 488.5033685483871 ms | 8.860781740077709 GFLOPS
+  parallel: 247.2347415909091 ms | 17.50774061989337 GFLOPS

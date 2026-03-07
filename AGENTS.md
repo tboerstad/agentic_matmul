@@ -18,6 +18,7 @@
 - Use `vectorize[simd_width](size, closure)` from `std.algorithm.functional` to auto-vectorize loops with automatic remainder handling — no manual SIMD + scalar tail loop needed
 - Closures passed to `vectorize` use the `unified {mut}` syntax: `fn name[width: Int](i: Int) unified {mut}:` — `unified` means it works in both parametric and runtime contexts, `{mut}` allows capturing and mutating enclosing variables
 - Use `parallelize[func](num_work_items, num_workers)` from `std.algorithm.functional` to distribute work across threads — the closure must use `capturing` (not `unified {mut}`): `fn worker(i: Int) capturing:`
+- Use `InlineArray[T, N]` (from `std.collections`) + `comptime for` to replace hand-numbered variables (e.g. `acc0`–`acc3`). The compiler flattens comptime-indexed `InlineArray` elements into registers, producing identical machine code to manual variables — but the code scales when you change tile sizes like MR/NR/KU
 
 ## Development
 

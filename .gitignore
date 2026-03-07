@@ -4,3 +4,4 @@ __pycache__/
 *.o
 *.so
 bench_matmul
+main
