@@ -1,4 +1,4 @@
-from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_unrolled, matmul_comptime
+from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_comptime
 from matrix import Matrix
 import std.benchmark
 from std.time import perf_counter_ns
@@ -17,7 +17,7 @@ fn fill(mut m: Matrix, seed: Int):
 
 fn main() raises:
     var t_start = perf_counter_ns()
-    print("=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs unrolled vs comptime (Qwen 2.5 VL 3B shapes) ===\n")
+    print("=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs comptime (Qwen 2.5 VL 3B shapes) ===\n")
 
     # ---- 1x11008x2048 (single-token decode) ---------------------------------
 
@@ -78,15 +78,6 @@ fn main() raises:
         fill(a, 17)
         fill(b, 13)
         matmul_packed(c, a, b)
-
-    @parameter
-    fn bench_decode_unrolled():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_unrolled(c, a, b)
 
     @parameter
     fn bench_decode_comptime():
@@ -159,16 +150,6 @@ fn main() raises:
         "GFLOPS",
     )
 
-    var r_unrolled_1 = std.benchmark.run[bench_decode_unrolled]()
-    var s_unrolled_1 = r_unrolled_1.mean("s")
-    print(
-        "  unrolled:",
-        r_unrolled_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_unrolled_1),
-        "GFLOPS",
-    )
-
     var r_comptime_1 = std.benchmark.run[bench_decode_comptime]()
     var s_comptime_1 = r_comptime_1.mean("s")
     print(
@@ -184,9 +165,7 @@ fn main() raises:
     print("  speedup (naive/parallel)   :", s_naive_1 / s_par_1, "x")
     print("  speedup (naive/regblk)     :", s_naive_1 / s_regblk_1, "x")
     print("  speedup (naive/packed)     :", s_naive_1 / s_packed_1, "x")
-    print("  speedup (naive/unrolled)   :", s_naive_1 / s_unrolled_1, "x")
-    print("  speedup (naive/comptime)   :", s_naive_1 / s_comptime_1, "x")
-    print("  speedup (unrolled/comptime):", s_unrolled_1 / s_comptime_1, "x\n")
+    print("  speedup (naive/comptime)   :", s_naive_1 / s_comptime_1, "x\n")
 
     # ---- 96x11008x2048 (prefill batch) --------------------------------------
 
@@ -247,15 +226,6 @@ fn main() raises:
         fill(a, 17)
         fill(b, 13)
         matmul_packed(c, a, b)
-
-    @parameter
-    fn bench_prefill_unrolled():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_unrolled(c, a, b)
 
     @parameter
     fn bench_prefill_comptime():
@@ -328,16 +298,6 @@ fn main() raises:
         "GFLOPS",
     )
 
-    var r_unrolled_2 = std.benchmark.run[bench_prefill_unrolled]()
-    var s_unrolled_2 = r_unrolled_2.mean("s")
-    print(
-        "  unrolled:",
-        r_unrolled_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_unrolled_2),
-        "GFLOPS",
-    )
-
     var r_comptime_2 = std.benchmark.run[bench_prefill_comptime]()
     var s_comptime_2 = r_comptime_2.mean("s")
     print(
@@ -353,9 +313,7 @@ fn main() raises:
     print("  speedup (naive/parallel)   :", s_naive_2 / s_par_2, "x")
     print("  speedup (naive/regblk)     :", s_naive_2 / s_regblk_2, "x")
     print("  speedup (naive/packed)     :", s_naive_2 / s_packed_2, "x")
-    print("  speedup (naive/unrolled)   :", s_naive_2 / s_unrolled_2, "x")
-    print("  speedup (naive/comptime)   :", s_naive_2 / s_comptime_2, "x")
-    print("  speedup (unrolled/comptime):", s_unrolled_2 / s_comptime_2, "x\n")
+    print("  speedup (naive/comptime)   :", s_naive_2 / s_comptime_2, "x\n")
 
     # ---- full reports --------------------------------------------------------
 
@@ -384,10 +342,6 @@ fn main() raises:
     r_packed_1.print()
     print("\n96x11008x2048 packed:")
     r_packed_2.print()
-    print("\n1x11008x2048 unrolled:")
-    r_unrolled_1.print()
-    print("\n96x11008x2048 unrolled:")
-    r_unrolled_2.print()
     print("\n1x11008x2048 comptime:")
     r_comptime_1.print()
     print("\n96x11008x2048 comptime:")

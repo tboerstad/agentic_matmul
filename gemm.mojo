@@ -424,189 +424,6 @@ fn matmul_packed[
     parallelize[process_i_tile](num_i_tiles, num_physical_cores())
 
 
-fn matmul_unrolled[
-    dtype: DType = DType.float64, *, transpose_b: Bool = False
-](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # Computes C = A * op(B)  —  cache-aware GOTO-style GEMM.
-    #
-    # Complete redesign vs previous kernels.  Two fundamental changes:
-    #
-    #   1. Parallelize over j-tiles (N-dimension) instead of i-tiles (M-dimension).
-    #      With M=96/TILE=32 we only got 3 i-tiles across 4 cores (one idle).
-    #      With N=11008/TILE=64 we get 172 j-tiles — perfect load balance.
-    #      For decode (M=1), this turns 1-thread into 4-thread.
-    #
-    #   2. j→k→i loop order (vs old k→j→i).  For each j-tile:
-    #      - C panel = M×TILE_N×8 = 48KB — fits L1, loaded/stored ONCE total
-    #      - B chunk per k-tile = TILE_K×TILE_N×8 = 128KB — fits L2
-    #      - B chunk reused across all M/MR = 24 i-blocks
-    #      Old order swept all 11008 B-columns per k-tile (22MB — blew caches)
-    #      and C (8.5MB) couldn't stay cached between k-tiles.
-    comptime TILE_N = 64    # j-tile: C panel = M*64*8 fits L1
-    comptime TILE_K = 256   # k-tile: B chunk = 256*64*8 = 128KB fits L2
-    comptime NELTS = simd_width_of[dtype]()
-    comptime MR = 4         # rows of C per micro-kernel
-    comptime NR = 2         # SIMD vectors of C columns per micro-kernel
-    comptime KU = 4         # k-loop unroll factor
-
-    var m = a.rows
-    var n = c.cols
-    var k = a.cols
-
-    var c_ptr = c.data.unsafe_ptr()
-    var b_ptr = b.data.unsafe_ptr()
-    var a_ptr = a.data.unsafe_ptr()
-
-    # Zero out C
-    for idx in range(m * n):
-        c.store(idx, Scalar[dtype](0))
-
-    var num_j_tiles = (n + TILE_N - 1) // TILE_N
-
-    fn process_j_tile(j_tile_idx: Int) capturing:
-        var j0 = j_tile_idx * TILE_N
-        var j_end = j0 + TILE_N
-        if j_end > n:
-            j_end = n
-        var tile_n = j_end - j0
-
-        # j→k→i order: C panel stays in L1 across all k-tiles
-        for p0 in range(0, k, TILE_K):
-            var p_end = p0 + TILE_K
-            if p_end > k:
-                p_end = k
-            var tile_k = p_end - p0
-
-            comptime if transpose_b:
-                for i in range(m):
-                    for p in range(p0, p_end):
-                        var a_val = a_ptr[i * k + p]
-                        for j in range(j0, j_end):
-                            var idx = i * n + j
-                            c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
-            else:
-                # Process all rows in MR-sized blocks
-                var i = 0
-                while i + MR <= m:
-                    # Process NR SIMD vectors at a time
-                    var j = 0
-                    while j + NR * NELTS <= tile_n:
-                        # Load MR×NR C accumulators (from L1 — C panel is warm)
-                        var acc = InlineArray[SIMD[dtype, NELTS], MR * NR](
-                            fill=SIMD[dtype, NELTS](0)
-                        )
-                        comptime for mr in range(MR):
-                            comptime for nr in range(NR):
-                                acc[mr * NR + nr] = (
-                                    c_ptr + (i + mr) * n + j0
-                                ).load[width=NELTS](offset=j + nr * NELTS)
-
-                        # K-unrolled accumulation
-                        var pk = 0
-                        var pk_end = tile_k - (tile_k % KU)
-                        while pk < pk_end:
-                            comptime for ku in range(KU):
-                                var p = p0 + pk + ku
-                                var a_vals = InlineArray[Scalar[dtype], MR](
-                                    fill=Scalar[dtype](0)
-                                )
-                                comptime for mr in range(MR):
-                                    a_vals[mr] = a_ptr[(i + mr) * k + p]
-                                comptime for nr in range(NR):
-                                    var bv = (b_ptr + p * n + j0).load[
-                                        width=NELTS
-                                    ](offset=j + nr * NELTS)
-                                    comptime for mr in range(MR):
-                                        acc[mr * NR + nr] += a_vals[mr] * bv
-                            pk += KU
-
-                        # Handle remaining k-values
-                        while pk < tile_k:
-                            var p = p0 + pk
-                            var a_vals = InlineArray[Scalar[dtype], MR](
-                                fill=Scalar[dtype](0)
-                            )
-                            comptime for mr in range(MR):
-                                a_vals[mr] = a_ptr[(i + mr) * k + p]
-                            comptime for nr in range(NR):
-                                var bv = (b_ptr + p * n + j0).load[
-                                    width=NELTS
-                                ](offset=j + nr * NELTS)
-                                comptime for mr in range(MR):
-                                    acc[mr * NR + nr] += a_vals[mr] * bv
-                            pk += 1
-
-                        # Store accumulators back
-                        comptime for mr in range(MR):
-                            comptime for nr in range(NR):
-                                (c_ptr + (i + mr) * n + j0).store(
-                                    offset=j + nr * NELTS,
-                                    val=acc[mr * NR + nr],
-                                )
-                        j += NR * NELTS
-
-                    # Handle remaining columns with single-vector path
-                    while j + NELTS <= tile_n:
-                        var acc = InlineArray[SIMD[dtype, NELTS], MR](
-                            fill=SIMD[dtype, NELTS](0)
-                        )
-                        comptime for mr in range(MR):
-                            acc[mr] = (c_ptr + (i + mr) * n + j0).load[
-                                width=NELTS
-                            ](offset=j)
-                        for pk in range(tile_k):
-                            var p = p0 + pk
-                            var bv = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
-                            comptime for mr in range(MR):
-                                acc[mr] += a_ptr[(i + mr) * k + p] * bv
-                        comptime for mr in range(MR):
-                            (c_ptr + (i + mr) * n + j0).store(
-                                offset=j, val=acc[mr]
-                            )
-                        j += NELTS
-
-                    # Scalar remainder for j
-                    while j < tile_n:
-                        var acc = InlineArray[Scalar[dtype], MR](
-                            fill=Scalar[dtype](0)
-                        )
-                        comptime for mr in range(MR):
-                            acc[mr] = (c_ptr + (i + mr) * n + j0)[j]
-                        for pk in range(tile_k):
-                            var p = p0 + pk
-                            var b_val = b_ptr[p * n + j0 + j]
-                            comptime for mr in range(MR):
-                                acc[mr] += a_ptr[(i + mr) * k + p] * b_val
-                        comptime for mr in range(MR):
-                            (c_ptr + (i + mr) * n + j0)[j] = acc[mr]
-                        j += 1
-
-                    i += MR
-
-                # Handle remaining rows (< MR)
-                while i < m:
-                    var c_row = c_ptr + i * n + j0
-                    var j = 0
-                    while j + NELTS <= tile_n:
-                        var acc = c_row.load[width=NELTS](offset=j)
-                        for pk in range(tile_k):
-                            var p = p0 + pk
-                            var bv = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
-                            acc += a_ptr[i * k + p] * bv
-                        c_row.store(offset=j, val=acc)
-                        j += NELTS
-                    while j < tile_n:
-                        var acc = c_row[j]
-                        for pk in range(tile_k):
-                            var p = p0 + pk
-                            acc += a_ptr[i * k + p] * b_ptr[p * n + j0 + j]
-                        c_row[j] = acc
-                        j += 1
-                    i += 1
-
-    parallelize[process_j_tile](num_j_tiles, num_physical_cores())
-
-
 @always_inline
 fn _prefetch_r[dtype: DType](ptr: UnsafePointer[Scalar[dtype], ...], offset: Int):
     """Prefetch for read, low temporal locality (L2), data cache."""
@@ -620,22 +437,18 @@ fn matmul_comptime[
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * op(B)  —  compile-time optimized GOTO-style GEMM.
     #
+    # Key optimizations over matmul_packed:
+    #   1. Parallelize over j-tiles (N-dimension) instead of i-tiles (M-dimension)
+    #      for better load balance (172 j-tiles vs 3 i-tiles across 4 cores)
+    #   2. j→k→i loop order: C panel stays in L1 across all k-tiles
+    #   3. MR×NR register blocking with comptime-unrolled k-loop (KU=8)
+    #   4. Software prefetching to hide B-load latency
+    #
     # Uses Mojo's compile-time metaprogramming for the micro-kernel:
     #   - comptime for: generates MR×NR×KU unrolled FMA code at compile time
-    #   - InlineArray[SIMD]: compile-time-sized accumulator array that LLVM
-    #     register-promotes (all indices are comptime constants)
-    #   - InlineArray[Scalar]: A-value staging array, also register-promoted
-    #   - comptime constants: all tile/block sizes resolved at compile time
-    #   - comptime if: zero-cost transpose dispatch
+    #   - InlineArray[SIMD]: accumulator array that LLVM register-promotes
     #   - LLVM prefetch intrinsic: software prefetching for B data
     #   - vectorize: SIMD zero-fill with automatic remainder handling
-    #
-    # Algorithmic improvements over matmul_unrolled:
-    #   - MR=6 (vs 4): 50% more B-vector reuse per micro-kernel invocation
-    #   - KU=8 (vs 4): 2× less k-loop overhead, better ILP
-    #   - Software prefetching: hide B-load latency by prefetching next k-step
-    #   - Vectorized C zero-fill (vs scalar loop)
-    #   - Cleaner code: 6×2×8 unrolled micro-kernel in ~30 lines vs ~200 manual
     comptime NELTS = simd_width_of[dtype]()
     comptime MR = 6          # rows of C per micro-kernel (6 > 4: more B-reuse)
     comptime NR = 2          # SIMD vectors of C cols per micro-kernel
