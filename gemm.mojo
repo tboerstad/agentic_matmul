@@ -446,6 +446,195 @@ fn matmul_packed[
     parallelize[process_i_tile](num_i_tiles, num_physical_cores())
 
 
+fn matmul_blis[
+    dtype: DType = DType.float64, *, transpose_b: Bool = False
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # Wide micro-kernel GEMM:
+    #   Key improvement over matmul_packed: processes 2 SIMD vectors of C
+    #   simultaneously with MR=6 rows, yielding 12 register accumulators.
+    #   Each B vector pair is reused across 6 rows (vs 4 in packed), and
+    #   each A scalar drives 2 FMAs (vs 1). This nearly doubles the
+    #   compute-to-load ratio: 12 FMAs per 8 loads vs 4 FMAs per 5 loads.
+    #   TILE_I=24 gives perfect 4-core utilization (96/24=4 tiles).
+    #   24/6=4 MR blocks per tile with zero remainder rows.
+    comptime TILE_I = 24
+    comptime TILE = 32
+    comptime NELTS = simd_width_of[dtype]()
+    comptime MR = 6          # rows of C per micro-kernel invocation
+    comptime NR_VECS = 2     # SIMD vectors wide
+    comptime NR = NR_VECS * NELTS
+
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+
+    var c_ptr = c.data.unsafe_ptr()
+    var b_ptr = b.data.unsafe_ptr()
+    var a_ptr = a.data.unsafe_ptr()
+
+    # Zero out C
+    for idx in range(m * n):
+        c.store(idx, Scalar[dtype](0))
+
+    var num_i_tiles = (m + TILE_I - 1) // TILE_I
+
+    fn process_i_tile(tile_idx: Int) capturing:
+        var i0 = tile_idx * TILE_I
+        var i_end = i0 + TILE_I
+        if i_end > m:
+            i_end = m
+
+        for p0 in range(0, k, TILE):
+            var p_end = p0 + TILE
+            if p_end > k:
+                p_end = k
+            var tile_k = p_end - p0
+            for j0 in range(0, n, TILE):
+                var j_end = j0 + TILE
+                if j_end > n:
+                    j_end = n
+                var tile_n = j_end - j0
+
+                comptime if transpose_b:
+                    for ii in range(i0, i_end):
+                        for p in range(p0, p_end):
+                            var a_val = a_ptr[ii * k + p]
+                            for j in range(j0, j_end):
+                                var idx = ii * n + j
+                                c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+                else:
+                    # MR=6 × NR=2*NELTS wide micro-kernel with register accumulators
+                    var i = i0
+                    while i + MR <= i_end:
+                        var j = 0
+                        while j + NR <= tile_n:
+                            var c0 = c_ptr + i * n + j0 + j
+                            var c1 = c_ptr + (i + 1) * n + j0 + j
+                            var c2 = c_ptr + (i + 2) * n + j0 + j
+                            var c3 = c_ptr + (i + 3) * n + j0 + j
+                            var c4 = c_ptr + (i + 4) * n + j0 + j
+                            var c5 = c_ptr + (i + 5) * n + j0 + j
+
+                            # Load 12 SIMD accumulators (6 rows × 2 vectors)
+                            var acc00 = c0.load[width=NELTS](offset=0)
+                            var acc01 = c0.load[width=NELTS](offset=NELTS)
+                            var acc10 = c1.load[width=NELTS](offset=0)
+                            var acc11 = c1.load[width=NELTS](offset=NELTS)
+                            var acc20 = c2.load[width=NELTS](offset=0)
+                            var acc21 = c2.load[width=NELTS](offset=NELTS)
+                            var acc30 = c3.load[width=NELTS](offset=0)
+                            var acc31 = c3.load[width=NELTS](offset=NELTS)
+                            var acc40 = c4.load[width=NELTS](offset=0)
+                            var acc41 = c4.load[width=NELTS](offset=NELTS)
+                            var acc50 = c5.load[width=NELTS](offset=0)
+                            var acc51 = c5.load[width=NELTS](offset=NELTS)
+
+                            for pk in range(tile_k):
+                                var p = p0 + pk
+                                var b_row = b_ptr + p * n + j0 + j
+                                var b0 = b_row.load[width=NELTS](offset=0)
+                                var b1 = b_row.load[width=NELTS](offset=NELTS)
+
+                                var a0 = a_ptr[i * k + p]
+                                var a1 = a_ptr[(i + 1) * k + p]
+                                var a2 = a_ptr[(i + 2) * k + p]
+                                var a3 = a_ptr[(i + 3) * k + p]
+                                var a4 = a_ptr[(i + 4) * k + p]
+                                var a5 = a_ptr[(i + 5) * k + p]
+
+                                acc00 += a0 * b0
+                                acc01 += a0 * b1
+                                acc10 += a1 * b0
+                                acc11 += a1 * b1
+                                acc20 += a2 * b0
+                                acc21 += a2 * b1
+                                acc30 += a3 * b0
+                                acc31 += a3 * b1
+                                acc40 += a4 * b0
+                                acc41 += a4 * b1
+                                acc50 += a5 * b0
+                                acc51 += a5 * b1
+
+                            c0.store(offset=0, val=acc00)
+                            c0.store(offset=NELTS, val=acc01)
+                            c1.store(offset=0, val=acc10)
+                            c1.store(offset=NELTS, val=acc11)
+                            c2.store(offset=0, val=acc20)
+                            c2.store(offset=NELTS, val=acc21)
+                            c3.store(offset=0, val=acc30)
+                            c3.store(offset=NELTS, val=acc31)
+                            c4.store(offset=0, val=acc40)
+                            c4.store(offset=NELTS, val=acc41)
+                            c5.store(offset=0, val=acc50)
+                            c5.store(offset=NELTS, val=acc51)
+                            j += NR
+
+                        # Remainder j with single SIMD vector, still MR rows
+                        while j + NELTS <= tile_n:
+                            var c0 = c_ptr + i * n + j0 + j
+                            var c1 = c_ptr + (i + 1) * n + j0 + j
+                            var c2 = c_ptr + (i + 2) * n + j0 + j
+                            var c3 = c_ptr + (i + 3) * n + j0 + j
+                            var c4 = c_ptr + (i + 4) * n + j0 + j
+                            var c5 = c_ptr + (i + 5) * n + j0 + j
+                            var acc0 = c0.load[width=NELTS]()
+                            var acc1 = c1.load[width=NELTS]()
+                            var acc2 = c2.load[width=NELTS]()
+                            var acc3 = c3.load[width=NELTS]()
+                            var acc4 = c4.load[width=NELTS]()
+                            var acc5 = c5.load[width=NELTS]()
+                            for pk in range(tile_k):
+                                var p = p0 + pk
+                                var b_vec = (b_ptr + p * n + j0 + j).load[width=NELTS]()
+                                acc0 += a_ptr[i * k + p] * b_vec
+                                acc1 += a_ptr[(i + 1) * k + p] * b_vec
+                                acc2 += a_ptr[(i + 2) * k + p] * b_vec
+                                acc3 += a_ptr[(i + 3) * k + p] * b_vec
+                                acc4 += a_ptr[(i + 4) * k + p] * b_vec
+                                acc5 += a_ptr[(i + 5) * k + p] * b_vec
+                            c0.store(val=acc0)
+                            c1.store(val=acc1)
+                            c2.store(val=acc2)
+                            c3.store(val=acc3)
+                            c4.store(val=acc4)
+                            c5.store(val=acc5)
+                            j += NELTS
+
+                        while j < tile_n:
+                            for ri in range(MR):
+                                var acc = c_ptr[(i + ri) * n + j0 + j]
+                                for pk in range(tile_k):
+                                    var p = p0 + pk
+                                    acc += a_ptr[(i + ri) * k + p] * b_ptr[p * n + j0 + j]
+                                c_ptr[(i + ri) * n + j0 + j] = acc
+                            j += 1
+
+                        i += MR
+
+                    # Handle remaining rows (< MR) with single-row accumulation
+                    while i < i_end:
+                        var c_row = c_ptr + i * n + j0
+                        var j = 0
+                        while j + NELTS <= tile_n:
+                            var acc = c_row.load[width=NELTS](offset=j)
+                            for pk in range(tile_k):
+                                var p = p0 + pk
+                                var b_vec = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
+                                acc += a_ptr[i * k + p] * b_vec
+                            c_row.store(offset=j, val=acc)
+                            j += NELTS
+                        while j < tile_n:
+                            var acc = c_row[j]
+                            for pk in range(tile_k):
+                                var p = p0 + pk
+                                acc += a_ptr[i * k + p] * b_ptr[p * n + j0 + j]
+                            c_row[j] = acc
+                            j += 1
+                        i += 1
+
+    parallelize[process_i_tile](num_i_tiles, num_physical_cores())
+
+
 # Default matmul points to the tiled version
 fn matmul[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
