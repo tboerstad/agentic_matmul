@@ -30,15 +30,24 @@
 
 ## Creating a Pull Request
 
-To create a PR link without needing `gh` CLI, use the GitHub compare URL format:
+Use the GitHub REST API with `$GH_TOKEN` (available in the environment) to create PRs directly:
+
+```bash
+curl -s -X POST "https://api.github.com/repos/tboerstad/agentic_matmul/pulls" \
+  -H "Accept: application/vnd.github+json" \
+  -H "Authorization: Bearer $GH_TOKEN" \
+  -d '{
+  "title": "PR title here",
+  "head": "claude/your-branch-name",
+  "base": "main",
+  "body": "## Summary\n- Description of changes\n\n## Test plan\n- [ ] Testing steps"
+}'
+```
+
+The response JSON includes `html_url` — provide that link to the user.
+
+For a quick comparison link (no PR creation), use:
 
 ```
-https://github.com/[owner]/[repo]/compare/[base-branch]...[feature-branch]
+https://github.com/tboerstad/agentic_matmul/compare/main...claude/your-branch-name
 ```
-
-Example:
-```
-https://github.com/tboerstad/agentic_matmul/compare/main...claude/update-a-matrix-constants-b1TaV
-```
-
-This link allows you to review all changes between branches and create a PR directly from GitHub.
