@@ -195,6 +195,119 @@ fn matmul_parallel[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     parallelize[process_i_tile](num_i_tiles, num_physical_cores())
 
 
+fn matmul_register_blocked[
+    dtype: DType = DType.float64, *, transpose_b: Bool = False
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # Computes C = A * op(B)  —  tiled + SIMD + parallel + register-blocked.
+    #
+    # Key optimization over matmul_parallel:
+    #   Register blocking (micro-kernel): processes MR=4 rows of C per inner
+    #   loop iteration.  Each B vector loaded from cache is reused across all
+    #   MR rows, cutting B-side memory traffic by 4x and improving the
+    #   compute-to-load ratio of the inner loop.
+    comptime TILE = 32
+    comptime NELTS = simd_width_of[dtype]()
+    comptime MR = 4  # rows of C per micro-kernel invocation
+
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+
+    var c_ptr = c.data.unsafe_ptr()
+    var b_ptr = b.data.unsafe_ptr()
+    var a_ptr = a.data.unsafe_ptr()
+
+    # Zero out C (tiles accumulate with +=)
+    for idx in range(m * n):
+        c.store(idx, Scalar[dtype](0))
+
+    var num_i_tiles = (m + TILE - 1) // TILE
+
+    fn process_i_tile(tile_idx: Int) capturing:
+        var i0 = tile_idx * TILE
+        var i_end = i0 + TILE
+        if i_end > m:
+            i_end = m
+
+        for p0 in range(0, k, TILE):
+            var p_end = p0 + TILE
+            if p_end > k:
+                p_end = k
+            for j0 in range(0, n, TILE):
+                var j_end = j0 + TILE
+                if j_end > n:
+                    j_end = n
+                var tile_n = j_end - j0
+
+                comptime if transpose_b:
+                    # transpose_b path: no SIMD (non-contiguous B access)
+                    for i in range(i0, i_end):
+                        for p in range(p0, p_end):
+                            var a_val = a_ptr[i * k + p]
+                            for j in range(j0, j_end):
+                                var idx = i * n + j
+                                c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+                else:
+                    # Register-blocked: process MR rows at a time
+                    var i = i0
+                    while i + MR <= i_end:
+                        for p in range(p0, p_end):
+                            var a0 = a_ptr[i * k + p]
+                            var a1 = a_ptr[(i + 1) * k + p]
+                            var a2 = a_ptr[(i + 2) * k + p]
+                            var a3 = a_ptr[(i + 3) * k + p]
+                            var b_row = b_ptr + p * n + j0
+                            var c_row0 = c_ptr + i * n + j0
+                            var c_row1 = c_ptr + (i + 1) * n + j0
+                            var c_row2 = c_ptr + (i + 2) * n + j0
+                            var c_row3 = c_ptr + (i + 3) * n + j0
+
+                            fn fma_mr[width: Int](j: Int) unified {mut}:
+                                var b_vec = b_row.load[width=width](offset=j)
+                                c_row0.store(
+                                    offset=j,
+                                    val=c_row0.load[width=width](offset=j)
+                                    + a0 * b_vec,
+                                )
+                                c_row1.store(
+                                    offset=j,
+                                    val=c_row1.load[width=width](offset=j)
+                                    + a1 * b_vec,
+                                )
+                                c_row2.store(
+                                    offset=j,
+                                    val=c_row2.load[width=width](offset=j)
+                                    + a2 * b_vec,
+                                )
+                                c_row3.store(
+                                    offset=j,
+                                    val=c_row3.load[width=width](offset=j)
+                                    + a3 * b_vec,
+                                )
+
+                            vectorize[NELTS](tile_n, fma_mr)
+                        i += MR
+
+                    # Handle remaining rows (< MR) with single-row SIMD
+                    while i < i_end:
+                        for p in range(p0, p_end):
+                            var a_val = a_ptr[i * k + p]
+                            var c_row = c_ptr + i * n + j0
+                            var b_row = b_ptr + p * n + j0
+
+                            fn fma[width: Int](j: Int) unified {mut}:
+                                var c_vec = c_row.load[width=width](offset=j)
+                                var b_vec = b_row.load[width=width](offset=j)
+                                c_row.store(
+                                    offset=j, val=c_vec + a_val * b_vec
+                                )
+
+                            vectorize[NELTS](tile_n, fma)
+                        i += 1
+
+    parallelize[process_i_tile](num_i_tiles, num_physical_cores())
+
+
 # Default matmul points to the tiled version
 fn matmul[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
