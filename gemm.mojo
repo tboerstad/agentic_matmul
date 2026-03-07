@@ -1,4 +1,5 @@
 from matrix import Matrix
+from std.algorithm.functional import vectorize
 from std.sys import simd_width_of
 
 
@@ -74,17 +75,17 @@ fn matmul_simd[dtype: DType = DType.float64, *, transpose_b: Bool = False](
 ):
     # Computes C = A * op(B)  —  tiled + SIMD vectorized version.
     #
-    # Based on matmul_tiled with an additional optimization:
-    #   - The innermost j-loop is vectorized using SIMD registers so we
-    #     process NELTS columns per iteration instead of one at a time.
-    #   - A scalar a_val is broadcast and multiplied against a SIMD vector
-    #     loaded from B/C, amortizing the loop overhead.
+    # Uses Mojo's `vectorize` to auto-vectorize the innermost j-loop,
+    # handling SIMD-width chunks and scalar remainders automatically.
     comptime TILE = 32
     comptime NELTS = simd_width_of[dtype]()
 
     var m = a.rows
     var n = c.cols
     var k = a.cols
+
+    var c_ptr = c.data.unsafe_ptr()
+    var b_ptr = b.data.unsafe_ptr()
 
     # Zero out C (tiles accumulate with +=)
     for idx in range(m * n):
@@ -103,11 +104,10 @@ fn matmul_simd[dtype: DType = DType.float64, *, transpose_b: Bool = False](
                 var j_end = j0 + TILE
                 if j_end > n:
                     j_end = n
+                var tile_n = j_end - j0
 
                 # Micro-kernel with SIMD vectorization on j dimension
                 comptime if transpose_b:
-                    # transpose_b: B is accessed as b[j, p], not contiguous in j
-                    # No SIMD benefit here, fall back to scalar like tiled
                     for i in range(i0, i_end):
                         for p in range(p0, p_end):
                             var a_val = a[i, p]
@@ -117,22 +117,15 @@ fn matmul_simd[dtype: DType = DType.float64, *, transpose_b: Bool = False](
                     for i in range(i0, i_end):
                         for p in range(p0, p_end):
                             var a_val = a[i, p]
-                            var a_vec = SIMD[dtype, NELTS](a_val)
+                            var c_row = c_ptr + i * n + j0
+                            var b_row = b_ptr + p * n + j0
 
-                            # SIMD-vectorized inner loop
-                            var j = j0
-                            while j + NELTS <= j_end:
-                                var c_idx = i * n + j
-                                var b_idx = p * n + j
-                                var c_vec = c.simd_load[NELTS](c_idx)
-                                var b_vec = b.simd_load[NELTS](b_idx)
-                                c.simd_store[NELTS](c_idx, c_vec + a_vec * b_vec)
-                                j += NELTS
+                            fn fma[width: Int](j: Int) unified {mut}:
+                                var c_vec = c_row.load[width=width](offset=j)
+                                var b_vec = b_row.load[width=width](offset=j)
+                                c_row.store(offset=j, val=c_vec + a_val * b_vec)
 
-                            # Scalar remainder
-                            while j < j_end:
-                                c[i, j] = c[i, j] + a_val * b[p, j]
-                                j += 1
+                            vectorize[NELTS](tile_n, fma)
 
 
 # Default matmul points to the tiled version
