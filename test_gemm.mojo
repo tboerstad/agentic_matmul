@@ -1,7 +1,7 @@
 from std.testing import assert_almost_equal, TestSuite
 
 
-fn matmul[*, transpose_b: Bool = False](
+fn matmul(
     mut c: List[Float64],
     a: List[Float64],
     b: List[Float64],
@@ -14,14 +14,7 @@ fn matmul[*, transpose_b: Bool = False](
             var dot: Float64 = 0.0
             for p in range(k):
                 var a_val = a[i * k + p]
-
-                var b_val: Float64
-
-                comptime if transpose_b:
-                    b_val = b[j * k + p]
-                else:
-                    b_val = b[p * n + j]
-
+                var b_val = b[p * n + j]
                 dot += a_val * b_val
 
             c[i * n + j] = dot
@@ -37,19 +30,6 @@ def test_basic_2x2() raises:
     assert_almost_equal(c[1], 8.0)
     assert_almost_equal(c[2], 31.0)
     assert_almost_equal(c[3], 36.0)
-
-
-# trans_b=True: op(B) = B^T
-# A = identity, B = [[1, 2], [3, 4]] -> B^T = [[1, 3], [2, 4]]
-def test_trans_b() raises:
-    var a: List[Float64] = [1.0, 0.0, 0.0, 1.0]  # identity
-    var b: List[Float64] = [1.0, 2.0, 3.0, 4.0]
-    var c: List[Float64] = [0.0, 0.0, 0.0, 0.0]
-    matmul[transpose_b=True](c, a, b, m=2, n=2, k=2)
-    assert_almost_equal(c[0], 1.0)
-    assert_almost_equal(c[1], 3.0)
-    assert_almost_equal(c[2], 2.0)
-    assert_almost_equal(c[3], 4.0)
 
 
 # 1x1 degenerate: scalar multiply
