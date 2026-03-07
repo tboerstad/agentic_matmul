@@ -30,10 +30,12 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
 | NumPy/OpenBLAS (multi-thread)   | 5.399     | 5.194    | 8.35          | 8.68          | 0.76×   |
 | NumPy/OpenBLAS (1 thread)       | 5.790     | 5.204    | 7.79          | 8.66          | 0.76×   |
 | SciPy dgemm (OpenBLAS64)        | 12.550    | 11.946   | 3.59          | 3.77          | 0.33×   |
-| Mojo Packed (current best)      | 64.787    | ~63.8    | 0.70          | ~0.71         | 0.06×   |
-| Mojo SIMD                       | 79.662    | ~79.4    | 0.57          | ~0.57         | 0.05×   |
-| Mojo Tiled                      | 80.221    | ~78.2    | 0.56          | ~0.58         | 0.05×   |
-| Mojo Naive                      | 299.419   | ~298.1   | 0.15          | ~0.15         | 0.01×   |
+| **Mojo Optimized (current best)**| 56.680   | ~56.2    | **0.80**      | **~0.80**     | 0.07×   |
+| Mojo Comptime                   | 60.188    | ~59.6    | 0.75          | ~0.76         | 0.07×   |
+| Mojo Packed                     | 65.938    | ~63.8    | 0.68          | ~0.71         | 0.06×   |
+| Mojo SIMD                       | 61.920    | ~61.5    | 0.73          | ~0.73         | 0.06×   |
+| Mojo Tiled                      | 61.280    | ~60.5    | 0.74          | ~0.74         | 0.07×   |
+| Mojo Naive                      | 241.892   | ~241.0   | 0.19          | ~0.19         | 0.02×   |
 
 **SOTA Winner (Decode): Intel MKL — 11.37 GFLOPS peak (25% of theoretical single-core peak)**
 
@@ -45,10 +47,13 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
 | NumPy/OpenBLAS (multi-thread)   | 25.713    | 23.809   | 168.34        | 181.80        | 0.97×   |
 | SciPy dgemm (OpenBLAS64)        | 33.239    | 31.168   | 130.22        | 138.88        | 0.74×   |
 | Intel MKL dgemm (4 threads)     | 38.689    | 37.239   | 111.88        | 116.24        | 0.62×   |
-| Mojo Packed (current best)      | 121.530   | ~113.3   | 35.62         | ~38.19        | 0.20×   |
-| Mojo SIMD                       | 483.718   | ~480.3   | 8.95          | ~9.01         | 0.05×   |
-| Mojo Tiled                      | 1242.210  | ~1242.2  | 3.48          | ~3.48         | 0.02×   |
-| Mojo Naive                      | 23767.414 | ~23767   | 0.18          | ~0.18         | 0.001×  |
+| **Mojo Optimized (current best)**| 100.097  | ~99.3    | **43.24**     | **~43.6**     | 0.23×   |
+| Mojo Comptime                   | 105.470   | ~104.5   | 41.04         | ~41.4         | 0.22×   |
+| Mojo Packed                     | 107.069   | ~105.0   | 40.43         | ~41.2         | 0.22×   |
+| Mojo Reg-Blocked                | 185.517   | ~184.0   | 23.33         | ~23.5         | 0.13×   |
+| Mojo SIMD                       | 523.106   | ~521.0   | 8.27          | ~8.31         | 0.04×   |
+| Mojo Tiled                      | 1445.144  | ~1445.0  | 3.00          | ~3.00         | 0.02×   |
+| Mojo Naive                      | 18505.352 | ~18505   | 0.23          | ~0.23         | 0.001×  |
 
 **SOTA Winner (Prefill): NumPy/OpenBLAS — 186.86 GFLOPS peak (104% of theoretical 4-core peak!)**
 
@@ -64,11 +69,14 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
    showing excellent utilization of AVX-512 FMA units. This shape has enough work to amortize
    memory access and saturate the compute pipeline.
 
-3. **Mojo gap:** The current Mojo packed kernel reaches 35.6 GFLOPS on prefill (~5× slower than
-   SOTA) and 0.70 GFLOPS on decode (~16× slower). Remaining missing optimizations: prefetching,
-   and architecture-specific tuning.
+3. **Mojo gap:** The current Mojo optimized kernel reaches 43.2 GFLOPS on prefill (~4.3× slower
+   than SOTA) and 0.80 GFLOPS on decode (~14× slower). The optimized kernel uses B-panel packing
+   to eliminate TLB thrashing on B's 88KB row stride.
 
-4. **B-panel packing tried:** Packing B-matrix panels into contiguous buffers before the micro-kernel regressed performance (~0.67× on prefill) because M is too small (only 3 i-tiles) to amortize the packing overhead.
+4. **B-panel packing:** Packing B-matrix panels into contiguous buffers before the micro-kernel
+   now works (+5.4% over comptime on prefill) by using j-parallel structure where each thread
+   packs and computes its own j-tiles, avoiding the earlier regression from serial packing with
+   parallel i-blocks that had too much synchronization overhead.
 
 ## Libraries Tested
 
