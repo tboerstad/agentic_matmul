@@ -1,6 +1,6 @@
 from matrix import Matrix
-from std.algorithm.functional import vectorize
-from std.sys import simd_width_of
+from std.algorithm.functional import parallelize, vectorize
+from std.sys import num_physical_cores, simd_width_of
 
 
 fn matmul_naive[dtype: DType = DType.float64, *, transpose_b: Bool = False](
@@ -126,6 +126,73 @@ fn matmul_simd[dtype: DType = DType.float64, *, transpose_b: Bool = False](
                                 c_row.store(offset=j, val=c_vec + a_val * b_vec)
 
                             vectorize[NELTS](tile_n, fma)
+
+
+fn matmul_parallel[dtype: DType = DType.float64, *, transpose_b: Bool = False](
+    mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
+):
+    # Computes C = A * op(B)  —  tiled + SIMD + multi-threaded version.
+    #
+    # Parallelizes the outer i-tile loop across CPU cores while keeping
+    # the SIMD-vectorized micro-kernel from matmul_simd. Each thread
+    # owns a disjoint set of row tiles so no synchronization is needed.
+    comptime TILE = 32
+    comptime NELTS = simd_width_of[dtype]()
+
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+
+    var c_ptr = c.data.unsafe_ptr()
+    var b_ptr = b.data.unsafe_ptr()
+    var a_ptr = a.data.unsafe_ptr()
+
+    # Zero out C (tiles accumulate with +=)
+    for idx in range(m * n):
+        c.store(idx, Scalar[dtype](0))
+
+    # Number of row tiles
+    var num_i_tiles = (m + TILE - 1) // TILE
+
+    fn process_i_tile(tile_idx: Int) capturing:
+        var i0 = tile_idx * TILE
+        var i_end = i0 + TILE
+        if i_end > m:
+            i_end = m
+
+        for p0 in range(0, k, TILE):
+            var p_end = p0 + TILE
+            if p_end > k:
+                p_end = k
+            for j0 in range(0, n, TILE):
+                var j_end = j0 + TILE
+                if j_end > n:
+                    j_end = n
+                var tile_n = j_end - j0
+
+                # Micro-kernel with SIMD vectorization on j dimension
+                comptime if transpose_b:
+                    for i in range(i0, i_end):
+                        for p in range(p0, p_end):
+                            var a_val = a_ptr[i * k + p]
+                            for j in range(j0, j_end):
+                                var idx = i * n + j
+                                c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+                else:
+                    for i in range(i0, i_end):
+                        for p in range(p0, p_end):
+                            var a_val = a_ptr[i * k + p]
+                            var c_row = c_ptr + i * n + j0
+                            var b_row = b_ptr + p * n + j0
+
+                            fn fma[width: Int](j: Int) unified {mut}:
+                                var c_vec = c_row.load[width=width](offset=j)
+                                var b_vec = b_row.load[width=width](offset=j)
+                                c_row.store(offset=j, val=c_vec + a_val * b_vec)
+
+                            vectorize[NELTS](tile_n, fma)
+
+    parallelize[process_i_tile](num_i_tiles, num_physical_cores())
 
 
 # Default matmul points to the tiled version

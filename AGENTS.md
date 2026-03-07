@@ -17,6 +17,7 @@
 - Inside a struct, reference its parameters with `Self.` prefix: `List[Scalar[Self.dtype]]`, not `List[Scalar[dtype]]`
 - Use `vectorize[simd_width](size, closure)` from `std.algorithm.functional` to auto-vectorize loops with automatic remainder handling — no manual SIMD + scalar tail loop needed
 - Closures passed to `vectorize` use the `unified {mut}` syntax: `fn name[width: Int](i: Int) unified {mut}:` — `unified` means it works in both parametric and runtime contexts, `{mut}` allows capturing and mutating enclosing variables
+- Use `parallelize[func](num_work_items, num_workers)` from `std.algorithm.functional` to distribute work across threads — the closure must use `capturing` (not `unified {mut}`): `fn worker(i: Int) capturing:`
 
 ## Development
 
