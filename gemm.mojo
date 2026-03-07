@@ -1,6 +1,7 @@
 from matrix import Matrix
 from std.algorithm.functional import parallelize, vectorize
 from std.collections import InlineArray
+from std.math import ceildiv
 from std.sys import num_physical_cores, simd_width_of
 from std.sys.intrinsics import llvm_intrinsic
 
@@ -643,7 +644,7 @@ fn _goto_gemv[
     var a_ptr = a.data.unsafe_ptr()
     var b_ptr = b.data.unsafe_ptr()
 
-    var num_j_tiles = (n + TILE_J - 1) // TILE_J
+    var num_j_tiles = ceildiv(n, TILE_J)
 
     fn process_gemv_tile(tile_idx: Int) capturing:
         var j0 = tile_idx * TILE_J
@@ -683,7 +684,7 @@ fn _goto_gemm[
     var a_ptr = a.data.unsafe_ptr()
     var b_ptr = b.data.unsafe_ptr()
 
-    var num_j_tiles = (n + TILE_N - 1) // TILE_N
+    var num_j_tiles = ceildiv(n, TILE_N)
 
     var bp_per_tile = NUM_LOCAL_PANELS * KC * NR + KU * NR
     var bp_total = num_j_tiles * bp_per_tile
@@ -694,7 +695,7 @@ fn _goto_gemm[
     fn process_j_tile(j_tile_idx: Int) capturing:
         var j0 = j_tile_idx * TILE_N
         var tile_n = min(TILE_N, n - j0)
-        var num_panels = (tile_n + NR - 1) // NR
+        var num_panels = ceildiv(tile_n, NR)
 
         var bp_tile = bp_buf + j_tile_idx * bp_per_tile
 
