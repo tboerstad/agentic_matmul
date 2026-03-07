@@ -43,9 +43,7 @@ fn matmul_tiled[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     var n = c.cols
     var k = a.cols
 
-    # Zero out C (tiles accumulate with +=)
-    for idx in range(m * n):
-        c.store(idx, Scalar[dtype](0))
+    _zero_fill[dtype](c)
 
     # Tile over all three dimensions
     for i0 in range(0, m, TILE):
@@ -90,9 +88,7 @@ fn matmul_simd[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     var c_ptr = c.data.unsafe_ptr()
     var b_ptr = b.data.unsafe_ptr()
 
-    # Zero out C (tiles accumulate with +=)
-    for idx in range(m * n):
-        c.store(idx, Scalar[dtype](0))
+    _zero_fill[dtype](c)
 
     # Tile over all three dimensions
     for i0 in range(0, m, TILE):
@@ -150,12 +146,10 @@ fn matmul_parallel[dtype: DType = DType.float64, *, transpose_b: Bool = False](
     var b_ptr = b.data.unsafe_ptr()
     var a_ptr = a.data.unsafe_ptr()
 
-    # Zero out C (tiles accumulate with +=)
-    for idx in range(m * n):
-        c.store(idx, Scalar[dtype](0))
+    _zero_fill[dtype](c)
 
     # Number of row tiles
-    var num_i_tiles = (m + TILE - 1) // TILE
+    var num_i_tiles = ceildiv(m, TILE)
 
     fn process_i_tile(tile_idx: Int) capturing:
         var i0 = tile_idx * TILE
@@ -175,12 +169,7 @@ fn matmul_parallel[dtype: DType = DType.float64, *, transpose_b: Bool = False](
 
                 # Micro-kernel with SIMD vectorization on j dimension
                 comptime if transpose_b:
-                    for i in range(i0, i_end):
-                        for p in range(p0, p_end):
-                            var a_val = a_ptr[i * k + p]
-                            for j in range(j0, j_end):
-                                var idx = i * n + j
-                                c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+                    _transpose_b_fallback[dtype](c, a, b, i0, i_end, j0, j_end, p0, p_end)
                 else:
                     for i in range(i0, i_end):
                         for p in range(p0, p_end):
@@ -220,11 +209,9 @@ fn matmul_register_blocked[
     var b_ptr = b.data.unsafe_ptr()
     var a_ptr = a.data.unsafe_ptr()
 
-    # Zero out C (tiles accumulate with +=)
-    for idx in range(m * n):
-        c.store(idx, Scalar[dtype](0))
+    _zero_fill[dtype](c)
 
-    var num_i_tiles = (m + TILE - 1) // TILE
+    var num_i_tiles = ceildiv(m, TILE)
 
     fn process_i_tile(tile_idx: Int) capturing:
         var i0 = tile_idx * TILE
@@ -243,13 +230,7 @@ fn matmul_register_blocked[
                 var tile_n = j_end - j0
 
                 comptime if transpose_b:
-                    # transpose_b path: no SIMD (non-contiguous B access)
-                    for i in range(i0, i_end):
-                        for p in range(p0, p_end):
-                            var a_val = a_ptr[i * k + p]
-                            for j in range(j0, j_end):
-                                var idx = i * n + j
-                                c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+                    _transpose_b_fallback[dtype](c, a, b, i0, i_end, j0, j_end, p0, p_end)
                 else:
                     # Register-blocked: process MR rows at a time
                     var i = i0
@@ -320,11 +301,9 @@ fn matmul_packed[
     var b_ptr = b.data.unsafe_ptr()
     var a_ptr = a.data.unsafe_ptr()
 
-    # Zero out C (tiles accumulate with +=)
-    for idx in range(m * n):
-        c.store(idx, Scalar[dtype](0))
+    _zero_fill[dtype](c)
 
-    var num_i_tiles = (m + TILE - 1) // TILE
+    var num_i_tiles = ceildiv(m, TILE)
 
     fn process_i_tile(tile_idx: Int) capturing:
         var i0 = tile_idx * TILE
@@ -344,13 +323,7 @@ fn matmul_packed[
                 var tile_n = j_end - j0
 
                 comptime if transpose_b:
-                    # transpose_b path: no SIMD (non-contiguous B access)
-                    for i in range(i0, i_end):
-                        for p in range(p0, p_end):
-                            var a_val = a_ptr[i * k + p]
-                            for j in range(j0, j_end):
-                                var idx = i * n + j
-                                c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+                    _transpose_b_fallback[dtype](c, a, b, i0, i_end, j0, j_end, p0, p_end)
                 else:
                     # Register-accumulation micro-kernel: j→p loop order
                     # For each j-block, load C into registers, accumulate
@@ -426,6 +399,38 @@ fn matmul_packed[
 
 
 @always_inline
+fn _zero_fill[dtype: DType](mut c: Matrix[dtype]):
+    """Vectorized zero-fill using SIMD stores."""
+    comptime NELTS = simd_width_of[dtype]()
+    var ptr = c.data.unsafe_ptr()
+    var count = c.rows * c.cols
+    fn _zero[width: Int](idx: Int) unified {mut}:
+        ptr.store[width=width](offset=idx, val=SIMD[dtype, width](0))
+    vectorize[NELTS](count, _zero)
+
+
+@always_inline
+fn _transpose_b_fallback[dtype: DType](
+    mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype],
+    i_start: Int, i_end: Int,
+    j_start: Int, j_end: Int,
+    p_start: Int, p_end: Int,
+):
+    """Scalar fallback for transpose_b: i-p-j loop with B[j,p] access."""
+    var c_ptr = c.data.unsafe_ptr()
+    var a_ptr = a.data.unsafe_ptr()
+    var b_ptr = b.data.unsafe_ptr()
+    var n = c.cols
+    var k = a.cols
+    for i in range(i_start, i_end):
+        for p in range(p_start, p_end):
+            var a_val = a_ptr[i * k + p]
+            for j in range(j_start, j_end):
+                var idx = i * n + j
+                c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+
+
+@always_inline
 fn _prefetch_r[dtype: DType](ptr: UnsafePointer[Scalar[dtype], ...], offset: Int):
     """Prefetch for read, low temporal locality (L2), data cache."""
     llvm_intrinsic["llvm.prefetch", NoneType](
@@ -467,13 +472,9 @@ fn matmul_comptime[
     var b_ptr = b.data.unsafe_ptr()
     var a_ptr = a.data.unsafe_ptr()
 
-    # Vectorized zero-fill of C
-    var total = m * n
-    fn zero[width: Int](idx: Int) unified {mut}:
-        c_ptr.store[width=width](offset=idx, val=SIMD[dtype, width](0))
-    vectorize[NELTS](total, zero)
+    _zero_fill[dtype](c)
 
-    var num_j_tiles = (n + TILE_N - 1) // TILE_N
+    var num_j_tiles = ceildiv(n, TILE_N)
 
     fn process_j_tile(j_tile_idx: Int) capturing:
         var j0 = j_tile_idx * TILE_N
@@ -490,12 +491,7 @@ fn matmul_comptime[
             var tile_k = p_end - p0
 
             comptime if transpose_b:
-                for i in range(m):
-                    for p in range(p0, p_end):
-                        var a_val = a_ptr[i * k + p]
-                        for j in range(j0, j_end):
-                            var idx = i * n + j
-                            c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+                _transpose_b_fallback[dtype](c, a, b, 0, m, j0, j_end, p0, p_end)
             else:
                 # ---- MR-blocked rows with comptime micro-kernel ----
                 var i = 0
@@ -630,11 +626,12 @@ fn matmul_comptime[
 
 
 fn _goto_gemv[
-    dtype: DType, NELTS: Int
+    dtype: DType,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # GEMV path for small M (esp. M=1 decode).
     # Streams through B sequentially row-by-row with j-parallelism,
     # enabling hardware prefetching and maximizing DRAM bandwidth.
+    comptime NELTS = simd_width_of[dtype]()
     comptime TILE_J = 1024  # C chunk = 1024*8 = 8KB, fits L1
 
     var m = a.rows
@@ -669,12 +666,14 @@ fn _goto_gemv[
 
 
 fn _goto_gemm[
-    dtype: DType, NELTS: Int, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int
+    dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # j-parallel GOTO GEMM with per-tile B-panel packing.
     # j→k→i loop order keeps C panel in L2 across all k-tiles.
     # B is packed into NR-wide contiguous column panels for
     # sequential micro-kernel access.
+    comptime NELTS = simd_width_of[dtype]()
+    comptime NR_VECS = NR // NELTS  # number of SIMD vectors per NR panel
     comptime NUM_LOCAL_PANELS = TILE_N // NR
 
     var m = a.rows
@@ -710,11 +709,11 @@ fn _goto_gemm[
                     for pk in range(kc):
                         var src = b_ptr + (pc + pk) * n + j0 + jr
                         var dst = panel_base + pk * NR
-                        dst.store[width=NELTS](val=src.load[width=NELTS]())
-                        dst.store[width=NELTS](
-                            offset=NELTS,
-                            val=src.load[width=NELTS](offset=NELTS),
-                        )
+                        comptime for nv in range(NR_VECS):
+                            dst.store[width=NELTS](
+                                offset=nv * NELTS,
+                                val=src.load[width=NELTS](offset=nv * NELTS),
+                            )
                 else:
                     var nr_actual = tile_n - jr
                     for pk in range(kc):
@@ -758,12 +757,12 @@ fn _goto_gemm[
                         continue
 
                     # ---- Full MR×NR micro-kernel ----
-                    var acc = InlineArray[SIMD[dtype, NELTS], MR * 2](
+                    var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
                         fill=SIMD[dtype, NELTS](0)
                     )
                     comptime for mr in range(MR):
-                        comptime for nr in range(2):
-                            acc[mr * 2 + nr] = (
+                        comptime for nr in range(NR_VECS):
+                            acc[mr * NR_VECS + nr] = (
                                 c_ptr + (i + mr) * n + j0 + jr
                             ).load[width=NELTS](offset=nr * NELTS)
 
@@ -783,12 +782,12 @@ fn _goto_gemm[
                                 a_vals[mr] = a_ptr[
                                     (i + mr) * k + pc + pk + ku
                                 ]
-                            comptime for nr in range(2):
+                            comptime for nr in range(NR_VECS):
                                 var bv = bp_k.load[width=NELTS](
                                     offset=nr * NELTS
                                 )
                                 comptime for mr in range(MR):
-                                    acc[mr * 2 + nr] += a_vals[mr] * bv
+                                    acc[mr * NR_VECS + nr] += a_vals[mr] * bv
                         pk += KU
 
                     # K remainder
@@ -799,19 +798,19 @@ fn _goto_gemm[
                         )
                         comptime for mr in range(MR):
                             a_vals[mr] = a_ptr[(i + mr) * k + pc + pk]
-                        comptime for nr in range(2):
+                        comptime for nr in range(NR_VECS):
                             var bv = bp_k.load[width=NELTS](
                                 offset=nr * NELTS
                             )
                             comptime for mr in range(MR):
-                                acc[mr * 2 + nr] += a_vals[mr] * bv
+                                acc[mr * NR_VECS + nr] += a_vals[mr] * bv
                         pk += 1
 
                     # Store accumulators back to C
                     comptime for mr in range(MR):
-                        comptime for nr in range(2):
+                        comptime for nr in range(NR_VECS):
                             (c_ptr + (i + mr) * n + j0 + jr).store(
-                                offset=nr * NELTS, val=acc[mr * 2 + nr],
+                                offset=nr * NELTS, val=acc[mr * NR_VECS + nr],
                             )
 
                 i += MR
@@ -859,32 +858,15 @@ fn matmul_goto[
     comptime KU = 8          # k-unroll factor
     comptime TILE_N = 64     # j-tile: C panel = M*64*8 fits L2
 
-    var m = a.rows
-    var n = c.cols
-    var k = a.cols
-
-    var c_ptr = c.data.unsafe_ptr()
-    var b_ptr = b.data.unsafe_ptr()
-    var a_ptr = a.data.unsafe_ptr()
-
-    # Vectorized zero-fill of C
-    var total = m * n
-    fn zero_fill[width: Int](idx: Int) unified {mut}:
-        c_ptr.store[width=width](offset=idx, val=SIMD[dtype, width](0))
-    vectorize[NELTS](total, zero_fill)
+    _zero_fill[dtype](c)
 
     comptime if transpose_b:
-        for i in range(m):
-            for p in range(k):
-                var a_val = a_ptr[i * k + p]
-                for j in range(n):
-                    var idx = i * n + j
-                    c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+        _transpose_b_fallback[dtype](c, a, b, 0, a.rows, 0, c.cols, 0, a.cols)
     else:
-        if m < MR:
-            _goto_gemv[dtype, NELTS](c, a, b)
+        if a.rows < MR:
+            _goto_gemv[dtype](c, a, b)
         else:
-            _goto_gemm[dtype, NELTS, MR, NR, KC, KU, TILE_N](c, a, b)
+            _goto_gemm[dtype, MR, NR, KC, KU, TILE_N](c, a, b)
 
 
 # Default matmul points to the tiled version
