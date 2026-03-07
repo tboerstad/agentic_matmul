@@ -66,6 +66,8 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
    missing optimizations: multi-threaded parallelism, register blocking/micro-kernels, prefetching,
    panel packing (copy-to buffers), and architecture-specific tuning.
 
+4. **B-panel packing tried:** Packing B-matrix panels into contiguous buffers before the micro-kernel regressed performance (~0.67× on prefill) because M is too small (only 3 i-tiles) to amortize the packing overhead.
+
 ## Libraries Tested
 
 | Library       | Version    | Backend                          |

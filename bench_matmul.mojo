@@ -1,7 +1,7 @@
 from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_b_packed
 from matrix import Matrix
 import std.benchmark
-from time import perf_counter_ns
+from std.time import perf_counter_ns
 
 
 fn gflops(m: Int, n: Int, k: Int, secs: Float64) -> Float64:
