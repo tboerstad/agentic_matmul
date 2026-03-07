@@ -38,6 +38,16 @@ struct Matrix[dtype: DType = DType.float64]:
     fn store(mut self, idx: Int, val: Scalar[Self.dtype]):
         self.data[idx] = val
 
+    # --- SIMD vector access ----------------------------------------------------
+
+    fn simd_load[width: Int](self, idx: Int) -> SIMD[Self.dtype, width]:
+        """Load `width` contiguous elements as a SIMD vector via pointer."""
+        return (self.data.unsafe_ptr() + idx).load[width=width]()
+
+    fn simd_store[width: Int](mut self, idx: Int, val: SIMD[Self.dtype, width]):
+        """Store a SIMD vector of `width` elements via pointer."""
+        (self.data.unsafe_ptr() + idx).store(val)
+
     # --- properties -------------------------------------------------------------
 
     fn numel(self) -> Int:

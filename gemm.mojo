@@ -1,4 +1,5 @@
 from matrix import Matrix
+from std.sys import simd_width_of
 
 
 fn matmul_naive[dtype: DType = DType.float64, *, transpose_b: Bool = False](
@@ -66,6 +67,72 @@ fn matmul_tiled[dtype: DType = DType.float64, *, transpose_b: Bool = False](
                                 c[i, j] = c[i, j] + a_val * b[j, p]
                             else:
                                 c[i, j] = c[i, j] + a_val * b[p, j]
+
+
+fn matmul_simd[dtype: DType = DType.float64, *, transpose_b: Bool = False](
+    mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
+):
+    # Computes C = A * op(B)  —  tiled + SIMD vectorized version.
+    #
+    # Based on matmul_tiled with an additional optimization:
+    #   - The innermost j-loop is vectorized using SIMD registers so we
+    #     process NELTS columns per iteration instead of one at a time.
+    #   - A scalar a_val is broadcast and multiplied against a SIMD vector
+    #     loaded from B/C, amortizing the loop overhead.
+    comptime TILE = 32
+    comptime NELTS = simd_width_of[dtype]()
+
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+
+    # Zero out C (tiles accumulate with +=)
+    for idx in range(m * n):
+        c.store(idx, Scalar[dtype](0))
+
+    # Tile over all three dimensions
+    for i0 in range(0, m, TILE):
+        var i_end = i0 + TILE
+        if i_end > m:
+            i_end = m
+        for p0 in range(0, k, TILE):
+            var p_end = p0 + TILE
+            if p_end > k:
+                p_end = k
+            for j0 in range(0, n, TILE):
+                var j_end = j0 + TILE
+                if j_end > n:
+                    j_end = n
+
+                # Micro-kernel with SIMD vectorization on j dimension
+                comptime if transpose_b:
+                    # transpose_b: B is accessed as b[j, p], not contiguous in j
+                    # No SIMD benefit here, fall back to scalar like tiled
+                    for i in range(i0, i_end):
+                        for p in range(p0, p_end):
+                            var a_val = a[i, p]
+                            for j in range(j0, j_end):
+                                c[i, j] = c[i, j] + a_val * b[j, p]
+                else:
+                    for i in range(i0, i_end):
+                        for p in range(p0, p_end):
+                            var a_val = a[i, p]
+                            var a_vec = SIMD[dtype, NELTS](a_val)
+
+                            # SIMD-vectorized inner loop
+                            var j = j0
+                            while j + NELTS <= j_end:
+                                var c_idx = i * n + j
+                                var b_idx = p * n + j
+                                var c_vec = c.simd_load[NELTS](c_idx)
+                                var b_vec = b.simd_load[NELTS](b_idx)
+                                c.simd_store[NELTS](c_idx, c_vec + a_vec * b_vec)
+                                j += NELTS
+
+                            # Scalar remainder
+                            while j < j_end:
+                                c[i, j] = c[i, j] + a_val * b[p, j]
+                                j += 1
 
 
 # Default matmul points to the tiled version
