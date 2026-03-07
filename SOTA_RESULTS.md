@@ -30,7 +30,8 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
 | NumPy/OpenBLAS (multi-thread)   | 5.399     | 5.194    | 8.35          | 8.68          | 0.76×   |
 | NumPy/OpenBLAS (1 thread)       | 5.790     | 5.204    | 7.79          | 8.66          | 0.76×   |
 | SciPy dgemm (OpenBLAS64)        | 12.550    | 11.946   | 3.59          | 3.77          | 0.33×   |
-| Mojo SIMD (current best)        | 79.662    | ~79.4    | 0.57          | ~0.57         | 0.05×   |
+| Mojo Packed (current best)      | 64.787    | ~63.8    | 0.70          | ~0.71         | 0.06×   |
+| Mojo SIMD                       | 79.662    | ~79.4    | 0.57          | ~0.57         | 0.05×   |
 | Mojo Tiled                      | 80.221    | ~78.2    | 0.56          | ~0.58         | 0.05×   |
 | Mojo Naive                      | 299.419   | ~298.1   | 0.15          | ~0.15         | 0.01×   |
 
@@ -44,7 +45,8 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
 | NumPy/OpenBLAS (multi-thread)   | 25.713    | 23.809   | 168.34        | 181.80        | 0.97×   |
 | SciPy dgemm (OpenBLAS64)        | 33.239    | 31.168   | 130.22        | 138.88        | 0.74×   |
 | Intel MKL dgemm (4 threads)     | 38.689    | 37.239   | 111.88        | 116.24        | 0.62×   |
-| Mojo SIMD (current best)        | 483.718   | ~480.3   | 8.95          | ~9.01         | 0.05×   |
+| Mojo Packed (current best)      | 121.530   | ~113.3   | 35.62         | ~38.19        | 0.20×   |
+| Mojo SIMD                       | 483.718   | ~480.3   | 8.95          | ~9.01         | 0.05×   |
 | Mojo Tiled                      | 1242.210  | ~1242.2  | 3.48          | ~3.48         | 0.02×   |
 | Mojo Naive                      | 23767.414 | ~23767   | 0.18          | ~0.18         | 0.001×  |
 
@@ -62,9 +64,11 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
    showing excellent utilization of AVX-512 FMA units. This shape has enough work to amortize
    memory access and saturate the compute pipeline.
 
-3. **Mojo gap:** The current Mojo SIMD kernel is ~20× slower than SOTA on both shapes. Key
-   missing optimizations: multi-threaded parallelism, register blocking/micro-kernels, prefetching,
-   panel packing (copy-to buffers), and architecture-specific tuning.
+3. **Mojo gap:** The current Mojo packed kernel reaches 35.6 GFLOPS on prefill (~5× slower than
+   SOTA) and 0.70 GFLOPS on decode (~16× slower). Remaining missing optimizations: prefetching,
+   and architecture-specific tuning.
+
+4. **B-panel packing tried:** Packing B-matrix panels into contiguous buffers before the micro-kernel regressed performance (~0.67× on prefill) because M is too small (only 3 i-tiles) to amortize the packing overhead.
 
 ## Libraries Tested
 
