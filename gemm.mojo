@@ -647,10 +647,7 @@ fn _goto_gemv[
 
     fn process_gemv_tile(tile_idx: Int) capturing:
         var j0 = tile_idx * TILE_J
-        var j_end = j0 + TILE_J
-        if j_end > n:
-            j_end = n
-        var tile_n = j_end - j0
+        var tile_n = min(TILE_J, n - j0)
 
         for i in range(m):
             var c_row = c_ptr + i * n + j0
@@ -691,24 +688,18 @@ fn _goto_gemm[
     var bp_per_tile = NUM_LOCAL_PANELS * KC * NR + KU * NR
     var bp_total = num_j_tiles * bp_per_tile
     var bp_list = List[Scalar[dtype]](capacity=bp_total)
-    for _ in range(bp_total):
-        bp_list.append(Scalar[dtype](0))
+    bp_list.resize(bp_total, Scalar[dtype](0))
     var bp_buf = bp_list.unsafe_ptr()
 
     fn process_j_tile(j_tile_idx: Int) capturing:
         var j0 = j_tile_idx * TILE_N
-        var j_end = j0 + TILE_N
-        if j_end > n:
-            j_end = n
-        var tile_n = j_end - j0
+        var tile_n = min(TILE_N, n - j0)
         var num_panels = (tile_n + NR - 1) // NR
 
         var bp_tile = bp_buf + j_tile_idx * bp_per_tile
 
         for pc in range(0, k, KC):
-            var kc = KC
-            if pc + kc > k:
-                kc = k - pc
+            var kc = min(KC, k - pc)
 
             # Pack B[pc:pc+kc, j0:j0+tile_n] into NR-panels
             for jp in range(num_panels):
@@ -829,9 +820,7 @@ fn _goto_gemm[
                 for jp in range(num_panels):
                     var jr = jp * NR
                     var bp_panel = bp_tile + jp * kc * NR
-                    var jj_limit = NR
-                    if jr + NR > tile_n:
-                        jj_limit = tile_n - jr
+                    var jj_limit = min(NR, tile_n - jr)
                     var c_row = c_ptr + i * n + j0 + jr
                     var jj = 0
                     while jj + NELTS <= jj_limit:
