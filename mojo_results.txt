@@ -1,25 +1,31 @@
-=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs unrolled vs comptime (Qwen 2.5 VL 3B shapes) ===
+=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs comptime (Qwen 2.5 VL 3B shapes) ===
 
 --- 1x11008x2048 (decode) ---
-  naive : 285.69054746341465 ms | 0.15782380061340337 GFLOPS
-  tiled : 82.1531021780822 ms | 0.548838288568357 GFLOPS
-  simd  : 65.20772405853658 ms | 0.6914636057459095 GFLOPS
-  parallel: 64.64586386341463 ms | 0.6974733618729985 GFLOPS
-  regblk : 64.81142552682927 ms | 0.695691656733196 GFLOPS
-  packed : 63.723706112195124 ms | 0.7075666302367046 GFLOPS
-  unrolled: 67.26280852 ms | 0.6703372783875542 GFLOPS
-  comptime: 69.7018278 ms | 0.6468807120722305 GFLOPS
-  speedup (naive/tiled)      : 3.47753815606533 x
-  speedup (naive/simd)       : 4.381237830152635 x
-  speedup (naive/parallel)   : 4.419316726388382 x
-  speedup (naive/regblk)     : 4.408027522016939 x
-  speedup (naive/packed)     : 4.483269490955433 x
-  speedup (naive/unrolled)   : 4.247377618471982 x
-  speedup (naive/comptime)   : 4.098752593449416 x
-  speedup (unrolled/comptime): 0.9650078146157309 x
+  naive : 285.713768097561 ms | 0.15781097389959803 GFLOPS
+  tiled : 97.56464864084508 ms | 0.46214247299737377 GFLOPS
+  simd  : 67.72203619 ms | 0.6657916763385493 GFLOPS
+  parallel: 69.93408819999999 ms | 0.6447323352676528 GFLOPS
+  regblk : 70.56428928481013 ms | 0.6389743092007012 GFLOPS
+  packed : 76.62557096103896 ms | 0.5884297817881949 GFLOPS
+  comptime: 67.175151655 ms | 0.6712120015979739 GFLOPS
+  speedup (naive/tiled)      : 2.928455870828074 x
+  speedup (naive/simd)       : 4.2189187474512195 x
+  speedup (naive/parallel)   : 4.085472127418986 x
+  speedup (naive/regblk)     : 4.0489852727683395 x
+  speedup (naive/packed)     : 3.728700021600296 x
+  speedup (naive/comptime)   : 4.253265695103119 x
 
 --- 96x11008x2048 (prefill) ---
-  naive : 24279.149396666664 ms | 0.17828144047724634 GFLOPS
-  tiled : 1264.1626949 ms | 3.4240226716565165 GFLOPS
-  simd  : 488.5033685483871 ms | 8.860781740077709 GFLOPS
-  parallel: 247.2347415909091 ms | 17.50774061989337 GFLOPS
+  naive : 24746.934794999997 ms | 0.17491142898532053 GFLOPS
+  tiled : 1246.6107275 ms | 3.472232054893816 GFLOPS
+  simd  : 497.6872272580645 ms | 8.697273088255372 GFLOPS
+  parallel: 239.49168663492065 ms | 18.07378698116719 GFLOPS
+  regblk : 233.35561434848486 ms | 18.549036157047166 GFLOPS
+  packed : 141.46992725 ms | 30.59676223873933 GFLOPS
+  comptime: 123.03109740983606 ms | 35.18233860485702 GFLOPS
+  speedup (naive/tiled)      : 19.851373206637195 x
+  speedup (naive/simd)       : 49.72386961051752 x
+  speedup (naive/parallel)   : 103.33108068475065 x
+  speedup (naive/regblk)     : 106.04816543236804 x
+  speedup (naive/packed)     : 174.9271755209728 x
+  speedup (naive/comptime)   : 201.14373777033006 x
