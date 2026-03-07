@@ -1,9 +1,10 @@
 from matrix import Matrix
 from std.algorithm.functional import parallelize, vectorize
 from std.collections import InlineArray
-from std.math import ceildiv
+from std.math import ceildiv, fma
+from std.memory.unsafe_pointer import alloc
 from std.sys import num_physical_cores, simd_width_of
-from std.sys.intrinsics import llvm_intrinsic
+from std.sys.intrinsics import prefetch, PrefetchOptions
 
 
 fn matmul_naive[dtype: DType = DType.float64](
@@ -386,14 +387,6 @@ fn _zero_fill[dtype: DType](mut c: Matrix[dtype]):
     vectorize[NELTS](count, _zero)
 
 
-@always_inline
-fn _prefetch_r[dtype: DType](ptr: UnsafePointer[Scalar[dtype], ...], offset: Int):
-    """Prefetch for read, low temporal locality (L2), data cache."""
-    llvm_intrinsic["llvm.prefetch", NoneType](
-        (ptr + offset).bitcast[NoneType](), Int32(0), Int32(1), Int32(1)
-    )
-
-
 fn matmul_comptime[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -472,9 +465,8 @@ fn matmul_comptime[
                             var p = p0 + pk + ku
                             # Prefetch B data PREFETCH_DIST steps ahead
                             if pk + ku + PREFETCH_DIST < tile_k:
-                                _prefetch_r[dtype](
-                                    b_ptr,
-                                    (p + PREFETCH_DIST) * n + jj,
+                                prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
+                                    b_ptr + (p + PREFETCH_DIST) * n + jj,
                                 )
                             # Load MR A values into register-promoted array
                             var a_vals = InlineArray[Scalar[dtype], MR](
@@ -638,11 +630,11 @@ fn _goto_gemm[
 
     var num_j_tiles = ceildiv(n, TILE_N)
 
+    # Opt 1: Zero-cost allocation — raw uninitialized memory instead of
+    # List + resize (which zeroes the buffer needlessly).
     var bp_per_tile = NUM_LOCAL_PANELS * KC * NR + KU * NR
     var bp_total = num_j_tiles * bp_per_tile
-    var bp_list = List[Scalar[dtype]](capacity=bp_total)
-    bp_list.resize(bp_total, Scalar[dtype](0))
-    var bp_buf = bp_list.unsafe_ptr()
+    var bp_buf = alloc[Scalar[dtype]](bp_total)
 
     fn process_j_tile(j_tile_idx: Int) capturing:
         var j0 = j_tile_idx * TILE_N
@@ -684,29 +676,23 @@ fn _goto_gemm[
                     var jr = jp * NR
                     var bp_panel = bp_tile + jp * kc * NR
                     if jr + NR > tile_n:
-                        # Remainder columns: scalar path
+                        # Opt 2: vectorize handles SIMD + scalar remainder
                         var jj_limit = tile_n - jr
                         for ii in range(i, i + MR):
                             var c_row = c_ptr + ii * n + j0 + jr
-                            var jj = 0
-                            while jj + NELTS <= jj_limit:
-                                var acc = c_row.load[width=NELTS](offset=jj)
+                            var a_row = a_ptr + ii * k + pc
+
+                            fn fma_remainder[width: Int](jj: Int) unified {mut}:
+                                var acc = c_row.load[width=width](offset=jj)
                                 for ppk in range(kc):
-                                    acc += a_ptr[
-                                        ii * k + pc + ppk
-                                    ] * (
-                                        bp_panel + ppk * NR
-                                    ).load[width=NELTS](offset=jj)
+                                    acc = fma(
+                                        SIMD[dtype, width](a_row[ppk]),
+                                        (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                        acc,
+                                    )
                                 c_row.store(offset=jj, val=acc)
-                                jj += NELTS
-                            while jj < jj_limit:
-                                var acc = c_row[jj]
-                                for ppk in range(kc):
-                                    acc += a_ptr[
-                                        ii * k + pc + ppk
-                                    ] * (bp_panel + ppk * NR)[jj]
-                                c_row[jj] = acc
-                                jj += 1
+
+                            vectorize[NELTS](jj_limit, fma_remainder)
                         continue
 
                     # ---- Full MR×NR micro-kernel ----
@@ -725,8 +711,9 @@ fn _goto_gemm[
                     while pk < pk_end:
                         comptime for ku in range(KU):
                             var bp_k = bp_panel + (pk + ku) * NR
-                            _prefetch_r[dtype](
-                                bp_panel, (pk + ku + 4) * NR
+                            # Opt 3: Built-in hardware prefetch targeting L1
+                            prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
+                                bp_panel + (pk + ku + 4) * NR
                             )
                             var a_vals = InlineArray[Scalar[dtype], MR](
                                 fill=Scalar[dtype](0)
@@ -739,8 +726,11 @@ fn _goto_gemm[
                                 var bv = bp_k.load[width=NELTS](
                                     offset=nr * NELTS
                                 )
+                                # Opt 4: Explicit FMA instruction
                                 comptime for mr in range(MR):
-                                    acc[mr * NR_VECS + nr] += a_vals[mr] * bv
+                                    acc[mr * NR_VECS + nr] = fma(
+                                        SIMD[dtype, NELTS](a_vals[mr]), bv, acc[mr * NR_VECS + nr]
+                                    )
                         pk += KU
 
                     # K remainder
@@ -756,7 +746,9 @@ fn _goto_gemm[
                                 offset=nr * NELTS
                             )
                             comptime for mr in range(MR):
-                                acc[mr * NR_VECS + nr] += a_vals[mr] * bv
+                                acc[mr * NR_VECS + nr] = fma(
+                                    SIMD[dtype, NELTS](a_vals[mr]), bv, acc[mr * NR_VECS + nr]
+                                )
                         pk += 1
 
                     # Store accumulators back to C
@@ -768,35 +760,29 @@ fn _goto_gemm[
 
                 i += MR
 
-            # Handle remaining rows (< MR)
+            # Handle remaining rows (< MR) — vectorize replaces manual loops
             while i < m:
                 for jp in range(num_panels):
                     var jr = jp * NR
                     var bp_panel = bp_tile + jp * kc * NR
                     var jj_limit = min(NR, tile_n - jr)
                     var c_row = c_ptr + i * n + j0 + jr
-                    var jj = 0
-                    while jj + NELTS <= jj_limit:
-                        var acc = c_row.load[width=NELTS](offset=jj)
+
+                    fn fma_tail[width: Int](jj: Int) unified {mut}:
+                        var acc = c_row.load[width=width](offset=jj)
                         for ppk in range(kc):
-                            var a_val = a_ptr[i * k + pc + ppk]
-                            acc += a_val * (
-                                bp_panel + ppk * NR
-                            ).load[width=NELTS](offset=jj)
+                            acc = fma(
+                                SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                acc,
+                            )
                         c_row.store(offset=jj, val=acc)
-                        jj += NELTS
-                    while jj < jj_limit:
-                        var acc = c_row[jj]
-                        for ppk in range(kc):
-                            acc += a_ptr[
-                                i * k + pc + ppk
-                            ] * (bp_panel + ppk * NR)[jj]
-                        c_row[jj] = acc
-                        jj += 1
+
+                    vectorize[NELTS](jj_limit, fma_tail)
                 i += 1
 
     parallelize[process_j_tile](num_j_tiles, num_physical_cores())
-    _ = bp_list  # prevent early free
+    bp_buf.free()
 
 
 fn matmul_goto[
