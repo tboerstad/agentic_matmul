@@ -1,7 +1,7 @@
 """Driver to generate assembly for all matmul kernels.
 Compile with: mojo build --emit asm -O3 -o gemm.s asm_driver.mojo
 """
-from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed
+from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_nr_blocked
 from matrix import Matrix
 
 
@@ -16,3 +16,4 @@ fn main():
     matmul_parallel(c, a, b)
     matmul_register_blocked(c, a, b)
     matmul_packed(c, a, b)
+    matmul_nr_blocked(c, a, b)

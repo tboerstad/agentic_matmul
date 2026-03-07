@@ -104,79 +104,80 @@ main:
 	movl	$8, %edi
 	movl	$8454144, %esi
 	callq	KGEN_CompilerRT_AlignedAlloc@PLT
+	movq	%rax, %r12
 	movl	$1056768, %ecx
 	movq	$-1056768, %r14
 	xorl	%edx, %edx
 	jmp	.LBB0_11
 	.p2align	4
 .LBB0_13:
-	movq	$0, (%rax,%rdx,8)
+	movq	$0, (%r12,%rdx,8)
 	incq	%rdx
 	incq	%r14
 	je	.LBB0_14
 .LBB0_11:
 	cmpq	%rcx, %rdx
 	jl	.LBB0_13
-	xorl	%esi, %esi
+	xorl	%eax, %eax
 	testq	%rcx, %rcx
-	sete	%sil
-	leaq	(%rsi,%rcx,2), %r8
-	movq	%rax, %rdi
+	sete	%al
+	leaq	(%rax,%rcx,2), %rax
+	movq	%r12, %rdi
 	movq	%rdx, %rsi
 	movq	%rcx, %rdx
-	movq	%r8, %rcx
+	movq	%rax, %rcx
 	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::builtin::simd::SIMD,dtype=f64,size=1\">>, scalar<f64>]"@PLT
+	movq	%rax, %r12
 	jmp	.LBB0_13
 .LBB0_14:
-	movl	$95, %ecx
-	xorl	%esi, %esi
-	movq	%rbx, %rdx
+	movl	$95, %eax
+	xorl	%edx, %edx
+	movq	%rbx, %rcx
 	.p2align	4
 .LBB0_15:
-	imulq	$88064, %rsi, %rsi
-	addq	%rax, %rsi
-	movl	$11007, %edi
-	movq	%r15, %r8
-	xorl	%r9d, %r9d
+	imulq	$88064, %rdx, %rdx
+	addq	%r12, %rdx
+	movl	$11007, %esi
+	movq	%r15, %rdi
+	xorl	%r8d, %r8d
 	.p2align	4
 .LBB0_16:
 	vxorpd	%xmm0, %xmm0, %xmm0
-	xorl	%r10d, %r10d
-	movq	%r8, %r11
+	xorl	%r9d, %r9d
+	movq	%rdi, %r10
 	.p2align	4
 .LBB0_17:
-	vmovsd	(%rdx,%r10,8), %xmm1
-	vfmadd231sd	(%r11), %xmm1, %xmm0
-	addq	$88064, %r11
-	incq	%r10
-	cmpq	$2048, %r10
+	vmovsd	(%rcx,%r9,8), %xmm1
+	vfmadd231sd	(%r10), %xmm1, %xmm0
+	addq	$88064, %r10
+	incq	%r9
+	cmpq	$2048, %r9
 	jne	.LBB0_17
-	vmovsd	%xmm0, (%rsi,%r9,8)
-	movl	$11008, %r9d
-	subq	%rdi, %r9
-	addq	$8, %r8
-	subq	$1, %rdi
+	vmovsd	%xmm0, (%rdx,%r8,8)
+	movl	$11008, %r8d
+	subq	%rsi, %r8
+	addq	$8, %rdi
+	subq	$1, %rsi
 	jae	.LBB0_16
-	movl	$96, %esi
-	subq	%rcx, %rsi
-	addq	$16384, %rdx
-	subq	$1, %rcx
+	movl	$96, %edx
+	subq	%rax, %rdx
+	addq	$16384, %rcx
+	subq	$1, %rax
 	jae	.LBB0_15
 	xorl	%r14d, %r14d
 	movl	$8454144, %edx
-	movq	%rax, 136(%rsp)
-	movq	136(%rsp), %rdi
+	movq	%r12, %rdi
 	xorl	%esi, %esi
 	callq	memset@PLT
-	movq	136(%rsp), %rax
-	movq	%rax, 144(%rsp)
-	movq	%r15, 152(%rsp)
+	movq	%r12, 160(%rsp)
+	movq	%r12, 136(%rsp)
+	movq	%r15, 168(%rsp)
 	.p2align	4
 .LBB0_21:
 	leaq	32(%r14), %rcx
 	movq	%r14, %rax
 	orq	$1, %rax
-	movq	%rax, 8(%rsp)
+	movq	%rax, 48(%rsp)
 	movq	%r15, %rsi
 	xorl	%edx, %edx
 	.p2align	4
@@ -184,15 +185,15 @@ main:
 	leaq	32(%rdx), %r8
 	movq	%rdx, %r9
 	orq	$1, %r9
-	movq	%rsi, 64(%rsp)
-	movq	144(%rsp), %r11
+	movq	%rsi, 128(%rsp)
+	movq	136(%rsp), %r11
 	xorl	%r15d, %r15d
 	.p2align	4
 .LBB0_23:
 	leaq	32(%r15), %rax
 	movq	%rax, 56(%rsp)
 	movq	%r11, %r13
-	movq	8(%rsp), %rax
+	movq	48(%rsp), %rax
 	movq	%r14, %r12
 	.p2align	4
 .LBB0_24:
@@ -236,109 +237,110 @@ main:
 	movq	56(%rsp), %r15
 	movq	%r12, %r14
 	jb	.LBB0_23
-	movq	64(%rsp), %rsi
+	movq	128(%rsp), %rsi
 	addq	$2818048, %rsi
 	cmpq	$2016, %rdx
 	movq	%r8, %rdx
 	jb	.LBB0_22
-	addq	$2818048, 144(%rsp)
+	addq	$2818048, 136(%rsp)
 	cmpq	$64, %r14
 	movq	%rcx, %r14
-	movq	152(%rsp), %r15
+	movq	168(%rsp), %r15
 	jb	.LBB0_21
-	xorl	%r14d, %r14d
+	xorl	%r13d, %r13d
 	movl	$8454144, %edx
-	movq	136(%rsp), %rdi
+	movq	160(%rsp), %r14
+	movq	%r14, %rdi
 	xorl	%esi, %esi
 	callq	memset@PLT
-	movq	136(%rsp), %rax
-	movq	%rax, 64(%rsp)
+	movq	%r14, 128(%rsp)
 	.p2align	4
 .LBB0_33:
-	leaq	32(%r14), %rcx
-	movq	%r14, %rax
+	leaq	32(%r13), %rcx
+	movq	%r13, %rax
 	orq	$1, %rax
 	movq	%rax, 56(%rsp)
 	movq	%r15, %rsi
-	xorl	%edi, %edi
+	xorl	%r14d, %r14d
 	.p2align	4
 .LBB0_34:
-	leaq	32(%rdi), %r9
-	movq	%rdi, %r10
-	orq	$1, %r10
-	movq	64(%rsp), %r11
-	movq	%rsi, 8(%rsp)
-	xorl	%r12d, %r12d
+	leaq	32(%r14), %r8
+	movq	%r14, %r9
+	orq	$1, %r9
+	movq	128(%rsp), %r10
+	movq	%rsi, 48(%rsp)
+	xorl	%r15d, %r15d
 	.p2align	4
 .LBB0_35:
-	movq	%r11, %r13
+	movq	%r10, %r12
 	movq	56(%rsp), %rax
-	movq	%r14, %rdx
+	movq	%r13, %rdx
 	.p2align	4
 .LBB0_36:
-	movq	%r14, %rbp
-	movq	%rax, %r14
+	movq	%r13, %rbp
+	movq	%rax, %r13
 	shlq	$14, %rbp
 	addq	%rbx, %rbp
-	movq	%rsi, %r15
-	movq	%r10, %r8
-	movq	%rdi, %rax
+	movq	%rsi, %r11
+	movq	%r9, %rdi
+	movq	%r14, %rax
 	.p2align	4
 .LBB0_37:
 	vbroadcastsd	(%rbp,%rax,8), %zmm0
-	movq	%r8, %rax
-	movq	$-8, %r8
+	movq	%rdi, %rax
+	movq	$-8, %rdi
 	.p2align	4
 .LBB0_38:
-	vmovupd	64(%r15,%r8,8), %zmm1
-	vfmadd213pd	64(%r13,%r8,8), %zmm0, %zmm1
-	vmovupd	%zmm1, 64(%r13,%r8,8)
-	addq	$8, %r8
-	cmpq	$24, %r8
+	vmovupd	64(%r11,%rdi,8), %zmm1
+	vfmadd213pd	64(%r12,%rdi,8), %zmm0, %zmm1
+	vmovupd	%zmm1, 64(%r12,%rdi,8)
+	addq	$8, %rdi
+	cmpq	$24, %rdi
 	jb	.LBB0_38
-	xorl	%r8d, %r8d
-	cmpq	%r9, %rax
-	setne	%r8b
-	addq	%rax, %r8
-	addq	$88064, %r15
-	cmpq	%r9, %rax
+	xorl	%edi, %edi
+	cmpq	%r8, %rax
+	setne	%dil
+	addq	%rax, %rdi
+	addq	$88064, %r11
+	cmpq	%r8, %rax
 	jne	.LBB0_37
 	xorl	%eax, %eax
-	cmpq	%rcx, %r14
+	cmpq	%rcx, %r13
 	setne	%al
-	addq	%r14, %rax
-	addq	$88064, %r13
-	cmpq	%rcx, %r14
+	addq	%r13, %rax
+	addq	$88064, %r12
+	cmpq	%rcx, %r13
 	jne	.LBB0_36
 	addq	$256, %rsi
-	addq	$256, %r11
-	cmpq	$10976, %r12
-	leaq	32(%r12), %r12
-	movq	%rdx, %r14
+	addq	$256, %r10
+	cmpq	$10976, %r15
+	leaq	32(%r15), %r15
+	movq	%rdx, %r13
 	jb	.LBB0_35
-	movq	8(%rsp), %rsi
+	movq	48(%rsp), %rsi
 	addq	$2818048, %rsi
-	cmpq	$2016, %rdi
-	movq	%r9, %rdi
+	cmpq	$2016, %r14
+	movq	%r8, %r14
 	jb	.LBB0_34
-	addq	$2818048, 64(%rsp)
-	cmpq	$64, %r14
-	movq	%rcx, %r14
-	movq	152(%rsp), %r15
+	addq	$2818048, 128(%rsp)
+	cmpq	$64, %r13
+	movq	%rcx, %r13
+	movq	168(%rsp), %r15
 	jb	.LBB0_33
-	movq	$96, 72(%rsp)
-	movq	$11008, 80(%rsp)
-	movq	$2048, 88(%rsp)
-	movq	136(%rsp), %rdi
-	movq	%rdi, 96(%rsp)
-	movq	%r15, 104(%rsp)
-	movq	%rbx, 112(%rsp)
+	movq	$96, 64(%rsp)
+	movq	$11008, 72(%rsp)
+	movq	$2048, 80(%rsp)
+	movq	160(%rsp), %r14
+	movq	%r14, 88(%rsp)
+	movq	%r15, 96(%rsp)
+	movq	%rbx, 104(%rsp)
 	movl	$8454144, %edx
+	movq	%r14, %rdi
 	xorl	%esi, %esi
 	vzeroupper
 	callq	memset@PLT
 	callq	KGEN_CompilerRT_NumPhysicalCores@PLT
-	movq	%rax, %r13
+	movq	%rax, %r12
 	cmpq	$1, %rax
 	movq	%rax, %rcx
 	adcq	$0, %rcx
@@ -348,48 +350,47 @@ main:
 	movl	$3, %eax
 	xorl	%edx, %edx
 	idivq	%rcx
-	movq	%rax, %r14
+	movq	%rax, %r13
 	jmp	.LBB0_47
 .LBB0_45:
 	movl	$3, %eax
 	xorl	%edx, %edx
 	divl	%ecx
-	movl	%eax, %r14d
+	movl	%eax, %r13d
 .LBB0_47:
-	testq	%r13, %r13
+	testq	%r12, %r12
 	sets	%al
 	testq	%rdx, %rdx
 	setne	%cl
 	andb	%al, %cl
 	movzbl	%cl, %eax
-	subq	%rax, %r14
-	xorl	%r12d, %r12d
+	subq	%rax, %r13
+	xorl	%ebp, %ebp
 	testb	%al, %al
-	cmovneq	%r13, %r12
-	addq	%rdx, %r12
-	testq	%r13, %r13
-	cmoveq	%r13, %r14
-	movq	%r14, 120(%rsp)
-	cmoveq	%r13, %r12
+	cmovneq	%r12, %rbp
+	addq	%rdx, %rbp
+	testq	%r12, %r12
+	cmoveq	%r12, %r13
+	movq	%r13, 112(%rsp)
+	cmoveq	%r12, %rbp
+	movq	%rbp, 120(%rsp)
 	movq	%r12, 128(%rsp)
-	movq	136(%rsp), %rdi
-	movq	%r14, 144(%rsp)
-	movq	%r13, 64(%rsp)
-	movq	%r12, 176(%rsp)
-	jle	.LBB0_92
-	cmpq	$1, %r13
+	movq	%r13, 136(%rsp)
+	movq	%rbp, 176(%rsp)
+	jle	.LBB0_91
+	cmpq	$1, %r12
 	jne	.LBB0_72
-	movl	$0, 16(%rsp)
-	vstmxcsr	16(%rsp)
-	movl	16(%rsp), %ecx
+	movl	$0, 8(%rsp)
+	vstmxcsr	8(%rsp)
+	movl	8(%rsp), %ecx
 	movl	%ecx, %eax
 	notl	%eax
 	testl	$32832, %eax
 	je	.LBB0_51
 	movl	%ecx, %eax
 	orl	$32832, %eax
-	movl	%eax, 16(%rsp)
-	vldmxcsr	16(%rsp)
+	movl	%eax, 8(%rsp)
+	vldmxcsr	8(%rsp)
 .LBB0_51:
 	movl	%ecx, 56(%rsp)
 	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
@@ -400,84 +401,86 @@ main:
 	xorl	%esi, %esi
 	xorl	%edx, %edx
 	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
-	movq	%rax, %r15
-	movq	%rdx, %r12
+	movq	%rax, %r13
+	movq	%rdx, %r15
 	leaq	(%rdx,%rdx,2), %rax
 	leaq	static_string_0c475e2a8e1ec05d(%rip), %rcx
-	movq	%rcx, (%r15,%rax,8)
-	movq	$5, 8(%r15,%rax,8)
+	movq	%rcx, (%r13,%rax,8)
+	movq	$5, 8(%r13,%rax,8)
 	movabsq	$2305843009213693952, %rcx
-	movq	%rcx, 16(%r15,%rax,8)
-	incq	%r12
+	movq	%rcx, 16(%r13,%rax,8)
+	incq	%r15
 	jmp	.LBB0_54
 .LBB0_72:
 	callq	KGEN_CompilerRT_AsyncRT_ParallelismLevel@PLT
-	movl	%eax, 172(%rsp)
-	movslq	%eax, %r12
-	testl	%r12d, %r12d
+	movl	%eax, 156(%rsp)
+	movslq	%eax, %r15
+	testl	%r15d, %r15d
 	movl	$1, %ecx
-	cmovneq	%r12, %rcx
-	movq	%r13, %rax
+	cmovneq	%r15, %rcx
+	movq	%r12, %rax
 	orq	%rcx, %rax
 	shrq	$32, %rax
 	je	.LBB0_73
-	movq	%r13, %rax
+	movq	%r12, %rax
 	cqto
 	idivq	%rcx
-	movq	%rax, %r15
+	movq	%rax, %r12
 	jmp	.LBB0_75
 .LBB0_52:
+	xorl	%r13d, %r13d
 	xorl	%r15d, %r15d
-	xorl	%r12d, %r12d
 .LBB0_54:
-	movabsq	$4611686018427387904, %r14
 	leaq	static_string_44fd141e40b306d5(%rip), %rdi
 	movl	$2, %esi
-	movq	%r15, %rdx
-	movq	%r12, %rcx
+	movq	%r13, %rdx
+	movq	%r15, %rcx
 	callq	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
-	movq	%rax, 8(%rsp)
+	movq	%rax, %r12
 	movq	%rcx, %rbp
-	xorl	%r13d, %r13d
-	testq	%r12, %r12
-	cmovgq	%r12, %r13
+	xorl	%r14d, %r14d
+	testq	%r15, %r15
+	cmovgq	%r15, %r14
+	movabsq	$4611686018427387904, %rdx
 	jle	.LBB0_60
-	cmpq	$1, %r13
-	movq	%r13, %rax
+	cmpq	$1, %r14
+	movq	%r14, %rax
 	adcq	$-1, %rax
-	movq	%r13, %r12
+	movq	%r14, %r15
 	jmp	.LBB0_56
 	.p2align	4
 .LBB0_59:
-	movq	%r12, %rax
+	movq	%r15, %rax
 	addq	$-1, %rax
 	jae	.LBB0_60
 .LBB0_56:
-	movq	%r13, %rcx
-	subq	%r12, %rcx
-	movq	%rax, %r12
+	movq	%r14, %rcx
+	subq	%r15, %rcx
+	movq	%rax, %r15
 	leaq	(%rcx,%rcx,2), %rax
-	testq	%r14, 16(%r15,%rax,8)
+	testq	%rdx, 16(%r13,%rax,8)
 	je	.LBB0_59
-	leaq	(%r15,%rax,8), %rax
+	leaq	(,%rax,8), %rax
+	addq	%r13, %rax
 	movq	(%rax), %rdi
 	lock		decq	-8(%rdi)
 	jne	.LBB0_59
 	addq	$-8, %rdi
 	#MEMBARRIER
 	callq	KGEN_CompilerRT_AlignedFree@PLT
+	movabsq	$4611686018427387904, %rdx
 	jmp	.LBB0_59
 .LBB0_60:
-	movq	%r15, %rdi
+	movq	%r13, %rdi
+	movq	%rdx, %r14
 	callq	KGEN_CompilerRT_AlignedFree@PLT
 	testq	%r14, %rbp
 	je	.LBB0_63
-	movq	8(%rsp), %rax
-	lock		decq	-8(%rax)
+	lock		decq	-8(%r12)
 	jne	.LBB0_63
-	movq	8(%rsp), %rdi
-	addq	$-8, %rdi
+	addq	$-8, %r12
 	#MEMBARRIER
+	movq	%r12, %rdi
 	callq	KGEN_CompilerRT_AlignedFree@PLT
 .LBB0_63:
 	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
@@ -487,15 +490,15 @@ main:
 	movl	$4, %esi
 	xorl	%edx, %edx
 	callq	KGEN_CompilerRT_TracyZoneBegin@PLT
-	movq	%rax, 8(%rsp)
+	movq	%rax, 48(%rsp)
 	jmp	.LBB0_66
 .LBB0_73:
-	movl	%r13d, %eax
+	movl	%r12d, %eax
 	xorl	%edx, %edx
 	divl	%ecx
-	movl	%eax, %r15d
+	movl	%eax, %r12d
 .LBB0_75:
-	testl	%r12d, %r12d
+	testl	%r15d, %r15d
 	sets	%al
 	movq	%rdx, 184(%rsp)
 	testq	%rdx, %rdx
@@ -503,54 +506,53 @@ main:
 	xorl	%r14d, %r14d
 	andb	%al, %bpl
 	movl	$0, %eax
-	cmovneq	%r12, %rax
+	cmovneq	%r15, %rax
 	movq	%rax, 192(%rsp)
-	movq	$0, 160(%rsp)
-	leaq	160(%rsp), %rdi
+	movq	$0, 144(%rsp)
+	leaq	144(%rsp), %rdi
 	callq	KGEN_CompilerRT_AsyncRT_InitializeChain@PLT
-	movq	$1, 16(%rsp)
-	movq	160(%rsp), %rax
-	movq	%rax, 24(%rsp)
+	movq	$1, 8(%rsp)
+	movq	144(%rsp), %rax
+	movq	%rax, 16(%rsp)
 	movl	$8, %edi
 	movl	$128, %esi
 	callq	KGEN_CompilerRT_AlignedAlloc@PLT
-	movq	%rax, 32(%rsp)
-	movq	$0, 40(%rsp)
-	movq	$16, 48(%rsp)
-	testl	%r12d, %r12d
+	movq	%rax, 24(%rsp)
+	movq	$0, 32(%rsp)
+	movq	$16, 40(%rsp)
+	testl	%r15d, %r15d
 	je	.LBB0_78
 	movzbl	%bpl, %eax
-	subq	%rax, %r15
-	movq	%r15, 56(%rsp)
-	testq	%r15, %r15
-	jle	.LBB0_78
-	movq	%r12, %rax
-	sarq	$63, %rax
-	andnq	%r12, %rax, %r15
-	cmpq	$1, %r15
-	movq	%r15, %rax
-	adcq	$-1, %rax
-	movq	%rax, 8(%rsp)
-	xorl	%r14d, %r14d
-	testl	%r12d, %r12d
-	jg	.LBB0_99
-.LBB0_78:
-	cmpl	$0, 172(%rsp)
-	movq	192(%rsp), %r12
-	je	.LBB0_84
-	addq	184(%rsp), %r12
+	subq	%rax, %r12
 	testq	%r12, %r12
+	jle	.LBB0_78
+	movq	%r15, %rax
+	sarq	$63, %rax
+	andnq	%r15, %rax, %r13
+	cmpq	$1, %r13
+	movq	%r13, %rax
+	adcq	$-1, %rax
+	movq	%rax, 48(%rsp)
+	xorl	%r14d, %r14d
+	testl	%r15d, %r15d
+	jg	.LBB0_98
+.LBB0_78:
+	cmpl	$0, 156(%rsp)
+	movq	192(%rsp), %r15
+	je	.LBB0_84
+	addq	184(%rsp), %r15
+	testq	%r15, %r15
 	jle	.LBB0_84
-	leaq	16(%rsp), %r13
-	movq	"gemm::matmul_parallel[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3"@GOTPCREL(%rip), %r15
+	leaq	8(%rsp), %r12
+	movq	"gemm::matmul_parallel[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3"@GOTPCREL(%rip), %r13
 	jmp	.LBB0_81
 	.p2align	4
 .LBB0_83:
+	decq	%r15
 	movq	%rbp, (%rax,%rdx,8)
-	decq	%r12
-	incq	40(%rsp)
+	incq	32(%rsp)
 	incq	%r14
-	testq	%r12, %r12
+	testq	%r15, %r15
 	je	.LBB0_84
 .LBB0_81:
 	movl	$8, %edi
@@ -573,34 +575,34 @@ main:
 	movq	$2, 96(%rbp)
 	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
 	movq	%rax, 104(%rbp)
-	leaq	120(%rsp), %rax
+	leaq	112(%rsp), %rax
 	movq	%rax, 112(%rbp)
 	movq	%r14, 120(%rbp)
-	leaq	128(%rsp), %rax
+	leaq	120(%rsp), %rax
 	movq	%rax, 128(%rbp)
-	leaq	104(%rsp), %rax
-	movq	%rax, 136(%rbp)
 	leaq	96(%rsp), %rax
-	movq	%rax, 144(%rbp)
-	leaq	112(%rsp), %rax
-	movq	%rax, 152(%rbp)
-	leaq	80(%rsp), %rax
-	movq	%rax, 160(%rbp)
+	movq	%rax, 136(%rbp)
 	leaq	88(%rsp), %rax
-	movq	%rax, 168(%rbp)
+	movq	%rax, 144(%rbp)
+	leaq	104(%rsp), %rax
+	movq	%rax, 152(%rbp)
 	leaq	72(%rsp), %rax
+	movq	%rax, 160(%rbp)
+	leaq	80(%rsp), %rax
+	movq	%rax, 168(%rbp)
+	leaq	64(%rsp), %rax
 	movq	%rax, 176(%rbp)
-	lock		incq	16(%rsp)
+	lock		incq	8(%rsp)
 	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
 	movq	%rax, 16(%rbp)
-	movq	%r13, 24(%rbp)
-	movq	%r15, %rdi
+	movq	%r12, 24(%rbp)
+	movq	%r13, %rdi
 	movq	%rbp, %rsi
 	movq	$-1, %rdx
 	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
-	movq	32(%rsp), %rax
-	movq	40(%rsp), %rdx
-	movq	48(%rsp), %r8
+	movq	24(%rsp), %rax
+	movq	32(%rsp), %rdx
+	movq	40(%rsp), %r8
 	cmpq	%r8, %rdx
 	jl	.LBB0_83
 	xorl	%ecx, %ecx
@@ -611,81 +613,83 @@ main:
 	movq	%rdx, %rsi
 	movq	%r8, %rdx
 	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
-	movq	%rax, 32(%rsp)
-	movq	%rdx, 40(%rsp)
-	movq	%rcx, 48(%rsp)
+	movq	%rax, 24(%rsp)
+	movq	%rdx, 32(%rsp)
+	movq	%rcx, 40(%rsp)
 	jmp	.LBB0_83
 	.p2align	4
-.LBB0_98:
-	decq	56(%rsp)
+.LBB0_97:
+	movq	56(%rsp), %r12
+	decq	%r12
 	je	.LBB0_78
-.LBB0_99:
-	movq	8(%rsp), %rax
-	movq	%r15, %rbp
-	jmp	.LBB0_100
+.LBB0_98:
+	movq	%r12, 56(%rsp)
+	movq	48(%rsp), %rax
+	movq	%r13, %rbp
+	jmp	.LBB0_99
 	.p2align	4
-.LBB0_102:
-	movq	%r13, (%rax,%rdx,8)
-	incq	40(%rsp)
+.LBB0_101:
+	movq	%r12, (%rax,%rdx,8)
+	incq	32(%rsp)
 	incq	%r14
 	movq	%rbp, %rax
 	addq	$-1, %rax
-	jae	.LBB0_98
-.LBB0_100:
-	movq	%r15, %r12
-	subq	%rbp, %r12
+	jae	.LBB0_97
+.LBB0_99:
+	movq	%r13, %r15
+	subq	%rbp, %r15
 	movq	%rax, %rbp
 	movl	$8, %edi
 	movl	$184, %esi
 	callq	KGEN_CompilerRT_AlignedAlloc@PLT
-	movq	%rax, %r13
+	movq	%rax, %r12
 	movl	$0, (%rax)
 	movq	"gemm::matmul_parallel[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_0_resume"@GOTPCREL(%rip), %rax
-	movq	%rax, 8(%r13)
+	movq	%rax, 8(%r12)
 	leaq	static_string_2b3f504061b33816(%rip), %rax
-	movq	%rax, 48(%r13)
-	movq	$4, 56(%r13)
+	movq	%rax, 48(%r12)
+	movq	$4, 56(%r12)
 	leaq	static_string_c44bdff4074eecdb(%rip), %rax
-	movq	%rax, 64(%r13)
-	movq	$0, 72(%r13)
+	movq	%rax, 64(%r12)
+	movq	$0, 72(%r12)
 	leaq	static_string_0c475e2a8e1ec05d(%rip), %rax
-	movq	%rax, 80(%r13)
+	movq	%rax, 80(%r12)
 	leaq	static_string_44fd141e40b306d5(%rip), %rax
-	movq	%rax, 88(%r13)
-	movq	$2, 96(%r13)
+	movq	%rax, 88(%r12)
+	movq	$2, 96(%r12)
 	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
-	movq	%rax, 104(%r13)
-	leaq	120(%rsp), %rax
-	movq	%rax, 112(%r13)
-	movq	%r14, 120(%r13)
-	leaq	128(%rsp), %rax
-	movq	%rax, 128(%r13)
-	leaq	104(%rsp), %rax
-	movq	%rax, 136(%r13)
-	leaq	96(%rsp), %rax
-	movq	%rax, 144(%r13)
+	movq	%rax, 104(%r12)
 	leaq	112(%rsp), %rax
-	movq	%rax, 152(%r13)
-	leaq	80(%rsp), %rax
-	movq	%rax, 160(%r13)
+	movq	%rax, 112(%r12)
+	movq	%r14, 120(%r12)
+	leaq	120(%rsp), %rax
+	movq	%rax, 128(%r12)
+	leaq	96(%rsp), %rax
+	movq	%rax, 136(%r12)
 	leaq	88(%rsp), %rax
-	movq	%rax, 168(%r13)
+	movq	%rax, 144(%r12)
+	leaq	104(%rsp), %rax
+	movq	%rax, 152(%r12)
 	leaq	72(%rsp), %rax
-	movq	%rax, 176(%r13)
-	lock		incq	16(%rsp)
+	movq	%rax, 160(%r12)
+	leaq	80(%rsp), %rax
+	movq	%rax, 168(%r12)
+	leaq	64(%rsp), %rax
+	movq	%rax, 176(%r12)
+	lock		incq	8(%rsp)
 	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
-	movq	%rax, 16(%r13)
-	leaq	16(%rsp), %rax
-	movq	%rax, 24(%r13)
+	movq	%rax, 16(%r12)
+	leaq	8(%rsp), %rax
+	movq	%rax, 24(%r12)
 	movq	"gemm::matmul_parallel[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1"@GOTPCREL(%rip), %rdi
-	movq	%r13, %rsi
-	movq	%r12, %rdx
+	movq	%r12, %rsi
+	movq	%r15, %rdx
 	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
-	movq	32(%rsp), %rax
-	movq	40(%rsp), %rdx
-	movq	48(%rsp), %r8
+	movq	24(%rsp), %rax
+	movq	32(%rsp), %rdx
+	movq	40(%rsp), %r8
 	cmpq	%r8, %rdx
-	jl	.LBB0_102
+	jl	.LBB0_101
 	xorl	%ecx, %ecx
 	testq	%r8, %r8
 	sete	%cl
@@ -694,218 +698,225 @@ main:
 	movq	%rdx, %rsi
 	movq	%r8, %rdx
 	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
-	movq	%rax, 32(%rsp)
-	movq	%rdx, 40(%rsp)
-	movq	%rcx, 48(%rsp)
-	jmp	.LBB0_102
+	movq	%rax, 24(%rsp)
+	movq	%rdx, 32(%rsp)
+	movq	%rcx, 40(%rsp)
+	jmp	.LBB0_101
 .LBB0_84:
-	leaq	24(%rsp), %r15
-	lock		decq	16(%rsp)
+	leaq	16(%rsp), %r12
+	lock		decq	8(%rsp)
 	jne	.LBB0_86
-	movq	%r15, %rdi
+	movq	%r12, %rdi
 	callq	KGEN_CompilerRT_AsyncRT_Complete@PLT
 .LBB0_86:
-	movq	%r15, %rdi
+	movq	%r12, %rdi
 	callq	KGEN_CompilerRT_AsyncRT_Wait@PLT
-	movq	32(%rsp), %r12
-	movq	40(%rsp), %rax
+	movq	24(%rsp), %r15
+	movq	32(%rsp), %rax
 	xorl	%r14d, %r14d
 	testq	%rax, %rax
 	cmovgq	%rax, %r14
+	movq	176(%rsp), %rbp
 	jle	.LBB0_90
 	xorl	%r13d, %r13d
 	.p2align	4
 .LBB0_88:
-	movq	(%r12,%r13,8), %rdi
+	movq	(%r15,%r13,8), %rdi
 	callq	KGEN_CompilerRT_AlignedFree@PLT
 	incq	%r13
 	cmpq	%r13, %r14
 	jne	.LBB0_88
-	movq	32(%rsp), %r12
+	movq	24(%rsp), %r15
 .LBB0_90:
-	movq	%r12, %rdi
-	callq	KGEN_CompilerRT_AlignedFree@PLT
 	movq	%r15, %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	movq	%r12, %rdi
 	callq	KGEN_CompilerRT_AsyncRT_DestroyChain@PLT
+	movq	168(%rsp), %r15
+	movq	160(%rsp), %r14
+	movq	128(%rsp), %r12
+	movq	136(%rsp), %r13
 	jmp	.LBB0_91
 .LBB0_64:
-	movq	$0, 8(%rsp)
+	movq	$0, 48(%rsp)
 .LBB0_66:
-	movq	128(%rsp), %rax
-	xorl	%r14d, %r14d
+	movq	120(%rsp), %rax
+	xorl	%ebp, %ebp
 	testq	%rax, %rax
-	setg	%r14b
-	addq	120(%rsp), %r14
-	testq	%r14, %r14
+	setg	%bpl
+	addq	112(%rsp), %rbp
+	testq	%rbp, %rbp
 	jle	.LBB0_69
-	movq	%rax, %r12
-	sarq	$63, %r12
-	andq	%rax, %r12
-	leaq	112(%rsp), %r15
+	movq	%rax, %r15
+	sarq	$63, %r15
+	andq	%rax, %r15
+	leaq	104(%rsp), %r12
+	leaq	72(%rsp), %r14
 	leaq	80(%rsp), %r13
-	leaq	88(%rsp), %rbp
 	.p2align	4
 .LBB0_68:
-	leaq	72(%rsp), %rax
+	leaq	64(%rsp), %rax
 	movq	%rax, (%rsp)
-	movq	%r12, %rdi
-	leaq	104(%rsp), %rsi
-	leaq	96(%rsp), %rdx
-	movq	%r15, %rcx
-	movq	%r13, %r8
-	movq	%rbp, %r9
+	movq	%r15, %rdi
+	leaq	96(%rsp), %rsi
+	leaq	88(%rsp), %rdx
+	movq	%r12, %rcx
+	movq	%r14, %r8
+	movq	%r13, %r9
 	callq	"gemm::matmul_parallel[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"@PLT
-	incq	%r12
-	decq	%r14
+	incq	%r15
+	decq	%rbp
 	jne	.LBB0_68
 .LBB0_69:
-	movq	8(%rsp), %rdi
+	movq	48(%rsp), %rdi
 	testq	%rdi, %rdi
 	je	.LBB0_71
 	callq	KGEN_CompilerRT_TracyZoneEnd@PLT
 .LBB0_71:
 	movl	56(%rsp), %eax
-	movl	%eax, 16(%rsp)
-	vldmxcsr	16(%rsp)
+	movl	%eax, 8(%rsp)
+	vldmxcsr	8(%rsp)
+	movq	168(%rsp), %r15
+	movq	160(%rsp), %r14
+	movq	128(%rsp), %r12
+	movq	136(%rsp), %r13
+	movq	176(%rsp), %rbp
 .LBB0_91:
-	movq	136(%rsp), %rdi
-	movq	152(%rsp), %r15
-	movq	64(%rsp), %r13
-	movq	144(%rsp), %r14
-	movq	176(%rsp), %r12
-.LBB0_92:
-	movq	$96, 72(%rsp)
-	movq	$11008, 80(%rsp)
-	movq	$2048, 88(%rsp)
-	movq	%rdi, 96(%rsp)
-	movq	%r15, 104(%rsp)
-	movq	%rbx, 112(%rsp)
+	movq	$96, 64(%rsp)
+	movq	$11008, 72(%rsp)
+	movq	$2048, 80(%rsp)
+	movq	%r14, 88(%rsp)
+	movq	%r15, 96(%rsp)
+	movq	%rbx, 104(%rsp)
 	movl	$8454144, %edx
+	movq	%r14, %rdi
 	xorl	%esi, %esi
 	callq	memset@PLT
-	movq	%r14, 120(%rsp)
-	movq	%r12, 128(%rsp)
-	testq	%r13, %r13
-	jle	.LBB0_142
-	cmpq	$1, %r13
-	jne	.LBB0_122
-	movl	$0, 16(%rsp)
-	vstmxcsr	16(%rsp)
-	movl	16(%rsp), %ecx
+	movq	%r13, 112(%rsp)
+	movq	%rbp, 120(%rsp)
+	testq	%r12, %r12
+	jle	.LBB0_140
+	cmpq	$1, %r12
+	jne	.LBB0_121
+	movl	$0, 8(%rsp)
+	vstmxcsr	8(%rsp)
+	movl	8(%rsp), %ecx
 	movl	%ecx, %eax
 	notl	%eax
 	testl	$32832, %eax
-	je	.LBB0_96
+	je	.LBB0_95
 	movl	%ecx, %eax
 	orl	$32832, %eax
-	movl	%eax, 16(%rsp)
-	vldmxcsr	16(%rsp)
-.LBB0_96:
+	movl	%eax, 8(%rsp)
+	vldmxcsr	8(%rsp)
+.LBB0_95:
 	movl	%ecx, 56(%rsp)
 	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
 	testq	%rax, %rax
-	je	.LBB0_97
+	je	.LBB0_96
 	movl	$1, %ecx
 	xorl	%edi, %edi
 	xorl	%esi, %esi
 	xorl	%edx, %edx
 	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
-	movq	%rax, %r15
-	movq	%rdx, %r12
+	movq	%rax, %r13
+	movq	%rdx, %r15
 	leaq	(%rdx,%rdx,2), %rax
 	leaq	static_string_0c475e2a8e1ec05d(%rip), %rcx
-	movq	%rcx, (%r15,%rax,8)
-	movq	$5, 8(%r15,%rax,8)
+	movq	%rcx, (%r13,%rax,8)
+	movq	$5, 8(%r13,%rax,8)
 	movabsq	$2305843009213693952, %rcx
-	movq	%rcx, 16(%r15,%rax,8)
-	incq	%r12
-	jmp	.LBB0_104
-.LBB0_122:
+	movq	%rcx, 16(%r13,%rax,8)
+	incq	%r15
+	jmp	.LBB0_103
+.LBB0_121:
 	callq	KGEN_CompilerRT_AsyncRT_ParallelismLevel@PLT
-	movl	%eax, 172(%rsp)
-	movslq	%eax, %r12
-	testl	%r12d, %r12d
+	movl	%eax, 156(%rsp)
+	movslq	%eax, %r15
+	testl	%r15d, %r15d
 	movl	$1, %ecx
-	cmovneq	%r12, %rcx
-	movq	%r13, %rax
+	cmovneq	%r15, %rcx
+	movq	%r12, %rax
 	orq	%rcx, %rax
 	shrq	$32, %rax
-	je	.LBB0_123
-	movq	%r13, %rax
+	je	.LBB0_122
+	movq	%r12, %rax
 	cqto
 	idivq	%rcx
-	movq	%rax, %r15
-	jmp	.LBB0_125
-.LBB0_97:
+	movq	%rax, %r12
+	jmp	.LBB0_124
+.LBB0_96:
+	xorl	%r13d, %r13d
 	xorl	%r15d, %r15d
-	xorl	%r12d, %r12d
-.LBB0_104:
-	movabsq	$4611686018427387904, %r14
+.LBB0_103:
 	leaq	static_string_44fd141e40b306d5(%rip), %rdi
 	movl	$2, %esi
-	movq	%r15, %rdx
-	movq	%r12, %rcx
+	movq	%r13, %rdx
+	movq	%r15, %rcx
 	callq	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
-	movq	%rax, 8(%rsp)
-	movq	%rcx, %rbp
-	xorl	%r13d, %r13d
-	testq	%r12, %r12
-	cmovgq	%r12, %r13
-	jle	.LBB0_110
-	cmpq	$1, %r13
-	movq	%r13, %rax
-	adcq	$-1, %rax
-	movq	%r13, %r12
-	jmp	.LBB0_106
-	.p2align	4
-.LBB0_109:
-	movq	%r12, %rax
-	addq	$-1, %rax
-	jae	.LBB0_110
-.LBB0_106:
-	movq	%r13, %rcx
-	subq	%r12, %rcx
 	movq	%rax, %r12
+	movq	%rcx, %rbp
+	xorl	%r14d, %r14d
+	testq	%r15, %r15
+	cmovgq	%r15, %r14
+	movabsq	$4611686018427387904, %rdx
+	jle	.LBB0_109
+	cmpq	$1, %r14
+	movq	%r14, %rax
+	adcq	$-1, %rax
+	movq	%r14, %r15
+	jmp	.LBB0_105
+	.p2align	4
+.LBB0_108:
+	movq	%r15, %rax
+	addq	$-1, %rax
+	jae	.LBB0_109
+.LBB0_105:
+	movq	%r14, %rcx
+	subq	%r15, %rcx
+	movq	%rax, %r15
 	leaq	(%rcx,%rcx,2), %rax
-	testq	%r14, 16(%r15,%rax,8)
-	je	.LBB0_109
-	leaq	(%r15,%rax,8), %rax
+	testq	%rdx, 16(%r13,%rax,8)
+	je	.LBB0_108
+	leaq	(,%rax,8), %rax
+	addq	%r13, %rax
 	movq	(%rax), %rdi
 	lock		decq	-8(%rdi)
-	jne	.LBB0_109
+	jne	.LBB0_108
 	addq	$-8, %rdi
 	#MEMBARRIER
 	callq	KGEN_CompilerRT_AlignedFree@PLT
-	jmp	.LBB0_109
-.LBB0_110:
-	movq	%r15, %rdi
+	movabsq	$4611686018427387904, %rdx
+	jmp	.LBB0_108
+.LBB0_109:
+	movq	%r13, %rdi
+	movq	%rdx, %r14
 	callq	KGEN_CompilerRT_AlignedFree@PLT
 	testq	%r14, %rbp
-	je	.LBB0_113
-	movq	8(%rsp), %rax
-	lock		decq	-8(%rax)
-	jne	.LBB0_113
-	movq	8(%rsp), %rdi
-	addq	$-8, %rdi
+	je	.LBB0_112
+	lock		decq	-8(%r12)
+	jne	.LBB0_112
+	addq	$-8, %r12
 	#MEMBARRIER
+	movq	%r12, %rdi
 	callq	KGEN_CompilerRT_AlignedFree@PLT
-.LBB0_113:
+.LBB0_112:
 	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
 	testq	%rax, %rax
-	je	.LBB0_114
+	je	.LBB0_113
 	leaq	static_string_2b3f504061b33816(%rip), %rdi
 	movl	$4, %esi
 	xorl	%edx, %edx
 	callq	KGEN_CompilerRT_TracyZoneBegin@PLT
-	movq	%rax, 8(%rsp)
-	jmp	.LBB0_116
-.LBB0_123:
-	movl	%r13d, %eax
+	movq	%rax, 48(%rsp)
+	jmp	.LBB0_115
+.LBB0_122:
+	movl	%r12d, %eax
 	xorl	%edx, %edx
 	divl	%ecx
-	movl	%eax, %r15d
-.LBB0_125:
-	testl	%r12d, %r12d
+	movl	%eax, %r12d
+.LBB0_124:
+	testl	%r15d, %r15d
 	sets	%al
 	movq	%rdx, 184(%rsp)
 	testq	%rdx, %rdx
@@ -913,56 +924,55 @@ main:
 	xorl	%r14d, %r14d
 	andb	%al, %bpl
 	movl	$0, %eax
-	cmovneq	%r12, %rax
+	cmovneq	%r15, %rax
 	movq	%rax, 192(%rsp)
-	movq	$0, 160(%rsp)
-	leaq	160(%rsp), %rdi
+	movq	$0, 144(%rsp)
+	leaq	144(%rsp), %rdi
 	callq	KGEN_CompilerRT_AsyncRT_InitializeChain@PLT
-	movq	$1, 16(%rsp)
-	movq	160(%rsp), %rax
-	movq	%rax, 24(%rsp)
+	movq	$1, 8(%rsp)
+	movq	144(%rsp), %rax
+	movq	%rax, 16(%rsp)
 	movl	$8, %edi
 	movl	$128, %esi
 	callq	KGEN_CompilerRT_AlignedAlloc@PLT
-	movq	%rax, 32(%rsp)
-	movq	$0, 40(%rsp)
-	movq	$16, 48(%rsp)
-	testl	%r12d, %r12d
-	je	.LBB0_128
+	movq	%rax, 24(%rsp)
+	movq	$0, 32(%rsp)
+	movq	$16, 40(%rsp)
+	testl	%r15d, %r15d
+	je	.LBB0_127
 	movzbl	%bpl, %eax
-	subq	%rax, %r15
-	movq	%r15, 56(%rsp)
-	testq	%r15, %r15
-	jle	.LBB0_128
-	movq	%r12, %rax
-	sarq	$63, %rax
-	andnq	%r12, %rax, %r15
-	cmpq	$1, %r15
+	subq	%rax, %r12
+	testq	%r12, %r12
+	jle	.LBB0_127
 	movq	%r15, %rax
+	sarq	$63, %rax
+	andnq	%r15, %rax, %r13
+	cmpq	$1, %r13
+	movq	%r13, %rax
 	adcq	$-1, %rax
-	movq	%rax, 8(%rsp)
+	movq	%rax, 48(%rsp)
 	xorl	%r14d, %r14d
-	testl	%r12d, %r12d
-	jg	.LBB0_149
-.LBB0_128:
-	cmpl	$0, 172(%rsp)
-	movq	192(%rsp), %r12
-	je	.LBB0_134
-	addq	184(%rsp), %r12
-	testq	%r12, %r12
-	jle	.LBB0_134
-	leaq	16(%rsp), %r13
-	movq	"gemm::matmul_register_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3"@GOTPCREL(%rip), %r15
-	jmp	.LBB0_131
+	testl	%r15d, %r15d
+	jg	.LBB0_147
+.LBB0_127:
+	cmpl	$0, 156(%rsp)
+	movq	192(%rsp), %r15
+	je	.LBB0_133
+	addq	184(%rsp), %r15
+	testq	%r15, %r15
+	jle	.LBB0_133
+	leaq	8(%rsp), %r12
+	movq	"gemm::matmul_register_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3"@GOTPCREL(%rip), %r13
+	jmp	.LBB0_130
 	.p2align	4
-.LBB0_133:
+.LBB0_132:
+	decq	%r15
 	movq	%rbp, (%rax,%rdx,8)
-	decq	%r12
-	incq	40(%rsp)
+	incq	32(%rsp)
 	incq	%r14
-	testq	%r12, %r12
-	je	.LBB0_134
-.LBB0_131:
+	testq	%r15, %r15
+	je	.LBB0_133
+.LBB0_130:
 	movl	$8, %edi
 	movl	$184, %esi
 	callq	KGEN_CompilerRT_AlignedAlloc@PLT
@@ -983,36 +993,36 @@ main:
 	movq	$2, 96(%rbp)
 	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
 	movq	%rax, 104(%rbp)
-	leaq	120(%rsp), %rax
+	leaq	112(%rsp), %rax
 	movq	%rax, 112(%rbp)
 	movq	%r14, 120(%rbp)
-	leaq	128(%rsp), %rax
+	leaq	120(%rsp), %rax
 	movq	%rax, 128(%rbp)
-	leaq	104(%rsp), %rax
-	movq	%rax, 136(%rbp)
 	leaq	96(%rsp), %rax
-	movq	%rax, 144(%rbp)
-	leaq	112(%rsp), %rax
-	movq	%rax, 152(%rbp)
-	leaq	80(%rsp), %rax
-	movq	%rax, 160(%rbp)
+	movq	%rax, 136(%rbp)
 	leaq	88(%rsp), %rax
-	movq	%rax, 168(%rbp)
+	movq	%rax, 144(%rbp)
+	leaq	104(%rsp), %rax
+	movq	%rax, 152(%rbp)
 	leaq	72(%rsp), %rax
+	movq	%rax, 160(%rbp)
+	leaq	80(%rsp), %rax
+	movq	%rax, 168(%rbp)
+	leaq	64(%rsp), %rax
 	movq	%rax, 176(%rbp)
-	lock		incq	16(%rsp)
+	lock		incq	8(%rsp)
 	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
 	movq	%rax, 16(%rbp)
-	movq	%r13, 24(%rbp)
-	movq	%r15, %rdi
+	movq	%r12, 24(%rbp)
+	movq	%r13, %rdi
 	movq	%rbp, %rsi
 	movq	$-1, %rdx
 	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
-	movq	32(%rsp), %rax
-	movq	40(%rsp), %rdx
-	movq	48(%rsp), %r8
+	movq	24(%rsp), %rax
+	movq	32(%rsp), %rdx
+	movq	40(%rsp), %r8
 	cmpq	%r8, %rdx
-	jl	.LBB0_133
+	jl	.LBB0_132
 	xorl	%ecx, %ecx
 	testq	%r8, %r8
 	sete	%cl
@@ -1021,363 +1031,38 @@ main:
 	movq	%rdx, %rsi
 	movq	%r8, %rdx
 	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
-	movq	%rax, 32(%rsp)
-	movq	%rdx, 40(%rsp)
-	movq	%rcx, 48(%rsp)
-	jmp	.LBB0_133
+	movq	%rax, 24(%rsp)
+	movq	%rdx, 32(%rsp)
+	movq	%rcx, 40(%rsp)
+	jmp	.LBB0_132
 	.p2align	4
-.LBB0_148:
-	decq	56(%rsp)
-	je	.LBB0_128
-.LBB0_149:
-	movq	8(%rsp), %rax
-	movq	%r15, %rbp
-	jmp	.LBB0_150
+.LBB0_146:
+	movq	56(%rsp), %r12
+	decq	%r12
+	je	.LBB0_127
+.LBB0_147:
+	movq	%r12, 56(%rsp)
+	movq	48(%rsp), %rax
+	movq	%r13, %rbp
+	jmp	.LBB0_148
 	.p2align	4
-.LBB0_152:
-	movq	%r13, (%rax,%rdx,8)
-	incq	40(%rsp)
+.LBB0_150:
+	movq	%r12, (%rax,%rdx,8)
+	incq	32(%rsp)
 	incq	%r14
 	movq	%rbp, %rax
 	addq	$-1, %rax
-	jae	.LBB0_148
-.LBB0_150:
-	movq	%r15, %r12
-	subq	%rbp, %r12
+	jae	.LBB0_146
+.LBB0_148:
+	movq	%r13, %r15
+	subq	%rbp, %r15
 	movq	%rax, %rbp
-	movl	$8, %edi
-	movl	$184, %esi
-	callq	KGEN_CompilerRT_AlignedAlloc@PLT
-	movq	%rax, %r13
-	movl	$0, (%rax)
-	movq	"gemm::matmul_register_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_0_resume"@GOTPCREL(%rip), %rax
-	movq	%rax, 8(%r13)
-	leaq	static_string_2b3f504061b33816(%rip), %rax
-	movq	%rax, 48(%r13)
-	movq	$4, 56(%r13)
-	leaq	static_string_c44bdff4074eecdb(%rip), %rax
-	movq	%rax, 64(%r13)
-	movq	$0, 72(%r13)
-	leaq	static_string_0c475e2a8e1ec05d(%rip), %rax
-	movq	%rax, 80(%r13)
-	leaq	static_string_44fd141e40b306d5(%rip), %rax
-	movq	%rax, 88(%r13)
-	movq	$2, 96(%r13)
-	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
-	movq	%rax, 104(%r13)
-	leaq	120(%rsp), %rax
-	movq	%rax, 112(%r13)
-	movq	%r14, 120(%r13)
-	leaq	128(%rsp), %rax
-	movq	%rax, 128(%r13)
-	leaq	104(%rsp), %rax
-	movq	%rax, 136(%r13)
-	leaq	96(%rsp), %rax
-	movq	%rax, 144(%r13)
-	leaq	112(%rsp), %rax
-	movq	%rax, 152(%r13)
-	leaq	80(%rsp), %rax
-	movq	%rax, 160(%r13)
-	leaq	88(%rsp), %rax
-	movq	%rax, 168(%r13)
-	leaq	72(%rsp), %rax
-	movq	%rax, 176(%r13)
-	lock		incq	16(%rsp)
-	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
-	movq	%rax, 16(%r13)
-	leaq	16(%rsp), %rax
-	movq	%rax, 24(%r13)
-	movq	"gemm::matmul_register_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1"@GOTPCREL(%rip), %rdi
-	movq	%r13, %rsi
-	movq	%r12, %rdx
-	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
-	movq	32(%rsp), %rax
-	movq	40(%rsp), %rdx
-	movq	48(%rsp), %r8
-	cmpq	%r8, %rdx
-	jl	.LBB0_152
-	xorl	%ecx, %ecx
-	testq	%r8, %r8
-	sete	%cl
-	leaq	(%rcx,%r8,2), %rcx
-	movq	%rax, %rdi
-	movq	%rdx, %rsi
-	movq	%r8, %rdx
-	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
-	movq	%rax, 32(%rsp)
-	movq	%rdx, 40(%rsp)
-	movq	%rcx, 48(%rsp)
-	jmp	.LBB0_152
-.LBB0_134:
-	leaq	24(%rsp), %r15
-	lock		decq	16(%rsp)
-	jne	.LBB0_136
-	movq	%r15, %rdi
-	callq	KGEN_CompilerRT_AsyncRT_Complete@PLT
-.LBB0_136:
-	movq	%r15, %rdi
-	callq	KGEN_CompilerRT_AsyncRT_Wait@PLT
-	movq	32(%rsp), %r12
-	movq	40(%rsp), %rax
-	xorl	%r14d, %r14d
-	testq	%rax, %rax
-	cmovgq	%rax, %r14
-	jle	.LBB0_140
-	xorl	%r13d, %r13d
-	.p2align	4
-.LBB0_138:
-	movq	(%r12,%r13,8), %rdi
-	callq	KGEN_CompilerRT_AlignedFree@PLT
-	incq	%r13
-	cmpq	%r13, %r14
-	jne	.LBB0_138
-	movq	32(%rsp), %r12
-.LBB0_140:
-	movq	%r12, %rdi
-	callq	KGEN_CompilerRT_AlignedFree@PLT
-	movq	%r15, %rdi
-	callq	KGEN_CompilerRT_AsyncRT_DestroyChain@PLT
-	jmp	.LBB0_141
-.LBB0_114:
-	movq	$0, 8(%rsp)
-.LBB0_116:
-	movq	128(%rsp), %rax
-	xorl	%r14d, %r14d
-	testq	%rax, %rax
-	setg	%r14b
-	addq	120(%rsp), %r14
-	testq	%r14, %r14
-	jle	.LBB0_119
-	movq	%rax, %r12
-	sarq	$63, %r12
-	andq	%rax, %r12
-	leaq	112(%rsp), %r15
-	leaq	80(%rsp), %r13
-	leaq	88(%rsp), %rbp
-	.p2align	4
-.LBB0_118:
-	leaq	72(%rsp), %rax
-	movq	%rax, (%rsp)
-	movq	%r12, %rdi
-	leaq	104(%rsp), %rsi
-	leaq	96(%rsp), %rdx
-	movq	%r15, %rcx
-	movq	%r13, %r8
-	movq	%rbp, %r9
-	callq	"gemm::matmul_register_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"@PLT
-	incq	%r12
-	decq	%r14
-	jne	.LBB0_118
-.LBB0_119:
-	movq	8(%rsp), %rdi
-	testq	%rdi, %rdi
-	je	.LBB0_121
-	callq	KGEN_CompilerRT_TracyZoneEnd@PLT
-.LBB0_121:
-	movl	56(%rsp), %eax
-	movl	%eax, 16(%rsp)
-	vldmxcsr	16(%rsp)
-.LBB0_141:
-	movq	152(%rsp), %r15
-	movq	64(%rsp), %r13
-	movq	144(%rsp), %r14
-	movq	176(%rsp), %r12
-.LBB0_142:
-	movq	$96, 72(%rsp)
-	movq	$11008, 80(%rsp)
-	movq	$2048, 88(%rsp)
-	movq	136(%rsp), %rdi
-	movq	%rdi, 96(%rsp)
-	movq	%r15, 104(%rsp)
-	movq	%rbx, 112(%rsp)
-	movl	$8454144, %edx
-	xorl	%esi, %esi
-	callq	memset@PLT
-	movq	%r14, 120(%rsp)
-	movq	%r12, 128(%rsp)
-	testq	%r13, %r13
-	jle	.LBB0_192
-	cmpq	$1, %r13
-	jne	.LBB0_172
-	movl	$0, 16(%rsp)
-	vstmxcsr	16(%rsp)
-	movl	16(%rsp), %ecx
-	movl	%ecx, %eax
-	notl	%eax
-	testl	$32832, %eax
-	je	.LBB0_146
-	movl	%ecx, %eax
-	orl	$32832, %eax
-	movl	%eax, 16(%rsp)
-	vldmxcsr	16(%rsp)
-.LBB0_146:
-	movl	%ecx, 56(%rsp)
-	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
-	testq	%rax, %rax
-	je	.LBB0_147
-	movl	$1, %ecx
-	xorl	%edi, %edi
-	xorl	%esi, %esi
-	xorl	%edx, %edx
-	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
-	movq	%rax, %r15
-	movq	%rdx, %rbp
-	leaq	(%rdx,%rdx,2), %rax
-	leaq	static_string_0c475e2a8e1ec05d(%rip), %rcx
-	movq	%rcx, (%r15,%rax,8)
-	movq	$5, 8(%r15,%rax,8)
-	movabsq	$2305843009213693952, %rcx
-	movq	%rcx, 16(%r15,%rax,8)
-	incq	%rbp
-	jmp	.LBB0_154
-.LBB0_172:
-	callq	KGEN_CompilerRT_AsyncRT_ParallelismLevel@PLT
-	movl	%eax, 144(%rsp)
-	movslq	%eax, %r14
-	testl	%r14d, %r14d
-	movl	$1, %ecx
-	cmovneq	%r14, %rcx
-	movq	%r13, %rax
-	orq	%rcx, %rax
-	shrq	$32, %rax
-	je	.LBB0_173
-	movq	%r13, %rax
-	cqto
-	idivq	%rcx
-	movq	%rax, %r12
-	jmp	.LBB0_175
-.LBB0_147:
-	xorl	%r15d, %r15d
-	xorl	%ebp, %ebp
-.LBB0_154:
-	movabsq	$4611686018427387904, %r14
-	leaq	static_string_44fd141e40b306d5(%rip), %rdi
-	movl	$2, %esi
-	movq	%r15, %rdx
-	movq	%rbp, %rcx
-	callq	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
-	movq	%rax, 8(%rsp)
-	movq	%rcx, %r13
-	xorl	%r12d, %r12d
-	testq	%rbp, %rbp
-	cmovgq	%rbp, %r12
-	jle	.LBB0_160
-	cmpq	$1, %r12
-	movq	%r12, %rax
-	adcq	$-1, %rax
-	movq	%r12, %rbp
-	jmp	.LBB0_156
-	.p2align	4
-.LBB0_159:
-	movq	%rbp, %rax
-	addq	$-1, %rax
-	jae	.LBB0_160
-.LBB0_156:
-	movq	%r12, %rcx
-	subq	%rbp, %rcx
-	movq	%rax, %rbp
-	leaq	(%rcx,%rcx,2), %rax
-	testq	%r14, 16(%r15,%rax,8)
-	je	.LBB0_159
-	leaq	(%r15,%rax,8), %rax
-	movq	(%rax), %rdi
-	lock		decq	-8(%rdi)
-	jne	.LBB0_159
-	addq	$-8, %rdi
-	#MEMBARRIER
-	callq	KGEN_CompilerRT_AlignedFree@PLT
-	jmp	.LBB0_159
-.LBB0_160:
-	movq	%r15, %rdi
-	callq	KGEN_CompilerRT_AlignedFree@PLT
-	testq	%r14, %r13
-	je	.LBB0_163
-	movq	8(%rsp), %rax
-	lock		decq	-8(%rax)
-	jne	.LBB0_163
-	movq	8(%rsp), %rdi
-	addq	$-8, %rdi
-	#MEMBARRIER
-	callq	KGEN_CompilerRT_AlignedFree@PLT
-.LBB0_163:
-	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
-	testq	%rax, %rax
-	je	.LBB0_164
-	leaq	static_string_2b3f504061b33816(%rip), %rdi
-	movl	$4, %esi
-	xorl	%edx, %edx
-	callq	KGEN_CompilerRT_TracyZoneBegin@PLT
-	movq	%rax, 8(%rsp)
-	jmp	.LBB0_166
-.LBB0_173:
-	movl	%r13d, %eax
-	xorl	%edx, %edx
-	divl	%ecx
-	movl	%eax, %r12d
-.LBB0_175:
-	testl	%r14d, %r14d
-	sets	%al
-	movq	%rdx, 176(%rsp)
-	testq	%rdx, %rdx
-	setne	%bpl
-	xorl	%r13d, %r13d
-	andb	%al, %bpl
-	movl	$0, %eax
-	cmovneq	%r14, %rax
-	movq	%rax, 64(%rsp)
-	movq	$0, 160(%rsp)
-	leaq	160(%rsp), %rdi
-	callq	KGEN_CompilerRT_AsyncRT_InitializeChain@PLT
-	movq	$1, 16(%rsp)
-	movq	160(%rsp), %rax
-	movq	%rax, 24(%rsp)
-	movl	$8, %edi
-	movl	$128, %esi
-	callq	KGEN_CompilerRT_AlignedAlloc@PLT
-	movq	%rax, 32(%rsp)
-	movq	$0, 40(%rsp)
-	movq	$16, 48(%rsp)
-	testl	%r14d, %r14d
-	je	.LBB0_178
-	movzbl	%bpl, %eax
-	subq	%rax, %r12
-	testq	%r12, %r12
-	jle	.LBB0_178
-	movq	%r14, %rax
-	sarq	$63, %rax
-	andnq	%r14, %rax, %r15
-	cmpq	$1, %r15
-	movq	%r15, %rax
-	adcq	$-1, %rax
-	movq	%rax, 8(%rsp)
-	xorl	%r13d, %r13d
-	testl	%r14d, %r14d
-	jg	.LBB0_194
-.LBB0_178:
-	cmpl	$0, 144(%rsp)
-	movq	64(%rsp), %r14
-	je	.LBB0_184
-	addq	176(%rsp), %r14
-	testq	%r14, %r14
-	jle	.LBB0_184
-	leaq	16(%rsp), %rbp
-	movq	"gemm::matmul_packed[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3"@GOTPCREL(%rip), %r15
-	jmp	.LBB0_181
-	.p2align	4
-.LBB0_183:
-	movq	%r12, (%rax,%rdx,8)
-	decq	%r14
-	incq	40(%rsp)
-	incq	%r13
-	testq	%r14, %r14
-	je	.LBB0_184
-.LBB0_181:
 	movl	$8, %edi
 	movl	$184, %esi
 	callq	KGEN_CompilerRT_AlignedAlloc@PLT
 	movq	%rax, %r12
 	movl	$0, (%rax)
-	movq	"gemm::matmul_packed[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_2_resume"@GOTPCREL(%rip), %rax
+	movq	"gemm::matmul_register_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_0_resume"@GOTPCREL(%rip), %rax
 	movq	%rax, 8(%r12)
 	leaq	static_string_2b3f504061b33816(%rip), %rax
 	movq	%rax, 48(%r12)
@@ -1392,36 +1077,37 @@ main:
 	movq	$2, 96(%r12)
 	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
 	movq	%rax, 104(%r12)
-	leaq	120(%rsp), %rax
-	movq	%rax, 112(%r12)
-	movq	%r13, 120(%r12)
-	leaq	128(%rsp), %rax
-	movq	%rax, 128(%r12)
-	leaq	104(%rsp), %rax
-	movq	%rax, 136(%r12)
-	leaq	96(%rsp), %rax
-	movq	%rax, 144(%r12)
 	leaq	112(%rsp), %rax
-	movq	%rax, 152(%r12)
-	leaq	80(%rsp), %rax
-	movq	%rax, 160(%r12)
+	movq	%rax, 112(%r12)
+	movq	%r14, 120(%r12)
+	leaq	120(%rsp), %rax
+	movq	%rax, 128(%r12)
+	leaq	96(%rsp), %rax
+	movq	%rax, 136(%r12)
 	leaq	88(%rsp), %rax
-	movq	%rax, 168(%r12)
+	movq	%rax, 144(%r12)
+	leaq	104(%rsp), %rax
+	movq	%rax, 152(%r12)
 	leaq	72(%rsp), %rax
+	movq	%rax, 160(%r12)
+	leaq	80(%rsp), %rax
+	movq	%rax, 168(%r12)
+	leaq	64(%rsp), %rax
 	movq	%rax, 176(%r12)
-	lock		incq	16(%rsp)
+	lock		incq	8(%rsp)
 	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
 	movq	%rax, 16(%r12)
-	movq	%rbp, 24(%r12)
-	movq	%r15, %rdi
+	leaq	8(%rsp), %rax
+	movq	%rax, 24(%r12)
+	movq	"gemm::matmul_register_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1"@GOTPCREL(%rip), %rdi
 	movq	%r12, %rsi
-	movq	$-1, %rdx
+	movq	%r15, %rdx
 	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
-	movq	32(%rsp), %rax
-	movq	40(%rsp), %rdx
-	movq	48(%rsp), %r8
+	movq	24(%rsp), %rax
+	movq	32(%rsp), %rdx
+	movq	40(%rsp), %r8
 	cmpq	%r8, %rdx
-	jl	.LBB0_183
+	jl	.LBB0_150
 	xorl	%ecx, %ecx
 	testq	%r8, %r8
 	sete	%cl
@@ -1430,32 +1116,365 @@ main:
 	movq	%rdx, %rsi
 	movq	%r8, %rdx
 	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
-	movq	%rax, 32(%rsp)
-	movq	%rdx, 40(%rsp)
-	movq	%rcx, 48(%rsp)
-	jmp	.LBB0_183
+	movq	%rax, 24(%rsp)
+	movq	%rdx, 32(%rsp)
+	movq	%rcx, 40(%rsp)
+	jmp	.LBB0_150
+.LBB0_133:
+	leaq	16(%rsp), %r12
+	lock		decq	8(%rsp)
+	jne	.LBB0_135
+	movq	%r12, %rdi
+	callq	KGEN_CompilerRT_AsyncRT_Complete@PLT
+.LBB0_135:
+	movq	%r12, %rdi
+	callq	KGEN_CompilerRT_AsyncRT_Wait@PLT
+	movq	24(%rsp), %r15
+	movq	32(%rsp), %rax
+	xorl	%r14d, %r14d
+	testq	%rax, %rax
+	cmovgq	%rax, %r14
+	movq	176(%rsp), %rbp
+	jle	.LBB0_139
+	xorl	%r13d, %r13d
 	.p2align	4
-.LBB0_193:
+.LBB0_137:
+	movq	(%r15,%r13,8), %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	incq	%r13
+	cmpq	%r13, %r14
+	jne	.LBB0_137
+	movq	24(%rsp), %r15
+.LBB0_139:
+	movq	%r15, %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	movq	%r12, %rdi
+	callq	KGEN_CompilerRT_AsyncRT_DestroyChain@PLT
+	movq	168(%rsp), %r15
+	movq	160(%rsp), %r14
+	movq	128(%rsp), %r12
+	movq	136(%rsp), %r13
+	jmp	.LBB0_140
+.LBB0_113:
+	movq	$0, 48(%rsp)
+.LBB0_115:
+	movq	120(%rsp), %rax
+	xorl	%ebp, %ebp
+	testq	%rax, %rax
+	setg	%bpl
+	addq	112(%rsp), %rbp
+	testq	%rbp, %rbp
+	jle	.LBB0_118
+	movq	%rax, %r15
+	sarq	$63, %r15
+	andq	%rax, %r15
+	leaq	104(%rsp), %r12
+	leaq	72(%rsp), %r14
+	leaq	80(%rsp), %r13
+	.p2align	4
+.LBB0_117:
+	leaq	64(%rsp), %rax
+	movq	%rax, (%rsp)
+	movq	%r15, %rdi
+	leaq	96(%rsp), %rsi
+	leaq	88(%rsp), %rdx
+	movq	%r12, %rcx
+	movq	%r14, %r8
+	movq	%r13, %r9
+	callq	"gemm::matmul_register_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"@PLT
+	incq	%r15
+	decq	%rbp
+	jne	.LBB0_117
+.LBB0_118:
+	movq	48(%rsp), %rdi
+	testq	%rdi, %rdi
+	je	.LBB0_120
+	callq	KGEN_CompilerRT_TracyZoneEnd@PLT
+.LBB0_120:
+	movl	56(%rsp), %eax
+	movl	%eax, 8(%rsp)
+	vldmxcsr	8(%rsp)
+	movq	168(%rsp), %r15
+	movq	160(%rsp), %r14
+	movq	128(%rsp), %r12
+	movq	136(%rsp), %r13
+	movq	176(%rsp), %rbp
+.LBB0_140:
+	movq	$96, 64(%rsp)
+	movq	$11008, 72(%rsp)
+	movq	$2048, 80(%rsp)
+	movq	%r14, 88(%rsp)
+	movq	%r15, 96(%rsp)
+	movq	%rbx, 104(%rsp)
+	movl	$8454144, %edx
+	movq	%r14, %rdi
+	xorl	%esi, %esi
+	callq	memset@PLT
+	movq	%r13, 112(%rsp)
+	movq	%rbp, 120(%rsp)
+	testq	%r12, %r12
+	jle	.LBB0_189
+	cmpq	$1, %r12
+	jne	.LBB0_170
+	movl	$0, 8(%rsp)
+	vstmxcsr	8(%rsp)
+	movl	8(%rsp), %ecx
+	movl	%ecx, %eax
+	notl	%eax
+	testl	$32832, %eax
+	je	.LBB0_144
+	movl	%ecx, %eax
+	orl	$32832, %eax
+	movl	%eax, 8(%rsp)
+	vldmxcsr	8(%rsp)
+.LBB0_144:
+	movl	%ecx, 56(%rsp)
+	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
+	testq	%rax, %rax
+	je	.LBB0_145
+	movl	$1, %ecx
+	xorl	%edi, %edi
+	xorl	%esi, %esi
+	xorl	%edx, %edx
+	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
+	movq	%rax, %r13
+	movq	%rdx, %r15
+	leaq	(%rdx,%rdx,2), %rax
+	leaq	static_string_0c475e2a8e1ec05d(%rip), %rcx
+	movq	%rcx, (%r13,%rax,8)
+	movq	$5, 8(%r13,%rax,8)
+	movabsq	$2305843009213693952, %rcx
+	movq	%rcx, 16(%r13,%rax,8)
+	incq	%r15
+	jmp	.LBB0_152
+.LBB0_170:
+	callq	KGEN_CompilerRT_AsyncRT_ParallelismLevel@PLT
+	movl	%eax, 156(%rsp)
+	movslq	%eax, %r15
+	testl	%r15d, %r15d
+	movl	$1, %ecx
+	cmovneq	%r15, %rcx
+	movq	%r12, %rax
+	orq	%rcx, %rax
+	shrq	$32, %rax
+	je	.LBB0_171
+	movq	%r12, %rax
+	cqto
+	idivq	%rcx
+	movq	%rax, %r12
+	jmp	.LBB0_173
+.LBB0_145:
+	xorl	%r13d, %r13d
+	xorl	%r15d, %r15d
+.LBB0_152:
+	leaq	static_string_44fd141e40b306d5(%rip), %rdi
+	movl	$2, %esi
+	movq	%r13, %rdx
+	movq	%r15, %rcx
+	callq	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
+	movq	%rax, %r12
+	movq	%rcx, %rbp
+	xorl	%r14d, %r14d
+	testq	%r15, %r15
+	cmovgq	%r15, %r14
+	movabsq	$4611686018427387904, %rdx
+	jle	.LBB0_158
+	cmpq	$1, %r14
+	movq	%r14, %rax
+	adcq	$-1, %rax
+	movq	%r14, %r15
+	jmp	.LBB0_154
+	.p2align	4
+.LBB0_157:
+	movq	%r15, %rax
+	addq	$-1, %rax
+	jae	.LBB0_158
+.LBB0_154:
+	movq	%r14, %rcx
+	subq	%r15, %rcx
+	movq	%rax, %r15
+	leaq	(%rcx,%rcx,2), %rax
+	testq	%rdx, 16(%r13,%rax,8)
+	je	.LBB0_157
+	leaq	(,%rax,8), %rax
+	addq	%r13, %rax
+	movq	(%rax), %rdi
+	lock		decq	-8(%rdi)
+	jne	.LBB0_157
+	addq	$-8, %rdi
+	#MEMBARRIER
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	movabsq	$4611686018427387904, %rdx
+	jmp	.LBB0_157
+.LBB0_158:
+	movq	%r13, %rdi
+	movq	%rdx, %r14
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	testq	%r14, %rbp
+	je	.LBB0_161
+	lock		decq	-8(%r12)
+	jne	.LBB0_161
+	addq	$-8, %r12
+	#MEMBARRIER
+	movq	%r12, %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+.LBB0_161:
+	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
+	testq	%rax, %rax
+	je	.LBB0_162
+	leaq	static_string_2b3f504061b33816(%rip), %rdi
+	movl	$4, %esi
+	xorl	%edx, %edx
+	callq	KGEN_CompilerRT_TracyZoneBegin@PLT
+	movq	%rax, 48(%rsp)
+	jmp	.LBB0_164
+.LBB0_171:
+	movl	%r12d, %eax
+	xorl	%edx, %edx
+	divl	%ecx
+	movl	%eax, %r12d
+.LBB0_173:
+	testl	%r15d, %r15d
+	sets	%al
+	movq	%rdx, 184(%rsp)
+	testq	%rdx, %rdx
+	setne	%bpl
+	xorl	%r14d, %r14d
+	andb	%al, %bpl
+	movl	$0, %eax
+	cmovneq	%r15, %rax
+	movq	%rax, 192(%rsp)
+	movq	$0, 144(%rsp)
+	leaq	144(%rsp), %rdi
+	callq	KGEN_CompilerRT_AsyncRT_InitializeChain@PLT
+	movq	$1, 8(%rsp)
+	movq	144(%rsp), %rax
+	movq	%rax, 16(%rsp)
+	movl	$8, %edi
+	movl	$128, %esi
+	callq	KGEN_CompilerRT_AlignedAlloc@PLT
+	movq	%rax, 24(%rsp)
+	movq	$0, 32(%rsp)
+	movq	$16, 40(%rsp)
+	testl	%r15d, %r15d
+	je	.LBB0_176
+	movzbl	%bpl, %eax
+	subq	%rax, %r12
+	testq	%r12, %r12
+	jle	.LBB0_176
+	movq	%r15, %rax
+	sarq	$63, %rax
+	andnq	%r15, %rax, %r13
+	cmpq	$1, %r13
+	movq	%r13, %rax
+	adcq	$-1, %rax
+	movq	%rax, 48(%rsp)
+	xorl	%r14d, %r14d
+	testl	%r15d, %r15d
+	jg	.LBB0_196
+.LBB0_176:
+	cmpl	$0, 156(%rsp)
+	movq	192(%rsp), %r15
+	je	.LBB0_182
+	addq	184(%rsp), %r15
+	testq	%r15, %r15
+	jle	.LBB0_182
+	leaq	8(%rsp), %r12
+	movq	"gemm::matmul_packed[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3"@GOTPCREL(%rip), %r13
+	jmp	.LBB0_179
+	.p2align	4
+.LBB0_181:
+	decq	%r15
+	movq	%rbp, (%rax,%rdx,8)
+	incq	32(%rsp)
+	incq	%r14
+	testq	%r15, %r15
+	je	.LBB0_182
+.LBB0_179:
+	movl	$8, %edi
+	movl	$184, %esi
+	callq	KGEN_CompilerRT_AlignedAlloc@PLT
+	movq	%rax, %rbp
+	movl	$0, (%rax)
+	movq	"gemm::matmul_packed[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_2_resume"@GOTPCREL(%rip), %rax
+	movq	%rax, 8(%rbp)
+	leaq	static_string_2b3f504061b33816(%rip), %rax
+	movq	%rax, 48(%rbp)
+	movq	$4, 56(%rbp)
+	leaq	static_string_c44bdff4074eecdb(%rip), %rax
+	movq	%rax, 64(%rbp)
+	movq	$0, 72(%rbp)
+	leaq	static_string_0c475e2a8e1ec05d(%rip), %rax
+	movq	%rax, 80(%rbp)
+	leaq	static_string_44fd141e40b306d5(%rip), %rax
+	movq	%rax, 88(%rbp)
+	movq	$2, 96(%rbp)
+	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
+	movq	%rax, 104(%rbp)
+	leaq	112(%rsp), %rax
+	movq	%rax, 112(%rbp)
+	movq	%r14, 120(%rbp)
+	leaq	120(%rsp), %rax
+	movq	%rax, 128(%rbp)
+	leaq	96(%rsp), %rax
+	movq	%rax, 136(%rbp)
+	leaq	88(%rsp), %rax
+	movq	%rax, 144(%rbp)
+	leaq	104(%rsp), %rax
+	movq	%rax, 152(%rbp)
+	leaq	72(%rsp), %rax
+	movq	%rax, 160(%rbp)
+	leaq	80(%rsp), %rax
+	movq	%rax, 168(%rbp)
+	leaq	64(%rsp), %rax
+	movq	%rax, 176(%rbp)
+	lock		incq	8(%rsp)
+	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
+	movq	%rax, 16(%rbp)
+	movq	%r12, 24(%rbp)
+	movq	%r13, %rdi
+	movq	%rbp, %rsi
+	movq	$-1, %rdx
+	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
+	movq	24(%rsp), %rax
+	movq	32(%rsp), %rdx
+	movq	40(%rsp), %r8
+	cmpq	%r8, %rdx
+	jl	.LBB0_181
+	xorl	%ecx, %ecx
+	testq	%r8, %r8
+	sete	%cl
+	leaq	(%rcx,%r8,2), %rcx
+	movq	%rax, %rdi
+	movq	%rdx, %rsi
+	movq	%r8, %rdx
+	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
+	movq	%rax, 24(%rsp)
+	movq	%rdx, 32(%rsp)
+	movq	%rcx, 40(%rsp)
+	jmp	.LBB0_181
+	.p2align	4
+.LBB0_195:
 	movq	56(%rsp), %r12
 	decq	%r12
-	je	.LBB0_178
-.LBB0_194:
+	je	.LBB0_176
+.LBB0_196:
 	movq	%r12, 56(%rsp)
-	movq	8(%rsp), %rax
-	movq	%r15, %r14
-	jmp	.LBB0_195
+	movq	48(%rsp), %rax
+	movq	%r13, %rbp
+	jmp	.LBB0_197
 	.p2align	4
-.LBB0_197:
+.LBB0_199:
 	movq	%r12, (%rax,%rdx,8)
-	incq	40(%rsp)
-	incq	%r13
-	movq	%r14, %rax
+	incq	32(%rsp)
+	incq	%r14
+	movq	%rbp, %rax
 	addq	$-1, %rax
-	jae	.LBB0_193
-.LBB0_195:
-	movq	%r15, %rbp
-	subq	%r14, %rbp
-	movq	%rax, %r14
+	jae	.LBB0_195
+.LBB0_197:
+	movq	%r13, %r15
+	subq	%rbp, %r15
+	movq	%rax, %rbp
 	movl	$8, %edi
 	movl	$184, %esi
 	callq	KGEN_CompilerRT_AlignedAlloc@PLT
@@ -1476,37 +1495,37 @@ main:
 	movq	$2, 96(%r12)
 	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
 	movq	%rax, 104(%r12)
-	leaq	120(%rsp), %rax
-	movq	%rax, 112(%r12)
-	movq	%r13, 120(%r12)
-	leaq	128(%rsp), %rax
-	movq	%rax, 128(%r12)
-	leaq	104(%rsp), %rax
-	movq	%rax, 136(%r12)
-	leaq	96(%rsp), %rax
-	movq	%rax, 144(%r12)
 	leaq	112(%rsp), %rax
-	movq	%rax, 152(%r12)
-	leaq	80(%rsp), %rax
-	movq	%rax, 160(%r12)
+	movq	%rax, 112(%r12)
+	movq	%r14, 120(%r12)
+	leaq	120(%rsp), %rax
+	movq	%rax, 128(%r12)
+	leaq	96(%rsp), %rax
+	movq	%rax, 136(%r12)
 	leaq	88(%rsp), %rax
-	movq	%rax, 168(%r12)
+	movq	%rax, 144(%r12)
+	leaq	104(%rsp), %rax
+	movq	%rax, 152(%r12)
 	leaq	72(%rsp), %rax
+	movq	%rax, 160(%r12)
+	leaq	80(%rsp), %rax
+	movq	%rax, 168(%r12)
+	leaq	64(%rsp), %rax
 	movq	%rax, 176(%r12)
-	lock		incq	16(%rsp)
+	lock		incq	8(%rsp)
 	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
 	movq	%rax, 16(%r12)
-	leaq	16(%rsp), %rax
+	leaq	8(%rsp), %rax
 	movq	%rax, 24(%r12)
 	movq	"gemm::matmul_packed[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1"@GOTPCREL(%rip), %rdi
 	movq	%r12, %rsi
-	movq	%rbp, %rdx
+	movq	%r15, %rdx
 	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
-	movq	32(%rsp), %rax
-	movq	40(%rsp), %rdx
-	movq	48(%rsp), %r8
+	movq	24(%rsp), %rax
+	movq	32(%rsp), %rdx
+	movq	40(%rsp), %r8
 	cmpq	%r8, %rdx
-	jl	.LBB0_197
+	jl	.LBB0_199
 	xorl	%ecx, %ecx
 	testq	%r8, %r8
 	sete	%cl
@@ -1515,83 +1534,501 @@ main:
 	movq	%rdx, %rsi
 	movq	%r8, %rdx
 	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
-	movq	%rax, 32(%rsp)
-	movq	%rdx, 40(%rsp)
-	movq	%rcx, 48(%rsp)
-	jmp	.LBB0_197
-.LBB0_184:
-	leaq	24(%rsp), %r15
-	lock		decq	16(%rsp)
-	jne	.LBB0_186
-	movq	%r15, %rdi
+	movq	%rax, 24(%rsp)
+	movq	%rdx, 32(%rsp)
+	movq	%rcx, 40(%rsp)
+	jmp	.LBB0_199
+.LBB0_182:
+	leaq	16(%rsp), %r12
+	lock		decq	8(%rsp)
+	jne	.LBB0_184
+	movq	%r12, %rdi
 	callq	KGEN_CompilerRT_AsyncRT_Complete@PLT
-.LBB0_186:
-	movq	%r15, %rdi
+.LBB0_184:
+	movq	%r12, %rdi
 	callq	KGEN_CompilerRT_AsyncRT_Wait@PLT
-	movq	32(%rsp), %r12
-	movq	40(%rsp), %rax
+	movq	24(%rsp), %r15
+	movq	32(%rsp), %rax
 	xorl	%r14d, %r14d
 	testq	%rax, %rax
 	cmovgq	%rax, %r14
-	jle	.LBB0_190
+	movq	176(%rsp), %rbp
+	jle	.LBB0_188
 	xorl	%r13d, %r13d
 	.p2align	4
-.LBB0_188:
-	movq	(%r12,%r13,8), %rdi
+.LBB0_186:
+	movq	(%r15,%r13,8), %rdi
 	callq	KGEN_CompilerRT_AlignedFree@PLT
 	incq	%r13
 	cmpq	%r13, %r14
-	jne	.LBB0_188
-	movq	32(%rsp), %r12
-.LBB0_190:
-	movq	%r12, %rdi
-	callq	KGEN_CompilerRT_AlignedFree@PLT
+	jne	.LBB0_186
+	movq	24(%rsp), %r15
+.LBB0_188:
 	movq	%r15, %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	movq	%r12, %rdi
 	callq	KGEN_CompilerRT_AsyncRT_DestroyChain@PLT
-	jmp	.LBB0_191
+	movq	168(%rsp), %r15
+	movq	160(%rsp), %r14
+	movq	128(%rsp), %r12
+	movq	136(%rsp), %r13
+	jmp	.LBB0_189
+.LBB0_162:
+	movq	$0, 48(%rsp)
 .LBB0_164:
-	movq	$0, 8(%rsp)
+	movq	120(%rsp), %rax
+	xorl	%ebp, %ebp
+	testq	%rax, %rax
+	setg	%bpl
+	addq	112(%rsp), %rbp
+	testq	%rbp, %rbp
+	jle	.LBB0_167
+	movq	%rax, %r15
+	sarq	$63, %r15
+	andq	%rax, %r15
+	leaq	104(%rsp), %r12
+	leaq	72(%rsp), %r14
+	leaq	80(%rsp), %r13
+	.p2align	4
 .LBB0_166:
-	movq	128(%rsp), %rax
+	leaq	64(%rsp), %rax
+	movq	%rax, (%rsp)
+	movq	%r15, %rdi
+	leaq	96(%rsp), %rsi
+	leaq	88(%rsp), %rdx
+	movq	%r12, %rcx
+	movq	%r14, %r8
+	movq	%r13, %r9
+	callq	"gemm::matmul_packed[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"@PLT
+	incq	%r15
+	decq	%rbp
+	jne	.LBB0_166
+.LBB0_167:
+	movq	48(%rsp), %rdi
+	testq	%rdi, %rdi
+	je	.LBB0_169
+	callq	KGEN_CompilerRT_TracyZoneEnd@PLT
+.LBB0_169:
+	movl	56(%rsp), %eax
+	movl	%eax, 8(%rsp)
+	vldmxcsr	8(%rsp)
+	movq	168(%rsp), %r15
+	movq	160(%rsp), %r14
+	movq	128(%rsp), %r12
+	movq	136(%rsp), %r13
+	movq	176(%rsp), %rbp
+.LBB0_189:
+	movq	$96, 64(%rsp)
+	movq	$11008, 72(%rsp)
+	movq	$2048, 80(%rsp)
+	movq	%r14, 88(%rsp)
+	movq	%r15, 96(%rsp)
+	movq	%rbx, 104(%rsp)
+	movl	$8454144, %edx
+	movq	%r14, %rdi
+	xorl	%esi, %esi
+	callq	memset@PLT
+	movq	%r13, 112(%rsp)
+	movq	%rbp, 120(%rsp)
+	testq	%r12, %r12
+	jle	.LBB0_239
+	cmpq	$1, %r12
+	jne	.LBB0_219
+	movl	$0, 8(%rsp)
+	vstmxcsr	8(%rsp)
+	movl	8(%rsp), %ecx
+	movl	%ecx, %eax
+	notl	%eax
+	testl	$32832, %eax
+	je	.LBB0_193
+	movl	%ecx, %eax
+	orl	$32832, %eax
+	movl	%eax, 8(%rsp)
+	vldmxcsr	8(%rsp)
+.LBB0_193:
+	movl	%ecx, 56(%rsp)
+	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
+	testq	%rax, %rax
+	je	.LBB0_194
+	movl	$1, %ecx
+	xorl	%edi, %edi
+	xorl	%esi, %esi
+	xorl	%edx, %edx
+	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
+	movq	%rax, %r12
+	movq	%rdx, %r15
+	leaq	(%rdx,%rdx,2), %rax
+	leaq	static_string_0c475e2a8e1ec05d(%rip), %rcx
+	movq	%rcx, (%r12,%rax,8)
+	movq	$5, 8(%r12,%rax,8)
+	movabsq	$2305843009213693952, %rcx
+	movq	%rcx, 16(%r12,%rax,8)
+	incq	%r15
+	jmp	.LBB0_201
+.LBB0_219:
+	callq	KGEN_CompilerRT_AsyncRT_ParallelismLevel@PLT
+	movl	%eax, 136(%rsp)
+	movslq	%eax, %r15
+	testl	%r15d, %r15d
+	movl	$1, %ecx
+	cmovneq	%r15, %rcx
+	movq	%r12, %rax
+	orq	%rcx, %rax
+	shrq	$32, %rax
+	je	.LBB0_220
+	movq	%r12, %rax
+	cqto
+	idivq	%rcx
+	movq	%rax, %r13
+	jmp	.LBB0_222
+.LBB0_194:
+	xorl	%r12d, %r12d
+	xorl	%r15d, %r15d
+.LBB0_201:
+	leaq	static_string_44fd141e40b306d5(%rip), %rdi
+	movl	$2, %esi
+	movq	%r12, %rdx
+	movq	%r15, %rcx
+	callq	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
+	movq	%rax, %r13
+	movq	%rcx, %rbp
+	xorl	%r14d, %r14d
+	testq	%r15, %r15
+	cmovgq	%r15, %r14
+	movabsq	$4611686018427387904, %rdx
+	jle	.LBB0_207
+	cmpq	$1, %r14
+	movq	%r14, %rax
+	adcq	$-1, %rax
+	movq	%r14, %r15
+	jmp	.LBB0_203
+	.p2align	4
+.LBB0_206:
+	movq	%r15, %rax
+	addq	$-1, %rax
+	jae	.LBB0_207
+.LBB0_203:
+	movq	%r14, %rcx
+	subq	%r15, %rcx
+	movq	%rax, %r15
+	leaq	(%rcx,%rcx,2), %rax
+	testq	%rdx, 16(%r12,%rax,8)
+	je	.LBB0_206
+	leaq	(%r12,%rax,8), %rax
+	movq	(%rax), %rdi
+	lock		decq	-8(%rdi)
+	jne	.LBB0_206
+	addq	$-8, %rdi
+	#MEMBARRIER
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	movabsq	$4611686018427387904, %rdx
+	jmp	.LBB0_206
+.LBB0_207:
+	movq	%r12, %rdi
+	movq	%rdx, %r14
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	testq	%r14, %rbp
+	je	.LBB0_210
+	lock		decq	-8(%r13)
+	jne	.LBB0_210
+	addq	$-8, %r13
+	#MEMBARRIER
+	movq	%r13, %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+.LBB0_210:
+	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
+	testq	%rax, %rax
+	je	.LBB0_211
+	leaq	static_string_2b3f504061b33816(%rip), %rdi
+	movl	$4, %esi
+	xorl	%edx, %edx
+	callq	KGEN_CompilerRT_TracyZoneBegin@PLT
+	movq	%rax, 48(%rsp)
+	jmp	.LBB0_213
+.LBB0_220:
+	movl	%r12d, %eax
+	xorl	%edx, %edx
+	divl	%ecx
+	movl	%eax, %r13d
+.LBB0_222:
+	testl	%r15d, %r15d
+	sets	%al
+	movq	%rdx, 176(%rsp)
+	testq	%rdx, %rdx
+	setne	%bpl
+	xorl	%r14d, %r14d
+	andb	%al, %bpl
+	movl	$0, %eax
+	cmovneq	%r15, %rax
+	movq	%rax, 128(%rsp)
+	movq	$0, 144(%rsp)
+	leaq	144(%rsp), %rdi
+	callq	KGEN_CompilerRT_AsyncRT_InitializeChain@PLT
+	movq	$1, 8(%rsp)
+	movq	144(%rsp), %rax
+	movq	%rax, 16(%rsp)
+	movl	$8, %edi
+	movl	$128, %esi
+	callq	KGEN_CompilerRT_AlignedAlloc@PLT
+	movq	%rax, 24(%rsp)
+	movq	$0, 32(%rsp)
+	movq	$16, 40(%rsp)
+	testl	%r15d, %r15d
+	je	.LBB0_225
+	movzbl	%bpl, %eax
+	subq	%rax, %r13
+	testq	%r13, %r13
+	jle	.LBB0_225
+	movq	%r15, %rax
+	sarq	$63, %rax
+	andnq	%r15, %rax, %r12
+	cmpq	$1, %r12
+	movq	%r12, %rax
+	adcq	$-1, %rax
+	movq	%rax, 48(%rsp)
+	xorl	%r14d, %r14d
+	testl	%r15d, %r15d
+	jg	.LBB0_241
+.LBB0_225:
+	cmpl	$0, 136(%rsp)
+	movq	128(%rsp), %r15
+	je	.LBB0_231
+	addq	176(%rsp), %r15
+	testq	%r15, %r15
+	jle	.LBB0_231
+	leaq	8(%rsp), %rbp
+	movq	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3"@GOTPCREL(%rip), %r12
+	jmp	.LBB0_228
+	.p2align	4
+.LBB0_230:
+	decq	%r15
+	movq	%r13, (%rax,%rdx,8)
+	incq	32(%rsp)
+	incq	%r14
+	testq	%r15, %r15
+	je	.LBB0_231
+.LBB0_228:
+	movl	$8, %edi
+	movl	$184, %esi
+	callq	KGEN_CompilerRT_AlignedAlloc@PLT
+	movq	%rax, %r13
+	movl	$0, (%rax)
+	movq	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_2_resume"@GOTPCREL(%rip), %rax
+	movq	%rax, 8(%r13)
+	leaq	static_string_2b3f504061b33816(%rip), %rax
+	movq	%rax, 48(%r13)
+	movq	$4, 56(%r13)
+	leaq	static_string_c44bdff4074eecdb(%rip), %rax
+	movq	%rax, 64(%r13)
+	movq	$0, 72(%r13)
+	leaq	static_string_0c475e2a8e1ec05d(%rip), %rax
+	movq	%rax, 80(%r13)
+	leaq	static_string_44fd141e40b306d5(%rip), %rax
+	movq	%rax, 88(%r13)
+	movq	$2, 96(%r13)
+	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
+	movq	%rax, 104(%r13)
+	leaq	112(%rsp), %rax
+	movq	%rax, 112(%r13)
+	movq	%r14, 120(%r13)
+	leaq	120(%rsp), %rax
+	movq	%rax, 128(%r13)
+	leaq	96(%rsp), %rax
+	movq	%rax, 136(%r13)
+	leaq	88(%rsp), %rax
+	movq	%rax, 144(%r13)
+	leaq	104(%rsp), %rax
+	movq	%rax, 152(%r13)
+	leaq	72(%rsp), %rax
+	movq	%rax, 160(%r13)
+	leaq	80(%rsp), %rax
+	movq	%rax, 168(%r13)
+	leaq	64(%rsp), %rax
+	movq	%rax, 176(%r13)
+	lock		incq	8(%rsp)
+	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
+	movq	%rax, 16(%r13)
+	movq	%rbp, 24(%r13)
+	movq	%r12, %rdi
+	movq	%r13, %rsi
+	movq	$-1, %rdx
+	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
+	movq	24(%rsp), %rax
+	movq	32(%rsp), %rdx
+	movq	40(%rsp), %r8
+	cmpq	%r8, %rdx
+	jl	.LBB0_230
+	xorl	%ecx, %ecx
+	testq	%r8, %r8
+	sete	%cl
+	leaq	(%rcx,%r8,2), %rcx
+	movq	%rax, %rdi
+	movq	%rdx, %rsi
+	movq	%r8, %rdx
+	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
+	movq	%rax, 24(%rsp)
+	movq	%rdx, 32(%rsp)
+	movq	%rcx, 40(%rsp)
+	jmp	.LBB0_230
+	.p2align	4
+.LBB0_240:
+	movq	56(%rsp), %r13
+	decq	%r13
+	je	.LBB0_225
+.LBB0_241:
+	movq	%r13, 56(%rsp)
+	movq	48(%rsp), %rax
+	movq	%r12, %r13
+	jmp	.LBB0_242
+	.p2align	4
+.LBB0_244:
+	movq	%rbp, (%rax,%rdx,8)
+	incq	32(%rsp)
+	incq	%r14
+	movq	%r13, %rax
+	addq	$-1, %rax
+	jae	.LBB0_240
+.LBB0_242:
+	movq	%r12, %r15
+	subq	%r13, %r15
+	movq	%rax, %r13
+	movl	$8, %edi
+	movl	$184, %esi
+	callq	KGEN_CompilerRT_AlignedAlloc@PLT
+	movq	%rax, %rbp
+	movl	$0, (%rax)
+	movq	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_0_resume"@GOTPCREL(%rip), %rax
+	movq	%rax, 8(%rbp)
+	leaq	static_string_2b3f504061b33816(%rip), %rax
+	movq	%rax, 48(%rbp)
+	movq	$4, 56(%rbp)
+	leaq	static_string_c44bdff4074eecdb(%rip), %rax
+	movq	%rax, 64(%rbp)
+	movq	$0, 72(%rbp)
+	leaq	static_string_0c475e2a8e1ec05d(%rip), %rax
+	movq	%rax, 80(%rbp)
+	leaq	static_string_44fd141e40b306d5(%rip), %rax
+	movq	%rax, 88(%rbp)
+	movq	$2, 96(%rbp)
+	leaq	static_string_f9c5d72f244f07d1(%rip), %rax
+	movq	%rax, 104(%rbp)
+	leaq	112(%rsp), %rax
+	movq	%rax, 112(%rbp)
+	movq	%r14, 120(%rbp)
+	leaq	120(%rsp), %rax
+	movq	%rax, 128(%rbp)
+	leaq	96(%rsp), %rax
+	movq	%rax, 136(%rbp)
+	leaq	88(%rsp), %rax
+	movq	%rax, 144(%rbp)
+	leaq	104(%rsp), %rax
+	movq	%rax, 152(%rbp)
+	leaq	72(%rsp), %rax
+	movq	%rax, 160(%rbp)
+	leaq	80(%rsp), %rax
+	movq	%rax, 168(%rbp)
+	leaq	64(%rsp), %rax
+	movq	%rax, 176(%rbp)
+	lock		incq	8(%rsp)
+	movq	"std::runtime::asyncrt::TaskGroup::_task_complete_callback(::TaskGroup&)"@GOTPCREL(%rip), %rax
+	movq	%rax, 16(%rbp)
+	leaq	8(%rsp), %rax
+	movq	%rax, 24(%rbp)
+	movq	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1"@GOTPCREL(%rip), %rdi
+	movq	%rbp, %rsi
+	movq	%r15, %rdx
+	callq	KGEN_CompilerRT_AsyncRT_Execute@PLT
+	movq	24(%rsp), %rax
+	movq	32(%rsp), %rdx
+	movq	40(%rsp), %r8
+	cmpq	%r8, %rdx
+	jl	.LBB0_244
+	xorl	%ecx, %ecx
+	testq	%r8, %r8
+	sete	%cl
+	leaq	(%rcx,%r8,2), %rcx
+	movq	%rax, %rdi
+	movq	%rdx, %rsi
+	movq	%r8, %rdx
+	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::runtime::asyncrt::_TaskGroupBox\">>, !co.routine]"@PLT
+	movq	%rax, 24(%rsp)
+	movq	%rdx, 32(%rsp)
+	movq	%rcx, 40(%rsp)
+	jmp	.LBB0_244
+.LBB0_231:
+	leaq	16(%rsp), %r12
+	lock		decq	8(%rsp)
+	jne	.LBB0_233
+	movq	%r12, %rdi
+	callq	KGEN_CompilerRT_AsyncRT_Complete@PLT
+.LBB0_233:
+	movq	%r12, %rdi
+	callq	KGEN_CompilerRT_AsyncRT_Wait@PLT
+	movq	24(%rsp), %r15
+	movq	32(%rsp), %rax
 	xorl	%r14d, %r14d
 	testq	%rax, %rax
-	setg	%r14b
-	addq	120(%rsp), %r14
-	testq	%r14, %r14
-	jle	.LBB0_169
-	movq	%rax, %r12
-	sarq	$63, %r12
-	andq	%rax, %r12
-	leaq	112(%rsp), %r15
-	leaq	80(%rsp), %r13
-	leaq	88(%rsp), %rbp
+	cmovgq	%rax, %r14
+	jle	.LBB0_237
+	xorl	%r13d, %r13d
 	.p2align	4
-.LBB0_168:
-	leaq	72(%rsp), %rax
-	movq	%rax, (%rsp)
+.LBB0_235:
+	movq	(%r15,%r13,8), %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	incq	%r13
+	cmpq	%r13, %r14
+	jne	.LBB0_235
+	movq	24(%rsp), %r15
+.LBB0_237:
+	movq	%r15, %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
 	movq	%r12, %rdi
-	leaq	104(%rsp), %rsi
-	leaq	96(%rsp), %rdx
-	movq	%r15, %rcx
-	movq	%r13, %r8
-	movq	%rbp, %r9
-	callq	"gemm::matmul_packed[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"@PLT
-	incq	%r12
-	decq	%r14
-	jne	.LBB0_168
-.LBB0_169:
-	movq	8(%rsp), %rdi
+	callq	KGEN_CompilerRT_AsyncRT_DestroyChain@PLT
+	jmp	.LBB0_238
+.LBB0_211:
+	movq	$0, 48(%rsp)
+.LBB0_213:
+	movq	120(%rsp), %rax
+	xorl	%ebp, %ebp
+	testq	%rax, %rax
+	setg	%bpl
+	addq	112(%rsp), %rbp
+	testq	%rbp, %rbp
+	jle	.LBB0_216
+	movq	%rax, %r15
+	sarq	$63, %r15
+	andq	%rax, %r15
+	leaq	104(%rsp), %r12
+	leaq	72(%rsp), %r14
+	leaq	80(%rsp), %r13
+	.p2align	4
+.LBB0_215:
+	leaq	64(%rsp), %rax
+	movq	%rax, (%rsp)
+	movq	%r15, %rdi
+	leaq	96(%rsp), %rsi
+	leaq	88(%rsp), %rdx
+	movq	%r12, %rcx
+	movq	%r14, %r8
+	movq	%r13, %r9
+	callq	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"@PLT
+	incq	%r15
+	decq	%rbp
+	jne	.LBB0_215
+.LBB0_216:
+	movq	48(%rsp), %rdi
 	testq	%rdi, %rdi
-	je	.LBB0_171
+	je	.LBB0_218
 	callq	KGEN_CompilerRT_TracyZoneEnd@PLT
-.LBB0_171:
+.LBB0_218:
 	movl	56(%rsp), %eax
-	movl	%eax, 16(%rsp)
-	vldmxcsr	16(%rsp)
-.LBB0_191:
-	movq	152(%rsp), %r15
-.LBB0_192:
-	movq	136(%rsp), %rdi
+	movl	%eax, 8(%rsp)
+	vldmxcsr	8(%rsp)
+.LBB0_238:
+	movq	168(%rsp), %r15
+	movq	160(%rsp), %r14
+.LBB0_239:
+	movq	%r14, %rdi
 	callq	KGEN_CompilerRT_AlignedFree@PLT
 	movq	%rbx, %rdi
 	callq	KGEN_CompilerRT_AlignedFree@PLT
@@ -2298,8 +2735,8 @@ main:
 	callq	KGEN_CompilerRT_AlignedFree@PLT
 	movq	%r13, %rax
 .LBB5_19:
-	movq	%r15, 8(%rbx)
 	sarq	$3, %r12
+	movq	%r15, 8(%rbx)
 	movq	%r14, (%rbx)
 	orq	%rax, %r12
 	movq	%r12, 16(%rbx)
@@ -2500,8 +2937,8 @@ main:
 	pushq	%r13
 	pushq	%r12
 	pushq	%rbx
-	movq	%r8, -120(%rsp)
-	movq	%rcx, -56(%rsp)
+	movq	%rcx, -72(%rsp)
+	movq	%rdx, -64(%rsp)
 	movq	56(%rsp), %rax
 	shlq	$5, %rdi
 	leaq	32(%rdi), %rcx
@@ -2509,91 +2946,89 @@ main:
 	cmpq	%rax, %rcx
 	cmovlq	%rcx, %rax
 	cmpq	%rax, %rdi
-	movq	%rax, -48(%rsp)
-	movq	%rdi, -112(%rsp)
+	movq	%rax, -56(%rsp)
+	movq	%rdi, -120(%rsp)
 	cmovgq	%rdi, %rax
-	movq	%rax, -72(%rsp)
-	movq	(%r9), %rdi
-	testq	%rdi, %rdi
+	movq	%rax, -88(%rsp)
+	movq	(%r9), %rcx
+	testq	%rcx, %rcx
 	jle	.LBB10_4
-	xorl	%r10d, %r10d
-	movq	-112(%rsp), %r8
-	cmpq	-48(%rsp), %r8
-	setl	%al
-	movq	-120(%rsp), %rcx
-	movq	(%rcx), %r11
-	testq	%r11, %r11
-	jle	.LBB10_2
-	movq	%rdi, -40(%rsp)
-	movb	%al, %r10b
-	orq	%r8, %r10
-	movq	%r10, -96(%rsp)
+	movq	%r8, %r11
 	xorl	%edi, %edi
+	movq	-120(%rsp), %rdx
+	cmpq	-56(%rsp), %rdx
+	setl	%al
+	movq	(%r8), %r8
+	testq	%r8, %r8
+	jle	.LBB10_2
+	movq	%rcx, -40(%rsp)
+	movb	%al, %dil
+	orq	%rdx, %rdi
+	movq	%rdi, -112(%rsp)
+	xorl	%ebp, %ebp
 	.p2align	4
 .LBB10_7:
-	leaq	32(%rdi), %rcx
+	leaq	32(%rbp), %rcx
 	movq	(%r9), %rax
 	cmpq	%rax, %rcx
 	movq	%rcx, -32(%rsp)
 	cmovlq	%rcx, %rax
-	cmpq	%rax, %rdi
+	cmpq	%rax, %rbp
 	movq	%rax, %r13
-	movq	%rdi, -104(%rsp)
-	cmovgq	%rdi, %r13
-	testq	%r11, %r11
+	cmovgq	%rbp, %r13
+	testq	%r8, %r8
 	jle	.LBB10_5
-	movq	-104(%rsp), %r8
-	cmpq	%rax, %r8
+	cmpq	%rax, %rbp
 	setl	%dil
-	movq	-48(%rsp), %rcx
-	cmpq	%rcx, -112(%rsp)
+	movq	-56(%rsp), %rcx
+	cmpq	%rcx, -120(%rsp)
 	jge	.LBB10_9
-	cmpq	%rax, %r8
+	cmpq	%rax, %rbp
 	jge	.LBB10_12
 	xorl	%eax, %eax
 	movb	%dil, %al
-	orq	%r8, %rax
-	movq	%rax, -64(%rsp)
-	movl	$32, %eax
+	orq	%rbp, %rax
 	movq	%rax, -80(%rsp)
-	movq	$0, -88(%rsp)
+	movl	$32, %eax
+	movq	%rax, -96(%rsp)
+	movq	$0, -104(%rsp)
 	xorl	%ebx, %ebx
 	xorl	%eax, %eax
-	movq	%r11, -24(%rsp)
+	movq	%rbp, -48(%rsp)
+	movq	%r8, -24(%rsp)
 	jmp	.LBB10_15
 	.p2align	4
 .LBB10_23:
 	addq	$256, %rbx
-	addq	$32, -80(%rsp)
-	addq	$-32, -88(%rsp)
-	movq	-24(%rsp), %r11
+	addq	$32, -96(%rsp)
+	addq	$-32, -104(%rsp)
+	movq	-24(%rsp), %r8
 	movq	-16(%rsp), %rax
-	cmpq	%r11, %rax
+	cmpq	%r8, %rax
 	jge	.LBB10_5
 .LBB10_15:
-	leaq	32(%rax), %r8
-	movq	-120(%rsp), %rcx
-	movq	(%rcx), %r15
-	cmpq	%r15, %r8
+	leaq	32(%rax), %rcx
+	movq	(%r11), %r15
+	cmpq	%r15, %rcx
 	movq	%r15, %rdi
-	movq	%r8, -16(%rsp)
-	cmovlq	%r8, %rdi
+	movq	%rcx, -16(%rsp)
+	cmovlq	%rcx, %rdi
 	subq	%rax, %rdi
 	movq	%rdi, %r14
 	andq	$-8, %r14
 	cmpq	$7, %rdi
 	jle	.LBB10_16
-	movq	-96(%rsp), %r8
-	movq	-112(%rsp), %r10
+	movq	-112(%rsp), %r8
+	movq	-120(%rsp), %r10
 	cmpq	%rdi, %r14
-	movq	-104(%rsp), %r11
 	jne	.LBB10_25
 	.p2align	4
 .LBB10_33:
 	movq	%r8, %rax
 	leaq	(,%r10,8), %r14
-	movq	-64(%rsp), %r8
-	movq	%r11, %r15
+	movq	-80(%rsp), %r8
+	movq	%rbp, %r15
+	movq	-72(%rsp), %rdx
 	.p2align	4
 .LBB10_34:
 	movq	%r15, %r12
@@ -2601,17 +3036,16 @@ main:
 	movq	(%r9), %r8
 	imulq	%r10, %r8
 	shlq	$3, %r8
-	movq	-56(%rsp), %rcx
-	addq	(%rcx), %r8
-	movq	-120(%rsp), %rcx
-	movq	(%rcx), %rcx
+	addq	(%rdx), %r8
+	movq	(%r11), %rcx
 	vbroadcastsd	(%r8,%r12,8), %zmm0
 	shlq	$3, %r12
 	movq	(%rsi), %r8
 	addq	%rbx, %r8
 	imulq	%rcx, %r12
 	addq	%r8, %r12
-	movq	(%rdx), %r8
+	movq	-64(%rsp), %r8
+	movq	(%r8), %r8
 	addq	%rbx, %r8
 	imulq	%r14, %rcx
 	addq	%r8, %rcx
@@ -2631,7 +3065,7 @@ main:
 	cmpq	%r13, %r15
 	jne	.LBB10_34
 	xorl	%r8d, %r8d
-	movq	-72(%rsp), %rcx
+	movq	-88(%rsp), %rcx
 	cmpq	%rcx, %rax
 	setne	%r8b
 	addq	%rax, %r8
@@ -2642,106 +3076,107 @@ main:
 	.p2align	4
 .LBB10_16:
 	cmpq	%rdi, %r14
-	movq	-104(%rsp), %r12
 	je	.LBB10_23
-	movq	-80(%rsp), %rax
+	movq	-96(%rsp), %rax
 	cmpq	%rax, %r15
 	cmovgeq	%rax, %r15
-	addq	-88(%rsp), %r15
+	addq	-104(%rsp), %r15
 	movq	%r15, %rax
 	andq	$-8, %rax
 	cmpq	%r15, %rax
 	cmovleq	%r15, %rax
-	movq	-96(%rsp), %r8
-	movq	-112(%rsp), %r10
+	movq	-112(%rsp), %r8
+	movq	-120(%rsp), %r10
 	.p2align	4
 .LBB10_18:
 	movq	%r8, %rdi
 	leaq	(,%r10,8), %r15
-	movq	-64(%rsp), %rbp
+	movq	-80(%rsp), %r8
+	movq	%rbp, %r12
+	movq	-72(%rsp), %rdx
 	.p2align	4
 .LBB10_19:
+	movq	%r12, %rbp
+	movq	%r8, %r12
 	movq	(%r9), %r8
 	imulq	%r10, %r8
 	shlq	$3, %r8
-	movq	-56(%rsp), %rcx
-	addq	(%rcx), %r8
-	movq	%r12, %r11
-	movq	%rbp, %r12
-	vmovsd	(%r8,%r11,8), %xmm0
-	shlq	$3, %r11
-	movq	-120(%rsp), %rcx
-	movq	(%rcx), %rcx
+	addq	(%rdx), %r8
+	vmovsd	(%r8,%rbp,8), %xmm0
+	shlq	$3, %rbp
+	movq	(%r11), %rcx
 	movq	(%rsi), %r8
 	addq	%rbx, %r8
-	imulq	%rcx, %r11
-	addq	%r8, %r11
-	movq	(%rdx), %r8
+	imulq	%rcx, %rbp
+	addq	%r8, %rbp
+	movq	-64(%rsp), %r8
+	movq	(%r8), %r8
 	addq	%rbx, %r8
 	imulq	%r15, %rcx
 	addq	%r8, %rcx
 	movq	%r14, %r8
 	.p2align	4
 .LBB10_20:
-	vmovsd	(%r11,%r8,8), %xmm1
+	vmovsd	(%rbp,%r8,8), %xmm1
 	vfmadd213sd	(%rcx,%r8,8), %xmm0, %xmm1
 	vmovsd	%xmm1, (%rcx,%r8,8)
 	incq	%r8
 	cmpq	%r8, %rax
 	jne	.LBB10_20
-	xorl	%ebp, %ebp
+	xorl	%r8d, %r8d
 	cmpq	%r13, %r12
-	setne	%bpl
-	addq	%r12, %rbp
+	setne	%r8b
+	addq	%r12, %r8
 	cmpq	%r13, %r12
 	jne	.LBB10_19
 	xorl	%r8d, %r8d
-	movq	-72(%rsp), %rcx
+	movq	-88(%rsp), %rcx
 	cmpq	%rcx, %rdi
 	setne	%r8b
 	addq	%rdi, %r8
 	movq	%rdi, %r10
 	cmpq	%rcx, %rdi
-	movq	-104(%rsp), %r12
+	movq	-48(%rsp), %rbp
 	jne	.LBB10_18
 	jmp	.LBB10_23
 	.p2align	4
 .LBB10_25:
-	movq	-80(%rsp), %rax
+	movq	-96(%rsp), %rax
 	cmpq	%rax, %r15
 	cmovgeq	%rax, %r15
-	addq	-88(%rsp), %r15
+	addq	-104(%rsp), %r15
 	movq	%r15, %rdi
 	andq	$-8, %rdi
 	cmpq	%r15, %rdi
 	cmovleq	%r15, %rdi
-	movq	-96(%rsp), %rax
-	movq	-112(%rsp), %r8
+	movq	-112(%rsp), %rax
+	movq	-120(%rsp), %rdx
 	.p2align	4
 .LBB10_26:
-	movq	%r9, %rcx
 	movq	%rax, -8(%rsp)
-	movq	-64(%rsp), %rax
-	movq	%r11, %r12
+	movq	-80(%rsp), %rax
+	movq	%rbp, %r12
 	.p2align	4
 .LBB10_27:
 	movq	%rax, %rbp
-	movq	(%rcx), %r9
-	imulq	%r8, %r9
+	movq	%r9, %r8
+	movq	(%r9), %r9
+	imulq	%rdx, %r9
 	shlq	$3, %r9
-	movq	-56(%rsp), %rax
+	movq	-72(%rsp), %rax
 	addq	(%rax), %r9
 	leaq	(,%r12,8), %rax
 	vbroadcastsd	(%r9,%r12,8), %zmm0
-	movq	-120(%rsp), %r9
-	movq	(%r9), %r11
+	movq	%r11, %rcx
+	movq	(%r11), %r11
 	movq	(%rsi), %r15
 	addq	%rbx, %r15
 	imulq	%r11, %rax
 	addq	%r15, %rax
-	movq	(%rdx), %r9
+	movq	-64(%rsp), %r9
+	movq	(%r9), %r9
 	addq	%rbx, %r9
-	leaq	(,%r8,8), %r10
+	leaq	(,%rdx,8), %r10
 	imulq	%r11, %r10
 	addq	%r9, %r10
 	xorl	%r9d, %r9d
@@ -2770,17 +3205,18 @@ main:
 	addq	%rbp, %rax
 	movq	%rbp, %r12
 	cmpq	%r13, %rbp
+	movq	%r8, %r9
+	movq	%rcx, %r11
 	jne	.LBB10_27
 	xorl	%eax, %eax
-	movq	-72(%rsp), %r9
-	movq	-8(%rsp), %r10
-	cmpq	%r9, %r10
+	movq	-88(%rsp), %rcx
+	movq	-8(%rsp), %r8
+	cmpq	%rcx, %r8
 	setne	%al
-	addq	%r10, %rax
-	movq	%r10, %r8
-	cmpq	%r9, %r10
-	movq	%rcx, %r9
-	movq	-104(%rsp), %r11
+	addq	%r8, %rax
+	movq	%r8, %rdx
+	cmpq	%rcx, %r8
+	movq	-48(%rsp), %rbp
 	jne	.LBB10_26
 	jmp	.LBB10_23
 	.p2align	4
@@ -2789,7 +3225,7 @@ main:
 	.p2align	4
 .LBB10_10:
 	addq	$32, %rax
-	cmpq	%r11, %rax
+	cmpq	%r8, %rax
 	jl	.LBB10_10
 	jmp	.LBB10_5
 .LBB10_12:
@@ -2797,23 +3233,22 @@ main:
 	.p2align	4
 .LBB10_13:
 	addq	$32, %rax
-	cmpq	%r11, %rax
+	cmpq	%r8, %rax
 	jl	.LBB10_13
 	.p2align	4
 .LBB10_5:
-	movq	-32(%rsp), %rcx
-	cmpq	-40(%rsp), %rcx
+	movq	-32(%rsp), %rax
+	cmpq	-40(%rsp), %rax
 	jge	.LBB10_4
-	movq	-120(%rsp), %rax
-	movq	(%rax), %r11
-	movq	%rcx, %rdi
+	movq	(%r11), %r8
+	movq	%rax, %rbp
 	jmp	.LBB10_7
 .LBB10_2:
 	xorl	%eax, %eax
 	.p2align	4
 .LBB10_3:
 	addq	$32, %rax
-	cmpq	%rdi, %rax
+	cmpq	%rcx, %rax
 	jl	.LBB10_3
 .LBB10_4:
 	popq	%rbx
@@ -3480,9 +3915,9 @@ main:
 	movq	-120(%rsp), %rax
 	movq	(%rax), %r15
 	movq	-72(%rsp), %rax
+	movq	(%rax), %r12
+	movq	-64(%rsp), %rax
 	movq	(%rax), %rax
-	movq	-64(%rsp), %rcx
-	movq	(%rcx), %r12
 	cmpq	$7, %r10
 	jle	.LBB15_14
 	vbroadcastsd	%xmm0, %zmm4
@@ -3490,7 +3925,7 @@ main:
 	vbroadcastsd	%xmm2, %zmm6
 	vbroadcastsd	%xmm3, %zmm7
 	movq	-16(%rsp), %r9
-	leaq	(%r12,%r9), %rcx
+	leaq	(%rax,%r9), %rcx
 	movq	-8(%rsp), %r14
 	imulq	%r15, %r14
 	addq	%rcx, %r14
@@ -3503,7 +3938,7 @@ main:
 	movq	16(%rsp), %r8
 	imulq	%r15, %r8
 	addq	%rcx, %r8
-	leaq	(%rax,%r9), %rcx
+	leaq	(%r12,%r9), %rcx
 	movq	%rdx, %r9
 	imulq	%r15, %r9
 	leaq	(%rcx,%r9,8), %rcx
@@ -3529,22 +3964,22 @@ main:
 	cmpq	%r10, %rbx
 	je	.LBB15_17
 	movq	104(%rsp), %rcx
-	addq	%rcx, %r12
+	addq	%rcx, %rax
 	movq	-8(%rsp), %r14
 	imulq	%r15, %r14
-	addq	%r12, %r14
+	addq	%rax, %r14
 	movq	(%rsp), %rbp
 	imulq	%r15, %rbp
-	addq	%r12, %rbp
+	addq	%rax, %rbp
 	movq	8(%rsp), %r11
 	imulq	%r15, %r11
-	addq	%r12, %r11
+	addq	%rax, %r11
 	movq	16(%rsp), %r8
 	imulq	%r15, %r8
-	addq	%r12, %r8
-	addq	%rcx, %rax
+	addq	%rax, %r8
+	addq	%rcx, %r12
 	imulq	%r15, %rdx
-	leaq	(%rax,%rdx,8), %rax
+	leaq	(%r12,%rdx,8), %rax
 	xorl	%ecx, %ecx
 	.p2align	4
 .LBB15_16:
@@ -3567,31 +4002,31 @@ main:
 .LBB15_39:
 	cmpq	%r10, %rbx
 	je	.LBB15_8
-	leaq	(,%r15,8), %rax
-	movq	-88(%rsp), %rcx
+	leaq	(,%r15,8), %rcx
+	movq	-88(%rsp), %rax
 	movq	-24(%rsp), %rdx
-	cmpq	%rcx, %rdx
-	cmovgeq	%rcx, %rdx
+	cmpq	%rax, %rdx
+	cmovgeq	%rax, %rdx
 	addq	-96(%rsp), %rdx
-	movq	%rdx, %rcx
-	andq	$-8, %rcx
-	cmpq	%rdx, %rcx
-	cmovleq	%rdx, %rcx
+	movq	%rdx, %rax
+	andq	$-8, %rax
+	cmpq	%rdx, %rax
+	cmovleq	%rdx, %rax
 	.p2align	4
 .LBB15_41:
 	movq	-80(%rsp), %rdi
 	movq	-128(%rsp), %rdx
 	.p2align	4
 .LBB15_42:
-	movq	-104(%rsp), %rsi
-	movq	(%rsi), %r8
-	imulq	%r15, %r8
-	shlq	$3, %r8
-	movq	-56(%rsp), %rsi
-	addq	(%rsi), %r8
 	movq	%rdx, %rsi
 	movq	%rdi, %rdx
-	vmovsd	(%r8,%rsi,8), %xmm0
+	movq	-104(%rsp), %rdi
+	movq	(%rdi), %rdi
+	imulq	%r15, %rdi
+	shlq	$3, %rdi
+	movq	-56(%rsp), %r8
+	addq	(%r8), %rdi
+	vmovsd	(%rdi,%rsi,8), %xmm0
 	shlq	$3, %rsi
 	movq	-120(%rsp), %rdi
 	movq	(%rdi), %rdi
@@ -3603,7 +4038,7 @@ main:
 	movq	-64(%rsp), %r8
 	movq	(%r8), %r8
 	addq	%r14, %r8
-	imulq	%rax, %rdi
+	imulq	%rcx, %rdi
 	addq	%r8, %rdi
 	movq	%rbx, %r8
 	.p2align	4
@@ -3612,7 +4047,7 @@ main:
 	vfmadd213sd	(%rdi,%r8,8), %xmm0, %xmm1
 	vmovsd	%xmm1, (%rdi,%r8,8)
 	incq	%r8
-	cmpq	%r8, %rcx
+	cmpq	%r8, %rax
 	jne	.LBB15_43
 	xorl	%edi, %edi
 	movq	-48(%rsp), %rsi
@@ -3622,7 +4057,7 @@ main:
 	cmpq	%rsi, %rdx
 	jne	.LBB15_42
 	incq	%r15
-	addq	$8, %rax
+	addq	$8, %rcx
 	cmpq	-112(%rsp), %r15
 	jne	.LBB15_41
 	jmp	.LBB15_8
@@ -4924,6 +5359,941 @@ main:
 	.cfi_endproc
 
 	.p2align	4
+	.type	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64",@function
+"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64":
+	pushq	%rbp
+	pushq	%r15
+	pushq	%r14
+	pushq	%r13
+	pushq	%r12
+	pushq	%rbx
+	subq	$104, %rsp
+	movq	%rcx, -88(%rsp)
+	movq	%rsi, -96(%rsp)
+	movq	160(%rsp), %rax
+	movq	%rdi, %rsi
+	shlq	$5, %rdi
+	movq	%rdi, (%rsp)
+	leaq	32(%rdi), %rcx
+	movq	(%rax), %r13
+	cmpq	%r13, %rcx
+	cmovlq	%rcx, %r13
+	movq	(%r9), %rcx
+	testq	%rcx, %rcx
+	jle	.LBB25_4
+	movq	(%r8), %rdi
+	testq	%rdi, %rdi
+	jle	.LBB25_2
+	movq	%rcx, 8(%rsp)
+	movq	(%rsp), %rax
+	orq	$4, %rax
+	movq	%rax, 48(%rsp)
+	shlq	$8, %rsi
+	leaq	24(%rsi), %rax
+	movq	%rax, 40(%rsp)
+	leaq	16(%rsi), %rax
+	movq	%rax, 32(%rsp)
+	movq	%rsi, 56(%rsp)
+	leaq	8(%rsi), %rax
+	movq	%rax, 24(%rsp)
+	movl	$32, %eax
+	movq	%rax, -8(%rsp)
+	movq	$0, -112(%rsp)
+	movq	$0, -16(%rsp)
+	xorl	%eax, %eax
+	movq	%r8, -32(%rsp)
+	movq	%r9, -72(%rsp)
+	movq	%rdx, 88(%rsp)
+	movq	%r13, 80(%rsp)
+	.p2align	4
+.LBB25_7:
+	leaq	32(%rax), %rsi
+	movq	(%r9), %rcx
+	cmpq	%rcx, %rsi
+	movq	%rcx, %r10
+	movq	%rsi, 16(%rsp)
+	cmovlq	%rsi, %r10
+	movq	%r10, -120(%rsp)
+	testq	%rdi, %rdi
+	jle	.LBB25_5
+	subq	%rax, -120(%rsp)
+	movq	-8(%rsp), %rax
+	cmpq	%rax, %rcx
+	cmovgeq	%rax, %rcx
+	addq	-16(%rsp), %rcx
+	movq	%rcx, %rax
+	sarq	$63, %rax
+	andnq	%rcx, %rax, %r15
+	movq	$0, -128(%rsp)
+	xorl	%eax, %eax
+	movq	%rdi, 64(%rsp)
+	jmp	.LBB25_10
+	.p2align	4
+.LBB25_9:
+	addq	$256, -128(%rsp)
+	movq	64(%rsp), %rdi
+	movq	72(%rsp), %rax
+	cmpq	%rdi, %rax
+	jge	.LBB25_5
+.LBB25_10:
+	movq	%rax, %rbp
+	addq	$32, %rax
+	movq	(%r8), %rbx
+	cmpq	%rbx, %rax
+	movq	%rax, 72(%rsp)
+	cmovlq	%rax, %rbx
+	subq	%rbp, %rbx
+	movq	(%rsp), %r14
+	movq	56(%rsp), %rax
+	movq	%rax, -40(%rsp)
+	movq	24(%rsp), %rax
+	movq	%rax, -48(%rsp)
+	movq	32(%rsp), %rax
+	movq	%rax, -56(%rsp)
+	movq	40(%rsp), %rax
+	movq	%rax, -64(%rsp)
+	movq	48(%rsp), %rcx
+	movq	%rcx, %rax
+	cmpq	%r13, %rcx
+	movq	%rbx, -104(%rsp)
+	movq	%rbp, 96(%rsp)
+	jle	.LBB25_11
+.LBB25_16:
+	cmpq	%r13, %r14
+	jge	.LBB25_9
+	leaq	(,%r14,8), %rcx
+	jmp	.LBB25_18
+	.p2align	4
+.LBB25_15:
+	movq	-80(%rsp), %r14
+	leaq	4(%r14), %rax
+	addq	$32, -64(%rsp)
+	addq	$32, -56(%rsp)
+	addq	$32, -48(%rsp)
+	addq	$32, -40(%rsp)
+	movq	80(%rsp), %r13
+	cmpq	%r13, %rax
+	movq	-32(%rsp), %r8
+	movq	88(%rsp), %rdx
+	movq	96(%rsp), %rbp
+	jg	.LBB25_16
+.LBB25_11:
+	movq	%r14, %rcx
+	movq	(%r8), %r10
+	movq	%r10, %rsi
+	imulq	%r14, %rsi
+	movq	%r14, %rdi
+	orq	$1, %rdi
+	imulq	%r10, %rdi
+	movq	%r14, %r9
+	orq	$2, %r9
+	imulq	%r10, %r9
+	orq	$3, %rcx
+	imulq	%r10, %rcx
+	movq	(%rdx), %rdx
+	leaq	(%rdx,%rcx,8), %rcx
+	movq	%rax, -80(%rsp)
+	leaq	(%rdx,%rsi,8), %rax
+	leaq	(%rax,%rbp,8), %r10
+	leaq	(%rdx,%rdi,8), %rax
+	leaq	(%rax,%rbp,8), %r13
+	leaq	(%rdx,%r9,8), %rax
+	leaq	(%rax,%rbp,8), %r14
+	leaq	(%rcx,%rbp,8), %rbp
+	cmpq	$32, %rbx
+	movq	%r10, -24(%rsp)
+	jge	.LBB25_30
+	xorl	%ecx, %ecx
+.LBB25_13:
+	movq	%rcx, %rdx
+	orq	$8, %rdx
+	movq	-104(%rsp), %rbx
+	cmpq	%rbx, %rdx
+	jle	.LBB25_25
+	movq	%rcx, %r12
+	movq	-72(%rsp), %r9
+	jmp	.LBB25_36
+	.p2align	4
+.LBB25_30:
+	movl	$32, %eax
+	movq	-128(%rsp), %r9
+	xorl	%ebx, %ebx
+	jmp	.LBB25_31
+	.p2align	4
+.LBB25_34:
+	movq	%rbx, %rax
+	orq	$8, %rax
+	movq	%rbx, %rdx
+	orq	$16, %rdx
+	movq	%rbx, %rsi
+	orq	$24, %rsi
+	movq	-24(%rsp), %r10
+	vmovupd	%zmm0, (%r10,%rbx,8)
+	vmovupd	%zmm1, (%r10,%rax,8)
+	vmovupd	%zmm2, (%r10,%rdx,8)
+	vmovupd	%zmm3, (%r10,%rsi,8)
+	vmovupd	%zmm4, (%r13,%rbx,8)
+	vmovupd	%zmm5, (%r13,%rax,8)
+	vmovupd	%zmm6, (%r13,%rdx,8)
+	vmovupd	%zmm7, (%r13,%rsi,8)
+	vmovupd	%zmm8, (%r14,%rbx,8)
+	vmovupd	%zmm9, (%r14,%rax,8)
+	vmovupd	%zmm10, (%r14,%rdx,8)
+	vmovupd	%zmm11, (%r14,%rsi,8)
+	vmovupd	%zmm12, (%rbp,%rbx,8)
+	vmovupd	%zmm13, (%rbp,%rax,8)
+	vmovupd	%zmm14, (%rbp,%rdx,8)
+	vmovupd	%zmm15, (%rbp,%rsi,8)
+	leaq	32(%rcx), %rax
+	addq	$256, %r9
+	movq	%rcx, %rbx
+	cmpq	-104(%rsp), %rax
+	jg	.LBB25_13
+.LBB25_31:
+	vmovupd	(%r10,%rbx,8), %zmm0
+	vmovupd	64(%r10,%rbx,8), %zmm1
+	vmovupd	128(%r10,%rbx,8), %zmm2
+	vmovupd	192(%r10,%rbx,8), %zmm3
+	vmovupd	(%r13,%rbx,8), %zmm4
+	vmovupd	64(%r13,%rbx,8), %zmm5
+	vmovupd	128(%r13,%rbx,8), %zmm6
+	vmovupd	192(%r13,%rbx,8), %zmm7
+	vmovupd	(%r14,%rbx,8), %zmm8
+	vmovupd	64(%r14,%rbx,8), %zmm9
+	vmovupd	128(%r14,%rbx,8), %zmm10
+	vmovupd	192(%r14,%rbx,8), %zmm11
+	vmovupd	(%rbp,%rbx,8), %zmm12
+	vmovupd	64(%rbp,%rbx,8), %zmm13
+	movq	%rax, %rcx
+	vmovupd	128(%rbp,%rbx,8), %zmm14
+	vmovupd	192(%rbp,%rbx,8), %zmm15
+	cmpq	$0, -120(%rsp)
+	jle	.LBB25_34
+	movq	(%r8), %rsi
+	movq	-72(%rsp), %rax
+	movq	(%rax), %r10
+	movq	-88(%rsp), %rax
+	movq	(%rax), %rax
+	movq	-112(%rsp), %r12
+	addq	%r12, %rax
+	movq	-64(%rsp), %rdx
+	imulq	%r10, %rdx
+	addq	%rax, %rdx
+	movq	-56(%rsp), %r11
+	imulq	%r10, %r11
+	addq	%rax, %r11
+	movq	-48(%rsp), %rdi
+	imulq	%r10, %rdi
+	addq	%rax, %rdi
+	imulq	-40(%rsp), %r10
+	addq	%rax, %r10
+	movq	%r12, %rax
+	imulq	%rsi, %rax
+	addq	%r9, %rax
+	movq	-96(%rsp), %r12
+	addq	(%r12), %rax
+	shlq	$3, %rsi
+	xorl	%r12d, %r12d
+	.p2align	4
+.LBB25_33:
+	vmovupd	(%rax), %zmm16
+	vmovupd	64(%rax), %zmm17
+	vmovupd	128(%rax), %zmm18
+	vmovupd	192(%rax), %zmm19
+	vbroadcastsd	(%r10,%r12,8), %zmm20
+	vfmadd231pd	%zmm20, %zmm16, %zmm0
+	vfmadd231pd	%zmm20, %zmm17, %zmm1
+	vfmadd231pd	%zmm20, %zmm18, %zmm2
+	vfmadd231pd	%zmm20, %zmm19, %zmm3
+	vbroadcastsd	(%rdi,%r12,8), %zmm20
+	vfmadd231pd	%zmm20, %zmm16, %zmm4
+	vfmadd231pd	%zmm20, %zmm17, %zmm5
+	vfmadd231pd	%zmm20, %zmm18, %zmm6
+	vfmadd231pd	%zmm20, %zmm19, %zmm7
+	vbroadcastsd	(%r11,%r12,8), %zmm20
+	vfmadd231pd	%zmm20, %zmm16, %zmm8
+	vfmadd231pd	%zmm20, %zmm17, %zmm9
+	vfmadd231pd	%zmm20, %zmm18, %zmm10
+	vfmadd231pd	%zmm20, %zmm19, %zmm11
+	vbroadcastsd	(%rdx,%r12,8), %zmm20
+	vfmadd231pd	%zmm16, %zmm20, %zmm12
+	vfmadd231pd	%zmm17, %zmm20, %zmm13
+	vfmadd231pd	%zmm18, %zmm20, %zmm14
+	vfmadd231pd	%zmm20, %zmm19, %zmm15
+	incq	%r12
+	addq	%rsi, %rax
+	cmpq	%r12, %r15
+	jne	.LBB25_33
+	jmp	.LBB25_34
+	.p2align	4
+.LBB25_25:
+	cmpq	$0, -120(%rsp)
+	movq	-72(%rsp), %r9
+	jle	.LBB25_35
+	movq	-128(%rsp), %rax
+	leaq	(%rax,%rcx,8), %rax
+	.p2align	4
+.LBB25_27:
+	movq	%rdx, %r12
+	vmovupd	(%r10,%rcx,8), %zmm3
+	vmovupd	(%r13,%rcx,8), %zmm2
+	vmovupd	(%r14,%rcx,8), %zmm1
+	vmovupd	(%rbp,%rcx,8), %zmm0
+	movq	-32(%rsp), %rdx
+	movq	(%rdx), %rdx
+	movq	(%r9), %rsi
+	movq	-88(%rsp), %rdi
+	movq	(%rdi), %r11
+	movq	-112(%rsp), %r9
+	addq	%r9, %r11
+	movq	-64(%rsp), %rdi
+	imulq	%rsi, %rdi
+	addq	%r11, %rdi
+	movq	-56(%rsp), %r8
+	imulq	%rsi, %r8
+	addq	%r11, %r8
+	movq	-48(%rsp), %r10
+	imulq	%rsi, %r10
+	addq	%r11, %r10
+	imulq	-40(%rsp), %rsi
+	addq	%r11, %rsi
+	movq	%r9, %r11
+	imulq	%rdx, %r11
+	addq	%rax, %r11
+	movq	-96(%rsp), %r9
+	addq	(%r9), %r11
+	shlq	$3, %rdx
+	xorl	%ebx, %ebx
+	.p2align	4
+.LBB25_28:
+	vmovupd	(%r11), %zmm4
+	vfmadd231pd	(%rsi,%rbx,8){1to8}, %zmm4, %zmm3
+	vfmadd231pd	(%r10,%rbx,8){1to8}, %zmm4, %zmm2
+	vfmadd231pd	(%r8,%rbx,8){1to8}, %zmm4, %zmm1
+	vfmadd231pd	(%rdi,%rbx,8){1to8}, %zmm4, %zmm0
+	incq	%rbx
+	addq	%rdx, %r11
+	cmpq	%rbx, %r15
+	jne	.LBB25_28
+	movq	-24(%rsp), %r10
+	vmovupd	%zmm3, (%r10,%rcx,8)
+	vmovupd	%zmm2, (%r13,%rcx,8)
+	vmovupd	%zmm1, (%r14,%rcx,8)
+	vmovupd	%zmm0, (%rbp,%rcx,8)
+	leaq	8(%r12), %rdx
+	addq	$64, %rax
+	movq	%r12, %rcx
+	movq	-104(%rsp), %rbx
+	cmpq	%rbx, %rdx
+	movq	-72(%rsp), %r9
+	jle	.LBB25_27
+	jmp	.LBB25_36
+	.p2align	4
+.LBB25_35:
+	leaq	8(%rcx), %r12
+	addq	$16, %rcx
+	cmpq	%rbx, %rcx
+	movq	%r12, %rcx
+	jle	.LBB25_35
+	.p2align	4
+.LBB25_36:
+	cmpq	%rbx, %r12
+	jge	.LBB25_15
+	movq	-128(%rsp), %rax
+	leaq	(%rax,%r12,8), %rax
+	jmp	.LBB25_38
+	.p2align	4
+.LBB25_41:
+	movq	-24(%rsp), %r10
+	vmovsd	%xmm0, (%r10,%r12,8)
+	vmovsd	%xmm1, (%r13,%r12,8)
+	vmovsd	%xmm2, (%r14,%r12,8)
+	vmovsd	%xmm3, (%rbp,%r12,8)
+	incq	%r12
+	addq	$8, %rax
+	cmpq	%rbx, %r12
+	jge	.LBB25_15
+.LBB25_38:
+	vmovsd	(%r10,%r12,8), %xmm0
+	vmovsd	(%r13,%r12,8), %xmm1
+	vmovsd	(%r14,%r12,8), %xmm2
+	vmovsd	(%rbp,%r12,8), %xmm3
+	cmpq	$0, -120(%rsp)
+	jle	.LBB25_41
+	movq	-32(%rsp), %rcx
+	movq	(%rcx), %rcx
+	movq	(%r9), %rdx
+	movq	-88(%rsp), %rsi
+	movq	(%rsi), %r10
+	movq	-112(%rsp), %r11
+	addq	%r11, %r10
+	movq	-64(%rsp), %rsi
+	imulq	%rdx, %rsi
+	addq	%r10, %rsi
+	movq	-56(%rsp), %rdi
+	imulq	%rdx, %rdi
+	addq	%r10, %rdi
+	movq	-48(%rsp), %r8
+	imulq	%rdx, %r8
+	addq	%r10, %r8
+	imulq	-40(%rsp), %rdx
+	addq	%r10, %rdx
+	movq	%r11, %r10
+	imulq	%rcx, %r10
+	addq	%rax, %r10
+	movq	-96(%rsp), %r11
+	addq	(%r11), %r10
+	shlq	$3, %rcx
+	xorl	%r11d, %r11d
+	.p2align	4
+.LBB25_40:
+	vmovsd	(%r10), %xmm4
+	vfmadd231sd	(%rdx,%r11,8), %xmm4, %xmm0
+	vfmadd231sd	(%r8,%r11,8), %xmm4, %xmm1
+	vfmadd231sd	(%rdi,%r11,8), %xmm4, %xmm2
+	vfmadd231sd	(%rsi,%r11,8), %xmm4, %xmm3
+	incq	%r11
+	addq	%rcx, %r10
+	cmpq	%r11, %r15
+	jne	.LBB25_40
+	jmp	.LBB25_41
+	.p2align	4
+.LBB25_49:
+	incq	%r14
+	addq	$8, %rcx
+	cmpq	%r13, %r14
+	je	.LBB25_9
+.LBB25_18:
+	movq	(%r8), %rax
+	imulq	%r14, %rax
+	shlq	$3, %rax
+	addq	(%rdx), %rax
+	leaq	(%rax,%rbp,8), %r12
+	cmpq	$8, %rbx
+	jge	.LBB25_42
+	movq	%r14, -80(%rsp)
+	xorl	%eax, %eax
+	jmp	.LBB25_20
+	.p2align	4
+.LBB25_42:
+	cmpq	$0, -120(%rsp)
+	jle	.LBB25_47
+	movq	%r14, -80(%rsp)
+	movl	$8, %r10d
+	movq	-128(%rsp), %rsi
+	xorl	%edi, %edi
+	.p2align	4
+.LBB25_44:
+	movq	%r10, %rax
+	vmovupd	(%r12,%rdi,8), %zmm0
+	movq	(%r8), %r14
+	movq	-88(%rsp), %r10
+	movq	(%r10), %r10
+	movq	-112(%rsp), %r11
+	addq	%r11, %r10
+	movq	(%r9), %rbx
+	imulq	%rcx, %rbx
+	addq	%r10, %rbx
+	movq	%r11, %r10
+	imulq	%r14, %r10
+	addq	%rsi, %r10
+	movq	-96(%rsp), %r11
+	addq	(%r11), %r10
+	shlq	$3, %r14
+	xorl	%r11d, %r11d
+	.p2align	4
+.LBB25_45:
+	vmovupd	(%r10), %zmm1
+	vfmadd231pd	(%rbx,%r11,8){1to8}, %zmm1, %zmm0
+	incq	%r11
+	addq	%r14, %r10
+	cmpq	%r11, %r15
+	jne	.LBB25_45
+	vmovupd	%zmm0, (%r12,%rdi,8)
+	leaq	8(%rax), %r10
+	addq	$64, %rsi
+	movq	%rax, %rdi
+	movq	-104(%rsp), %rbx
+	cmpq	%rbx, %r10
+	jle	.LBB25_44
+.LBB25_20:
+	cmpq	$0, -120(%rsp)
+	setle	%sil
+	cmpq	%rbx, %rax
+	setge	%dil
+	orb	%sil, %dil
+	movq	-80(%rsp), %r14
+	jne	.LBB25_49
+	movq	-128(%rsp), %rsi
+	leaq	(%rsi,%rax,8), %rsi
+	.p2align	4
+.LBB25_22:
+	vmovsd	(%r12,%rax,8), %xmm0
+	movq	(%r8), %rdi
+	movq	-112(%rsp), %r11
+	movq	%r11, %rbx
+	imulq	%rdi, %rbx
+	addq	%rsi, %rbx
+	movq	-96(%rsp), %r10
+	addq	(%r10), %rbx
+	shlq	$3, %rdi
+	movq	-88(%rsp), %r10
+	movq	(%r10), %r10
+	addq	%r11, %r10
+	movq	(%r9), %r11
+	imulq	%rcx, %r11
+	addq	%r10, %r11
+	xorl	%r10d, %r10d
+	.p2align	4
+.LBB25_23:
+	vmovsd	(%r11,%r10,8), %xmm1
+	vfmadd231sd	(%rbx), %xmm1, %xmm0
+	addq	%rdi, %rbx
+	incq	%r10
+	cmpq	%r10, %r15
+	jne	.LBB25_23
+	vmovsd	%xmm0, (%r12,%rax,8)
+	incq	%rax
+	addq	$8, %rsi
+	movq	-104(%rsp), %rbx
+	cmpq	%rbx, %rax
+	jl	.LBB25_22
+	jmp	.LBB25_49
+.LBB25_47:
+	movl	$8, %eax
+	.p2align	4
+.LBB25_48:
+	addq	$8, %rax
+	cmpq	%rbx, %rax
+	jle	.LBB25_48
+	jmp	.LBB25_49
+	.p2align	4
+.LBB25_5:
+	movq	16(%rsp), %rax
+	cmpq	8(%rsp), %rax
+	jge	.LBB25_4
+	movq	(%r8), %rdi
+	addq	$256, -112(%rsp)
+	addq	$32, -8(%rsp)
+	addq	$-32, -16(%rsp)
+	jmp	.LBB25_7
+.LBB25_2:
+	xorl	%eax, %eax
+	.p2align	4
+.LBB25_3:
+	addq	$32, %rax
+	cmpq	%rcx, %rax
+	jl	.LBB25_3
+.LBB25_4:
+	addq	$104, %rsp
+	popq	%rbx
+	popq	%r12
+	popq	%r13
+	popq	%r14
+	popq	%r15
+	popq	%rbp
+	vzeroupper
+	retq
+.Lfunc_end25:
+	.size	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64", .Lfunc_end25-"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"
+
+	.p2align	4
+	.type	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_0_resume",@function
+"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_0_resume":
+	.cfi_startproc
+	pushq	%rbp
+	.cfi_def_cfa_offset 16
+	pushq	%r15
+	.cfi_def_cfa_offset 24
+	pushq	%r14
+	.cfi_def_cfa_offset 32
+	pushq	%r13
+	.cfi_def_cfa_offset 40
+	pushq	%r12
+	.cfi_def_cfa_offset 48
+	pushq	%rbx
+	.cfi_def_cfa_offset 56
+	subq	$56, %rsp
+	.cfi_def_cfa_offset 112
+	.cfi_offset %rbx, -56
+	.cfi_offset %r12, -48
+	.cfi_offset %r13, -40
+	.cfi_offset %r14, -32
+	.cfi_offset %r15, -24
+	.cfi_offset %rbp, -16
+	movl	$0, 16(%rsp)
+	vstmxcsr	16(%rsp)
+	movl	16(%rsp), %ecx
+	movl	%ecx, %eax
+	notl	%eax
+	testl	$32832, %eax
+	je	.LBB26_2
+	movl	%ecx, %eax
+	orl	$32832, %eax
+	movl	%eax, 24(%rsp)
+	vldmxcsr	24(%rsp)
+.LBB26_2:
+	movl	%ecx, 20(%rsp)
+	movq	48(%rdi), %rax
+	movq	%rax, 48(%rsp)
+	movq	56(%rdi), %rax
+	movq	%rax, 40(%rsp)
+	movq	%rdi, %rbx
+	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
+	testq	%rax, %rax
+	je	.LBB26_3
+	movl	$1, %ecx
+	xorl	%edi, %edi
+	xorl	%esi, %esi
+	xorl	%edx, %edx
+	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
+	movq	%rax, %r15
+	movq	%rdx, %rbp
+	leaq	(%rdx,%rdx,2), %rax
+	movq	80(%rbx), %rcx
+	movq	%rcx, (%r15,%rax,8)
+	movq	$5, 8(%r15,%rax,8)
+	movabsq	$2305843009213693952, %rcx
+	movq	%rcx, 16(%r15,%rax,8)
+	incq	%rbp
+	jmp	.LBB26_5
+.LBB26_3:
+	xorl	%r15d, %r15d
+	xorl	%ebp, %ebp
+.LBB26_5:
+	movq	%rbx, %rax
+	movabsq	$4611686018427387904, %rbx
+	movq	88(%rax), %rdi
+	movq	%rax, %r12
+	movq	96(%rax), %rsi
+	movq	%r15, %rdx
+	movq	%rbp, %rcx
+	callq	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
+	movq	%rax, 32(%rsp)
+	movq	%rcx, %r13
+	xorl	%r14d, %r14d
+	testq	%rbp, %rbp
+	cmovgq	%rbp, %r14
+	jle	.LBB26_11
+	cmpq	$1, %r14
+	movq	%r14, %rax
+	adcq	$-1, %rax
+	movq	%r14, %rbp
+	jmp	.LBB26_7
+	.p2align	4
+.LBB26_10:
+	movq	%rbp, %rax
+	addq	$-1, %rax
+	jae	.LBB26_11
+.LBB26_7:
+	movq	%r14, %rcx
+	subq	%rbp, %rcx
+	movq	%rax, %rbp
+	leaq	(%rcx,%rcx,2), %rax
+	testq	%rbx, 16(%r15,%rax,8)
+	je	.LBB26_10
+	leaq	(%r15,%rax,8), %rax
+	movq	(%rax), %rdi
+	lock		decq	-8(%rdi)
+	jne	.LBB26_10
+	addq	$-8, %rdi
+	#MEMBARRIER
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	jmp	.LBB26_10
+.LBB26_11:
+	movq	%r15, %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	testq	%rbx, %r13
+	je	.LBB26_14
+	movq	32(%rsp), %rax
+	lock		decq	-8(%rax)
+	jne	.LBB26_14
+	movq	32(%rsp), %rdi
+	addq	$-8, %rdi
+	#MEMBARRIER
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+.LBB26_14:
+	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
+	testq	%rax, %rax
+	je	.LBB26_15
+	movq	48(%rsp), %rdi
+	movq	40(%rsp), %rsi
+	xorl	%edx, %edx
+	callq	KGEN_CompilerRT_TracyZoneBegin@PLT
+	movq	%rax, %rbx
+	jmp	.LBB26_17
+.LBB26_15:
+	xorl	%ebx, %ebx
+.LBB26_17:
+	movq	%r12, %r11
+	movq	112(%r12), %rcx
+	movq	120(%r12), %rax
+	movq	(%rcx), %r14
+	movq	128(%r12), %rcx
+	movq	(%rcx), %rcx
+	xorl	%r15d, %r15d
+	cmpq	%rcx, %rax
+	setl	%r15b
+	addq	%r14, %r15
+	testq	%r15, %r15
+	jle	.LBB26_20
+	cmpq	%rcx, %rax
+	cmovlq	%rax, %rcx
+	imulq	%rax, %r14
+	addq	%rcx, %r14
+	.p2align	4
+.LBB26_19:
+	movq	136(%r11), %rsi
+	movq	144(%r11), %rdx
+	movq	152(%r11), %rcx
+	movq	160(%r11), %r8
+	movq	168(%r11), %r9
+	movq	176(%r11), %rax
+	movq	%rax, (%rsp)
+	movq	%r14, %rdi
+	callq	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"@PLT
+	movq	%r12, %r11
+	incq	%r14
+	decq	%r15
+	jne	.LBB26_19
+.LBB26_20:
+	testq	%rbx, %rbx
+	je	.LBB26_22
+	movq	%rbx, %rdi
+	callq	KGEN_CompilerRT_TracyZoneEnd@PLT
+	movq	%r12, %r11
+.LBB26_22:
+	movl	20(%rsp), %eax
+	movl	%eax, 28(%rsp)
+	vldmxcsr	28(%rsp)
+	movq	24(%r11), %rdi
+	addq	$56, %rsp
+	.cfi_def_cfa_offset 56
+	popq	%rbx
+	.cfi_def_cfa_offset 48
+	popq	%r12
+	.cfi_def_cfa_offset 40
+	popq	%r13
+	.cfi_def_cfa_offset 32
+	popq	%r14
+	.cfi_def_cfa_offset 24
+	popq	%r15
+	.cfi_def_cfa_offset 16
+	popq	%rbp
+	.cfi_def_cfa_offset 8
+	jmpq	*16(%r11)
+.Lfunc_end26:
+	.size	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_0_resume", .Lfunc_end26-"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_0_resume"
+	.cfi_endproc
+
+	.p2align	4
+	.type	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1",@function
+"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1":
+	.cfi_startproc
+	jmpq	*8(%rdi)
+.Lfunc_end27:
+	.size	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1", .Lfunc_end27-"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_1"
+	.cfi_endproc
+
+	.p2align	4
+	.type	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_2_resume",@function
+"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_2_resume":
+	.cfi_startproc
+	pushq	%rbp
+	.cfi_def_cfa_offset 16
+	pushq	%r15
+	.cfi_def_cfa_offset 24
+	pushq	%r14
+	.cfi_def_cfa_offset 32
+	pushq	%r13
+	.cfi_def_cfa_offset 40
+	pushq	%r12
+	.cfi_def_cfa_offset 48
+	pushq	%rbx
+	.cfi_def_cfa_offset 56
+	subq	$56, %rsp
+	.cfi_def_cfa_offset 112
+	.cfi_offset %rbx, -56
+	.cfi_offset %r12, -48
+	.cfi_offset %r13, -40
+	.cfi_offset %r14, -32
+	.cfi_offset %r15, -24
+	.cfi_offset %rbp, -16
+	movl	$0, 16(%rsp)
+	vstmxcsr	16(%rsp)
+	movl	16(%rsp), %ecx
+	movl	%ecx, %eax
+	notl	%eax
+	testl	$32832, %eax
+	je	.LBB28_2
+	movl	%ecx, %eax
+	orl	$32832, %eax
+	movl	%eax, 24(%rsp)
+	vldmxcsr	24(%rsp)
+.LBB28_2:
+	movl	%ecx, 20(%rsp)
+	movq	48(%rdi), %rax
+	movq	%rax, 48(%rsp)
+	movq	56(%rdi), %rax
+	movq	%rax, 40(%rsp)
+	movq	%rdi, %rbx
+	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
+	testq	%rax, %rax
+	je	.LBB28_3
+	movl	$1, %ecx
+	xorl	%edi, %edi
+	xorl	%esi, %esi
+	xorl	%edx, %edx
+	callq	"std::collections::list::List::_realloc(::List[$0]&,::Int),T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
+	movq	%rax, %r15
+	movq	%rdx, %rbp
+	leaq	(%rdx,%rdx,2), %rax
+	movq	80(%rbx), %rcx
+	movq	%rcx, (%r15,%rax,8)
+	movq	$5, 8(%r15,%rax,8)
+	movabsq	$2305843009213693952, %rcx
+	movq	%rcx, 16(%r15,%rax,8)
+	incq	%rbp
+	jmp	.LBB28_5
+.LBB28_3:
+	xorl	%r15d, %r15d
+	xorl	%ebp, %ebp
+.LBB28_5:
+	movq	%rbx, %rax
+	movabsq	$4611686018427387904, %rbx
+	movq	88(%rax), %rdi
+	movq	%rax, %r12
+	movq	96(%rax), %rsi
+	movq	%r15, %rdx
+	movq	%rbp, %rcx
+	callq	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"@PLT
+	movq	%rax, 32(%rsp)
+	movq	%rcx, %r13
+	xorl	%r14d, %r14d
+	testq	%rbp, %rbp
+	cmovgq	%rbp, %r14
+	jle	.LBB28_11
+	cmpq	$1, %r14
+	movq	%r14, %rax
+	adcq	$-1, %rax
+	movq	%r14, %rbp
+	jmp	.LBB28_7
+	.p2align	4
+.LBB28_10:
+	movq	%rbp, %rax
+	addq	$-1, %rax
+	jae	.LBB28_11
+.LBB28_7:
+	movq	%r14, %rcx
+	subq	%rbp, %rcx
+	movq	%rax, %rbp
+	leaq	(%rcx,%rcx,2), %rax
+	testq	%rbx, 16(%r15,%rax,8)
+	je	.LBB28_10
+	leaq	(%r15,%rax,8), %rax
+	movq	(%rax), %rdi
+	lock		decq	-8(%rdi)
+	jne	.LBB28_10
+	addq	$-8, %rdi
+	#MEMBARRIER
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	jmp	.LBB28_10
+.LBB28_11:
+	movq	%r15, %rdi
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+	testq	%rbx, %r13
+	je	.LBB28_14
+	movq	32(%rsp), %rax
+	lock		decq	-8(%rax)
+	jne	.LBB28_14
+	movq	32(%rsp), %rdi
+	addq	$-8, %rdi
+	#MEMBARRIER
+	callq	KGEN_CompilerRT_AlignedFree@PLT
+.LBB28_14:
+	callq	KGEN_CompilerRT_TracyIsEnabled@PLT
+	testq	%rax, %rax
+	je	.LBB28_15
+	movq	48(%rsp), %rdi
+	movq	40(%rsp), %rsi
+	xorl	%edx, %edx
+	callq	KGEN_CompilerRT_TracyZoneBegin@PLT
+	movq	%rax, %rbx
+	jmp	.LBB28_17
+.LBB28_15:
+	xorl	%ebx, %ebx
+.LBB28_17:
+	movq	%r12, %r11
+	movq	112(%r12), %rcx
+	movq	120(%r12), %rax
+	movq	(%rcx), %r14
+	movq	128(%r12), %rcx
+	movq	(%rcx), %rcx
+	xorl	%r15d, %r15d
+	cmpq	%rcx, %rax
+	setl	%r15b
+	addq	%r14, %r15
+	testq	%r15, %r15
+	jle	.LBB28_20
+	cmpq	%rcx, %rax
+	cmovlq	%rax, %rcx
+	imulq	%rax, %r14
+	addq	%rcx, %r14
+	.p2align	4
+.LBB28_19:
+	movq	136(%r11), %rsi
+	movq	144(%r11), %rdx
+	movq	152(%r11), %rcx
+	movq	160(%r11), %r8
+	movq	168(%r11), %r9
+	movq	176(%r11), %rax
+	movq	%rax, (%rsp)
+	movq	%r14, %rdi
+	callq	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0])_process_i_tile(::Int),transpose_b=0,dtype=f64"@PLT
+	movq	%r12, %r11
+	incq	%r14
+	decq	%r15
+	jne	.LBB28_19
+.LBB28_20:
+	testq	%rbx, %rbx
+	je	.LBB28_22
+	movq	%rbx, %rdi
+	callq	KGEN_CompilerRT_TracyZoneEnd@PLT
+	movq	%r12, %r11
+.LBB28_22:
+	movl	20(%rsp), %eax
+	movl	%eax, 28(%rsp)
+	vldmxcsr	28(%rsp)
+	movq	24(%r11), %rdi
+	addq	$56, %rsp
+	.cfi_def_cfa_offset 56
+	popq	%rbx
+	.cfi_def_cfa_offset 48
+	popq	%r12
+	.cfi_def_cfa_offset 40
+	popq	%r13
+	.cfi_def_cfa_offset 32
+	popq	%r14
+	.cfi_def_cfa_offset 24
+	popq	%r15
+	.cfi_def_cfa_offset 16
+	popq	%rbp
+	.cfi_def_cfa_offset 8
+	jmpq	*16(%r11)
+.Lfunc_end28:
+	.size	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_2_resume", .Lfunc_end28-"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_async_closure_2_resume"
+	.cfi_endproc
+
+	.p2align	4
+	.type	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3",@function
+"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3":
+	.cfi_startproc
+	jmpq	*8(%rdi)
+.Lfunc_end29:
+	.size	"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3", .Lfunc_end29-"gemm::matmul_nr_blocked[::DType,::Bool](matrix::Matrix[$0]&,matrix::Matrix[$0],matrix::Matrix[$0]),dtype=f64,transpose_b=0_closure_3"
+	.cfi_endproc
+
+	.p2align	4
 	.type	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]",@function
 "std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]":
 	.cfi_startproc
@@ -4955,51 +6325,51 @@ main:
 	cmovgeq	%rbx, %rax
 	movq	%rax, 8(%rsp)
 	testq	%rbx, %rbx
-	je	.LBB25_1
+	je	.LBB30_1
 	movq	%rdx, %r14
 	movq	%rsi, %r15
 	movq	16(%rdx), %rdx
 	testq	%rdx, %rdx
-	js	.LBB25_3
+	js	.LBB30_3
 	movq	8(%r14), %rsi
 	cmpq	$2, %rbx
-	jge	.LBB25_6
-	jmp	.LBB25_11
-.LBB25_1:
-	jmp	.LBB25_50
-.LBB25_3:
+	jge	.LBB30_6
+	jmp	.LBB30_11
+.LBB30_1:
+	jmp	.LBB30_50
+.LBB30_3:
 	movq	%rdx, %rsi
 	shrq	$56, %rsi
 	andl	$31, %esi
 	cmpq	$2, %rbx
-	jl	.LBB25_11
-.LBB25_6:
+	jl	.LBB30_11
+.LBB30_6:
 	movq	8(%rsp), %rax
 	decq	%rax
 	leaq	40(%r14), %rdi
-	jmp	.LBB25_7
+	jmp	.LBB30_7
 	.p2align	4
-.LBB25_9:
+.LBB30_9:
 	movq	-8(%rdi), %r8
-.LBB25_10:
+.LBB30_10:
 	addq	%r15, %rsi
 	addq	%r8, %rsi
 	addq	$24, %rdi
 	decq	%rax
-	je	.LBB25_11
-.LBB25_7:
+	je	.LBB30_11
+.LBB30_7:
 	movq	(%rdi), %r8
 	testq	%r8, %r8
-	jns	.LBB25_9
+	jns	.LBB30_9
 	shrq	$56, %r8
 	andl	$31, %r8d
-	jmp	.LBB25_10
-.LBB25_11:
+	jmp	.LBB30_10
+.LBB30_11:
 	cmpq	$23, %rsi
-	jg	.LBB25_13
+	jg	.LBB30_13
 	movq	%rcx, 40(%rsp)
-	jmp	.LBB25_14
-.LBB25_13:
+	jmp	.LBB30_14
+.LBB30_13:
 	addq	$7, %rsi
 	movq	%rsi, %r12
 	sarq	$3, %r12
@@ -5016,51 +6386,51 @@ main:
 	movq	%rax, 40(%rsp)
 	movq	16(%r14), %rdx
 	testq	%r12, %r12
-	js	.LBB25_14
+	js	.LBB30_14
 	movq	$0, 4152(%rsp)
 	leaq	24(%rsp), %rax
 	movq	%rax, 4160(%rsp)
 	testq	%rdx, %rdx
 	movq	%r15, 48(%rsp)
-	js	.LBB25_40
+	js	.LBB30_40
 	movq	(%r14), %rsi
 	movq	8(%r14), %rdx
 	leaq	56(%rsp), %rdi
 	callq	"std::format::_utils::_WriteBufferStack::write_string[::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::_WriteBufferStack[$0, $1, $2, $3]&,::StringSlice[$4, $5, $6]),W=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>],stack_buffer_bytes=4096,string.mut`2x1=0"@PLT
 	cmpq	$2, %rbx
-	jge	.LBB25_43
-	jmp	.LBB25_48
-.LBB25_14:
+	jge	.LBB30_43
+	jmp	.LBB30_48
+.LBB30_14:
 	testq	%rdx, %rdx
-	js	.LBB25_15
+	js	.LBB30_15
 	movq	(%r14), %rsi
 	movq	8(%r14), %rdx
-	jmp	.LBB25_17
-.LBB25_15:
+	jmp	.LBB30_17
+.LBB30_15:
 	shrq	$56, %rdx
 	andl	$31, %edx
 	movq	%r14, %rsi
-.LBB25_17:
+.LBB30_17:
 	leaq	24(%rsp), %r13
 	movq	%r13, %rdi
 	callq	"std::collections::string::string::String::_iadd[LITImmutOrigin,::Origin[::Bool(False), $0]](::String&,::Span[::Bool(False), $0, ::SIMD[::DType(uint8), ::Int(1)], $1])"@PLT
 	cmpq	$2, %rbx
-	jl	.LBB25_49
+	jl	.LBB30_49
 	movabsq	$4611686018427387904, %r12
 	leaq	56(%rsp), %rbp
 	addq	$24, %r14
 	decq	%rbx
-	jmp	.LBB25_19
+	jmp	.LBB30_19
 	.p2align	4
-.LBB25_37:
+.LBB30_37:
 	movq	4160(%rsp), %rdi
 	movq	%rbp, %rsi
-.LBB25_38:
+.LBB30_38:
 	callq	"std::collections::string::string::String::_iadd[LITImmutOrigin,::Origin[::Bool(False), $0]](::String&,::Span[::Bool(False), $0, ::SIMD[::DType(uint8), ::Int(1)], $1])"@PLT
 	addq	$24, %r14
 	decq	%rbx
-	je	.LBB25_49
-.LBB25_19:
+	je	.LBB30_49
+.LBB30_19:
 	movq	32(%rsp), %rax
 	movq	40(%rsp), %rcx
 	movq	%rcx, %rsi
@@ -5070,44 +6440,44 @@ main:
 	cmovnsq	%rax, %rsi
 	movq	16(%r14), %rdx
 	testq	%rdx, %rdx
-	js	.LBB25_20
+	js	.LBB30_20
 	movq	8(%r14), %rdx
 	addq	%r15, %rsi
 	addq	%rdx, %rsi
 	cmpq	$23, %rsi
-	jg	.LBB25_27
-.LBB25_23:
+	jg	.LBB30_27
+.LBB30_23:
 	movq	%r13, %rdi
 	movq	16(%rsp), %rsi
 	movq	%r15, %rdx
 	callq	"std::collections::string::string::String::_iadd[LITImmutOrigin,::Origin[::Bool(False), $0]](::String&,::Span[::Bool(False), $0, ::SIMD[::DType(uint8), ::Int(1)], $1])"@PLT
 	movq	16(%r14), %rdx
 	testq	%rdx, %rdx
-	js	.LBB25_24
+	js	.LBB30_24
 	movq	(%r14), %rsi
 	movq	8(%r14), %rdx
 	movq	%r13, %rdi
-	jmp	.LBB25_38
+	jmp	.LBB30_38
 	.p2align	4
-.LBB25_20:
+.LBB30_20:
 	shrq	$56, %rdx
 	andl	$31, %edx
 	addq	%r15, %rsi
 	addq	%rdx, %rsi
 	cmpq	$23, %rsi
-	jle	.LBB25_23
-.LBB25_27:
+	jle	.LBB30_23
+.LBB30_27:
 	testq	%rcx, %rcx
-	js	.LBB25_29
+	js	.LBB30_29
 	leaq	(,%rcx,8), %rdx
 	cmpq	%r12, %rcx
 	cmovbq	%rax, %rdx
 	cmpq	%rdx, %rsi
-	jle	.LBB25_30
-.LBB25_29:
+	jle	.LBB30_30
+.LBB30_29:
 	movq	%r13, %rdi
 	callq	"std::collections::string::string::String::_realloc_mutable(::String&,::Int)"@PLT
-.LBB25_30:
+.LBB30_30:
 	movq	$0, 4152(%rsp)
 	movq	%r13, 4160(%rsp)
 	movq	%rbp, %rdi
@@ -5116,67 +6486,67 @@ main:
 	callq	"std::format::_utils::_WriteBufferStack::write_string[::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::_WriteBufferStack[$0, $1, $2, $3]&,::StringSlice[$4, $5, $6]),W=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>],stack_buffer_bytes=4096,string.mut`2x1=0"@PLT
 	movq	4152(%rsp), %rdx
 	cmpq	$4097, %rdx
-	jl	.LBB25_32
+	jl	.LBB30_32
 	movq	4160(%rsp), %rdi
 	movq	%rbp, %rsi
 	callq	"std::collections::string::string::String::_iadd[LITImmutOrigin,::Origin[::Bool(False), $0]](::String&,::Span[::Bool(False), $0, ::SIMD[::DType(uint8), ::Int(1)], $1])"@PLT
 	movq	$0, 4152(%rsp)
-.LBB25_32:
+.LBB30_32:
 	movq	16(%r14), %rdx
 	testq	%rdx, %rdx
-	js	.LBB25_33
+	js	.LBB30_33
 	movq	(%r14), %rsi
 	movq	8(%r14), %rdx
-	jmp	.LBB25_35
-.LBB25_24:
+	jmp	.LBB30_35
+.LBB30_24:
 	shrq	$56, %rdx
 	andl	$31, %edx
 	movq	%r14, %rsi
 	movq	%r13, %rdi
-	jmp	.LBB25_38
-.LBB25_33:
+	jmp	.LBB30_38
+.LBB30_33:
 	shrq	$56, %rdx
 	andl	$31, %edx
 	movq	%r14, %rsi
-.LBB25_35:
+.LBB30_35:
 	movq	%rbp, %rdi
 	callq	"std::format::_utils::_WriteBufferStack::write_string[::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::_WriteBufferStack[$0, $1, $2, $3]&,::StringSlice[$4, $5, $6]),W=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>],stack_buffer_bytes=4096,string.mut`2x1=0"@PLT
 	movq	4152(%rsp), %rdx
 	cmpq	$4097, %rdx
-	jl	.LBB25_37
+	jl	.LBB30_37
 	movq	4160(%rsp), %rdi
 	movq	%rbp, %rsi
 	callq	"std::collections::string::string::String::_iadd[LITImmutOrigin,::Origin[::Bool(False), $0]](::String&,::Span[::Bool(False), $0, ::SIMD[::DType(uint8), ::Int(1)], $1])"@PLT
 	movq	$0, 4152(%rsp)
 	xorl	%edx, %edx
-	jmp	.LBB25_37
-.LBB25_40:
+	jmp	.LBB30_37
+.LBB30_40:
 	shrq	$56, %rdx
 	andl	$31, %edx
 	movq	%r14, %rsi
 	leaq	56(%rsp), %rdi
 	callq	"std::format::_utils::_WriteBufferStack::write_string[::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::_WriteBufferStack[$0, $1, $2, $3]&,::StringSlice[$4, $5, $6]),W=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>],stack_buffer_bytes=4096,string.mut`2x1=0"@PLT
 	cmpq	$2, %rbx
-	jl	.LBB25_48
-.LBB25_43:
+	jl	.LBB30_48
+.LBB30_43:
 	addq	$24, %r14
 	decq	8(%rsp)
 	xorl	%r12d, %r12d
 	leaq	56(%rsp), %rdi
-	jmp	.LBB25_44
+	jmp	.LBB30_44
 	.p2align	4
-.LBB25_46:
+.LBB30_46:
 	movq	(%rbp), %rbp
 	movq	8(%r14,%r13,8), %rdx
-.LBB25_47:
+.LBB30_47:
 	movq	%r15, %rdi
 	movq	%rbp, %rsi
 	callq	"std::format::_utils::_WriteBufferStack::write_string[::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::_WriteBufferStack[$0, $1, $2, $3]&,::StringSlice[$4, $5, $6]),W=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>],stack_buffer_bytes=4096,string.mut`2x1=0"@PLT
 	movq	%r15, %rdi
 	addq	$24, %r14
 	cmpq	%r12, 8(%rsp)
-	je	.LBB25_48
-.LBB25_44:
+	je	.LBB30_48
+.LBB30_44:
 	incq	%r12
 	movq	%r12, %rax
 	sarq	$63, %rax
@@ -5189,20 +6559,20 @@ main:
 	callq	"std::format::_utils::_WriteBufferStack::write_string[::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::_WriteBufferStack[$0, $1, $2, $3]&,::StringSlice[$4, $5, $6]),W=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>],stack_buffer_bytes=4096,string.mut`2x1=0"@PLT
 	movq	16(%r14,%r13,8), %rdx
 	testq	%rdx, %rdx
-	jns	.LBB25_46
+	jns	.LBB30_46
 	shrq	$56, %rdx
 	andl	$31, %edx
-	jmp	.LBB25_47
-.LBB25_48:
+	jmp	.LBB30_47
+.LBB30_48:
 	movq	4152(%rsp), %rdx
 	movq	4160(%rsp), %rdi
 	leaq	56(%rsp), %rsi
 	callq	"std::collections::string::string::String::_iadd[LITImmutOrigin,::Origin[::Bool(False), $0]](::String&,::Span[::Bool(False), $0, ::SIMD[::DType(uint8), ::Int(1)], $1])"@PLT
-.LBB25_49:
+.LBB30_49:
 	movq	24(%rsp), %rax
 	movq	32(%rsp), %rdx
 	movq	40(%rsp), %rcx
-.LBB25_50:
+.LBB30_50:
 	addq	$4168, %rsp
 	.cfi_def_cfa_offset 56
 	popq	%rbx
@@ -5218,8 +6588,8 @@ main:
 	popq	%rbp
 	.cfi_def_cfa_offset 8
 	retq
-.Lfunc_end25:
-	.size	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]", .Lfunc_end25-"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"
+.Lfunc_end30:
+	.size	"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]", .Lfunc_end30-"std::collections::string::string_slice::StringSlice::join[::Copyable & ::Writable,::Bool,LITOrigin[$4._mlir_value],::Origin[$4, $5]](::StringSlice[$0, $1, $2],::Span[$4, $5, $3, $6])_REMOVED_ARG,mut=0,T=[typevalue<#kgen.instref<\"std::collections::string::string::String\">>, struct<(pointer<none>, index, index) memoryOnly>]"
 	.cfi_endproc
 
 	.type	static_string_c44bdff4074eecdb,@object

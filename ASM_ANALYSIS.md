@@ -209,6 +209,80 @@ Key observations:
 
 ---
 
+## 7. NR-Blocked Kernel (process_i_tile, lines ~5362-5898 in gemm.s)
+
+**MR=4 × NR=4 register-accumulation inner loop (`.LBB25_33`):**
+```asm
+# C accumulators loaded ONCE before k-loop (16 zmm registers):
+vmovupd  (%r10,%rbx,8), %zmm0       # acc[0][0] = C[i+0, j:j+8]
+vmovupd  64(%r10,%rbx,8), %zmm1     # acc[0][1] = C[i+0, j+8:j+16]
+vmovupd  128(%r10,%rbx,8), %zmm2    # acc[0][2] = C[i+0, j+16:j+24]
+vmovupd  192(%r10,%rbx,8), %zmm3    # acc[0][3] = C[i+0, j+24:j+32]
+vmovupd  (%r13,%rbx,8), %zmm4       # acc[1][0] = C[i+1, j:j+8]
+...                                   # (zmm4-7 for row 1, zmm8-11 for row 2, zmm12-15 for row 3)
+
+# Inner k-loop — 16 FMAs per iteration:
+.LBB25_33:
+    vmovupd  (%rax), %zmm16              # B[p, j:j+8]      \
+    vmovupd  64(%rax), %zmm17            # B[p, j+8:j+16]    | 4 B vectors loaded
+    vmovupd  128(%rax), %zmm18           # B[p, j+16:j+24]   | (reused across MR=4 rows)
+    vmovupd  192(%rax), %zmm19           # B[p, j+24:j+32]  /
+    vbroadcastsd (%r10,%r12,8), %zmm20   # broadcast A[i+0, p]
+    vfmadd231pd %zmm20, %zmm16, %zmm0   # acc[0][0] += A[i+0,p] * B[p,j:j+8]
+    vfmadd231pd %zmm20, %zmm17, %zmm1   # acc[0][1] += A[i+0,p] * B[p,j+8:j+16]
+    vfmadd231pd %zmm20, %zmm18, %zmm2   # acc[0][2] += A[i+0,p] * B[p,j+16:j+24]
+    vfmadd231pd %zmm20, %zmm19, %zmm3   # acc[0][3] += A[i+0,p] * B[p,j+24:j+32]
+    vbroadcastsd (%rdi,%r12,8), %zmm20   # broadcast A[i+1, p]
+    vfmadd231pd %zmm20, %zmm16, %zmm4   # acc[1][0] += A[i+1,p] * B[p,j:j+8]
+    vfmadd231pd %zmm20, %zmm17, %zmm5   # acc[1][1] += ...
+    vfmadd231pd %zmm20, %zmm18, %zmm6   # acc[1][2] += ...
+    vfmadd231pd %zmm20, %zmm19, %zmm7   # acc[1][3] += ...
+    vbroadcastsd (%r11,%r12,8), %zmm20   # broadcast A[i+2, p]
+    vfmadd231pd %zmm20, %zmm16, %zmm8   # acc[2][0] += ...
+    vfmadd231pd %zmm20, %zmm17, %zmm9   # acc[2][1] += ...
+    vfmadd231pd %zmm20, %zmm18, %zmm10  # acc[2][2] += ...
+    vfmadd231pd %zmm20, %zmm19, %zmm11  # acc[2][3] += ...
+    vbroadcastsd (%rdx,%r12,8), %zmm20   # broadcast A[i+3, p]
+    vfmadd231pd %zmm16, %zmm20, %zmm12  # acc[3][0] += ...
+    vfmadd231pd %zmm17, %zmm20, %zmm13  # acc[3][1] += ...
+    vfmadd231pd %zmm18, %zmm20, %zmm14  # acc[3][2] += ...
+    vfmadd231pd %zmm20, %zmm19, %zmm15  # acc[3][3] += ...
+    incq     %r12                         # p++
+    addq     %rsi, %rax                   # advance B pointer by row stride
+    cmpq     %r12, %r15                   # loop bound: tile_k
+    jne      .LBB25_33
+
+# C accumulators stored ONCE after k-loop (16 stores):
+vmovupd  %zmm0, (%r10,%rbx,8)     # store acc[0][0]
+vmovupd  %zmm1, (%r10,%rax,8)     # store acc[0][1]
+...                                 # (16 stores total)
+vmovupd  %zmm15, (%rbp,%rsi,8)    # store acc[3][3]
+```
+
+**Verdict: CORRECT and OPTIMAL** - Full MR=4 × NR=4 register tile confirmed.
+
+Key observations:
+1. **21 zmm registers used**: zmm0-15 (16 accumulators) + zmm16-19 (4 B vectors) +
+   zmm20 (A broadcast scratch). Uses 21 of 32 available AVX-512 registers.
+
+2. **16 FMAs per k-iteration**: 4 rows × 4 SIMD columns = 16 `vfmadd231pd` instructions,
+   each processing 8 doubles = **128 FLOPs per iteration** (vs 32 in the packed kernel).
+
+3. **4× A-traffic reduction**: Each A[i,p] scalar is broadcast once (`vbroadcastsd`) and
+   reused across NR=4 B vectors. The packed kernel only reused across 1 B vector.
+
+4. **4× B-traffic reduction**: Each B vector (zmm16-19) is loaded once and reused across
+   MR=4 rows. Same as packed kernel.
+
+5. **Compute-to-load ratio**: 16 FMAs / (4 B-loads + 4 A-broadcasts) = 2.0 FMAs/load.
+   The packed kernel achieved 4 FMAs / (1 B-load + 4 A-loads) = 0.8 FMAs/load.
+   This is a **2.5× improvement in compute density**.
+
+6. **Inner loop is 27 instructions**: 4 B-loads + 4 A-broadcasts + 16 FMAs + 1 inc +
+   1 add + 1 cmp/jne = 27 instructions for 128 FLOPs.
+
+---
+
 ## Cross-Kernel Findings
 
 ### What's Working Well
