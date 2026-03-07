@@ -15,6 +15,8 @@
 - Use `mut` (not `inout`) for mutable function parameters: `fn foo(mut x: List[Float64])`
 - Use `comptime if` (not `@parameter if`) for compile-time branching on parameter values
 - Inside a struct, reference its parameters with `Self.` prefix: `List[Scalar[Self.dtype]]`, not `List[Scalar[dtype]]`
+- Use `vectorize[simd_width](size, closure)` from `std.algorithm.functional` to auto-vectorize loops with automatic remainder handling — no manual SIMD + scalar tail loop needed
+- Closures passed to `vectorize` use the `unified {mut}` syntax: `fn name[width: Int](i: Int) unified {mut}:` — `unified` means it works in both parametric and runtime contexts, `{mut}` allows capturing and mutating enclosing variables
 
 ## Development
 
