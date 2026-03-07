@@ -3,3 +3,4 @@ __pycache__/
 *.mojopkg
 *.o
 *.so
+bench_matmul
