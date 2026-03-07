@@ -449,26 +449,27 @@ fn matmul_packed[
 fn matmul_unrolled[
     dtype: DType = DType.float64, *, transpose_b: Bool = False
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # Computes C = A * op(B)  —  tiled + SIMD + parallel + 2D register-blocked
-    #                             + C-accumulation in registers + K-unrolling.
+    # Computes C = A * op(B)  —  cache-aware GOTO-style GEMM.
     #
-    # Key optimizations over matmul_packed:
-    #   1. Larger K-tile (TILE_K=256 vs 32): C accumulators stay in registers
-    #      across 256 k-iterations, reducing C-side memory traffic by ~8x.
-    #   2. 2D register blocking (MR=4 rows x NR=2 SIMD-width columns):
-    #      each A scalar loaded feeds NR=2 FMAs instead of 1, and each B
-    #      vector feeds MR=4 FMAs — giving MR*NR=8 FMAs per k-step from
-    #      only MR+NR=6 loads (compute-to-load ratio: 21.3 vs 12.8 FLOPs/load).
-    #   3. K-loop unrolling (KU=4): processes 4 consecutive k-values per
-    #      inner iteration, exposing instruction-level parallelism so the
-    #      CPU can pipeline independent FMA operations.
-    comptime TILE_M = 32
-    comptime TILE_N = 64
-    comptime TILE_K = 256
+    # Complete redesign vs previous kernels.  Two fundamental changes:
+    #
+    #   1. Parallelize over j-tiles (N-dimension) instead of i-tiles (M-dimension).
+    #      With M=96/TILE=32 we only got 3 i-tiles across 4 cores (one idle).
+    #      With N=11008/TILE=64 we get 172 j-tiles — perfect load balance.
+    #      For decode (M=1), this turns 1-thread into 4-thread.
+    #
+    #   2. j→k→i loop order (vs old k→j→i).  For each j-tile:
+    #      - C panel = M×TILE_N×8 = 48KB — fits L1, loaded/stored ONCE total
+    #      - B chunk per k-tile = TILE_K×TILE_N×8 = 128KB — fits L2
+    #      - B chunk reused across all M/MR = 24 i-blocks
+    #      Old order swept all 11008 B-columns per k-tile (22MB — blew caches)
+    #      and C (8.5MB) couldn't stay cached between k-tiles.
+    comptime TILE_N = 64    # j-tile: C panel = M*64*8 fits L1
+    comptime TILE_K = 256   # k-tile: B chunk = 256*64*8 = 128KB fits L2
     comptime NELTS = simd_width_of[dtype]()
-    comptime MR = 4   # rows of C per micro-kernel
-    comptime NR = 2   # SIMD vectors of C columns per micro-kernel
-    comptime KU = 4   # k-loop unroll factor
+    comptime MR = 4         # rows of C per micro-kernel
+    comptime NR = 2         # SIMD vectors of C columns per micro-kernel
+    comptime KU = 4         # k-loop unroll factor
 
     var m = a.rows
     var n = c.cols
@@ -482,224 +483,220 @@ fn matmul_unrolled[
     for idx in range(m * n):
         c.store(idx, Scalar[dtype](0))
 
-    var num_i_tiles = (m + TILE_M - 1) // TILE_M
+    var num_j_tiles = (n + TILE_N - 1) // TILE_N
 
-    fn process_i_tile(tile_idx: Int) capturing:
-        var i0 = tile_idx * TILE_M
-        var i_end = i0 + TILE_M
-        if i_end > m:
-            i_end = m
+    fn process_j_tile(j_tile_idx: Int) capturing:
+        var j0 = j_tile_idx * TILE_N
+        var j_end = j0 + TILE_N
+        if j_end > n:
+            j_end = n
+        var tile_n = j_end - j0
 
+        # j→k→i order: C panel stays in L1 across all k-tiles
         for p0 in range(0, k, TILE_K):
             var p_end = p0 + TILE_K
             if p_end > k:
                 p_end = k
             var tile_k = p_end - p0
-            for j0 in range(0, n, TILE_N):
-                var j_end = j0 + TILE_N
-                if j_end > n:
-                    j_end = n
-                var tile_n = j_end - j0
 
-                comptime if transpose_b:
-                    # transpose_b fallback: scalar path
-                    for i in range(i0, i_end):
-                        for p in range(p0, p_end):
-                            var a_val = a_ptr[i * k + p]
-                            for j in range(j0, j_end):
-                                var idx = i * n + j
-                                c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
-                else:
-                    # 2D register-blocked + K-unrolled micro-kernel
-                    var i = i0
-                    while i + MR <= i_end:
-                        var c_row0 = c_ptr + i * n + j0
-                        var c_row1 = c_ptr + (i + 1) * n + j0
-                        var c_row2 = c_ptr + (i + 2) * n + j0
-                        var c_row3 = c_ptr + (i + 3) * n + j0
+            comptime if transpose_b:
+                for i in range(m):
+                    for p in range(p0, p_end):
+                        var a_val = a_ptr[i * k + p]
+                        for j in range(j0, j_end):
+                            var idx = i * n + j
+                            c_ptr[idx] = c_ptr[idx] + a_val * b_ptr[j * k + p]
+            else:
+                # Process all rows in MR-sized blocks
+                var i = 0
+                while i + MR <= m:
+                    var c_row0 = c_ptr + i * n + j0
+                    var c_row1 = c_ptr + (i + 1) * n + j0
+                    var c_row2 = c_ptr + (i + 2) * n + j0
+                    var c_row3 = c_ptr + (i + 3) * n + j0
 
-                        # Process NR SIMD vectors at a time (MR x NR register tile)
-                        var j = 0
-                        while j + NR * NELTS <= tile_n:
-                            # Load MR x NR C accumulators into registers
-                            var acc00 = c_row0.load[width=NELTS](offset=j)
-                            var acc01 = c_row0.load[width=NELTS](offset=j + NELTS)
-                            var acc10 = c_row1.load[width=NELTS](offset=j)
-                            var acc11 = c_row1.load[width=NELTS](offset=j + NELTS)
-                            var acc20 = c_row2.load[width=NELTS](offset=j)
-                            var acc21 = c_row2.load[width=NELTS](offset=j + NELTS)
-                            var acc30 = c_row3.load[width=NELTS](offset=j)
-                            var acc31 = c_row3.load[width=NELTS](offset=j + NELTS)
+                    # Process NR SIMD vectors at a time
+                    var j = 0
+                    while j + NR * NELTS <= tile_n:
+                        # Load C accumulators (from L1 — C panel is warm)
+                        var acc00 = c_row0.load[width=NELTS](offset=j)
+                        var acc01 = c_row0.load[width=NELTS](offset=j + NELTS)
+                        var acc10 = c_row1.load[width=NELTS](offset=j)
+                        var acc11 = c_row1.load[width=NELTS](offset=j + NELTS)
+                        var acc20 = c_row2.load[width=NELTS](offset=j)
+                        var acc21 = c_row2.load[width=NELTS](offset=j + NELTS)
+                        var acc30 = c_row3.load[width=NELTS](offset=j)
+                        var acc31 = c_row3.load[width=NELTS](offset=j + NELTS)
 
-                            # K-unrolled accumulation: process KU k-values per iteration
-                            var pk = 0
-                            var pk_end = tile_k - (tile_k % KU)
-                            while pk < pk_end:
-                                var p = p0 + pk
+                        # K-unrolled accumulation
+                        var pk = 0
+                        var pk_end = tile_k - (tile_k % KU)
+                        while pk < pk_end:
+                            var p = p0 + pk
 
-                                # Unroll 0
-                                var b_row_0 = b_ptr + p * n + j0
-                                var bv00 = b_row_0.load[width=NELTS](offset=j)
-                                var bv01 = b_row_0.load[width=NELTS](offset=j + NELTS)
-                                var a0_0 = a_ptr[i * k + p]
-                                var a1_0 = a_ptr[(i + 1) * k + p]
-                                var a2_0 = a_ptr[(i + 2) * k + p]
-                                var a3_0 = a_ptr[(i + 3) * k + p]
-                                acc00 += a0_0 * bv00
-                                acc01 += a0_0 * bv01
-                                acc10 += a1_0 * bv00
-                                acc11 += a1_0 * bv01
-                                acc20 += a2_0 * bv00
-                                acc21 += a2_0 * bv01
-                                acc30 += a3_0 * bv00
-                                acc31 += a3_0 * bv01
+                            # Unroll 0
+                            var b_row_0 = b_ptr + p * n + j0
+                            var bv00 = b_row_0.load[width=NELTS](offset=j)
+                            var bv01 = b_row_0.load[width=NELTS](offset=j + NELTS)
+                            var a0_0 = a_ptr[i * k + p]
+                            var a1_0 = a_ptr[(i + 1) * k + p]
+                            var a2_0 = a_ptr[(i + 2) * k + p]
+                            var a3_0 = a_ptr[(i + 3) * k + p]
+                            acc00 += a0_0 * bv00
+                            acc01 += a0_0 * bv01
+                            acc10 += a1_0 * bv00
+                            acc11 += a1_0 * bv01
+                            acc20 += a2_0 * bv00
+                            acc21 += a2_0 * bv01
+                            acc30 += a3_0 * bv00
+                            acc31 += a3_0 * bv01
 
-                                # Unroll 1
-                                var b_row_1 = b_ptr + (p + 1) * n + j0
-                                var bv10 = b_row_1.load[width=NELTS](offset=j)
-                                var bv11 = b_row_1.load[width=NELTS](offset=j + NELTS)
-                                var a0_1 = a_ptr[i * k + p + 1]
-                                var a1_1 = a_ptr[(i + 1) * k + p + 1]
-                                var a2_1 = a_ptr[(i + 2) * k + p + 1]
-                                var a3_1 = a_ptr[(i + 3) * k + p + 1]
-                                acc00 += a0_1 * bv10
-                                acc01 += a0_1 * bv11
-                                acc10 += a1_1 * bv10
-                                acc11 += a1_1 * bv11
-                                acc20 += a2_1 * bv10
-                                acc21 += a2_1 * bv11
-                                acc30 += a3_1 * bv10
-                                acc31 += a3_1 * bv11
+                            # Unroll 1
+                            var b_row_1 = b_ptr + (p + 1) * n + j0
+                            var bv10 = b_row_1.load[width=NELTS](offset=j)
+                            var bv11 = b_row_1.load[width=NELTS](offset=j + NELTS)
+                            var a0_1 = a_ptr[i * k + p + 1]
+                            var a1_1 = a_ptr[(i + 1) * k + p + 1]
+                            var a2_1 = a_ptr[(i + 2) * k + p + 1]
+                            var a3_1 = a_ptr[(i + 3) * k + p + 1]
+                            acc00 += a0_1 * bv10
+                            acc01 += a0_1 * bv11
+                            acc10 += a1_1 * bv10
+                            acc11 += a1_1 * bv11
+                            acc20 += a2_1 * bv10
+                            acc21 += a2_1 * bv11
+                            acc30 += a3_1 * bv10
+                            acc31 += a3_1 * bv11
 
-                                # Unroll 2
-                                var b_row_2 = b_ptr + (p + 2) * n + j0
-                                var bv20 = b_row_2.load[width=NELTS](offset=j)
-                                var bv21 = b_row_2.load[width=NELTS](offset=j + NELTS)
-                                var a0_2 = a_ptr[i * k + p + 2]
-                                var a1_2 = a_ptr[(i + 1) * k + p + 2]
-                                var a2_2 = a_ptr[(i + 2) * k + p + 2]
-                                var a3_2 = a_ptr[(i + 3) * k + p + 2]
-                                acc00 += a0_2 * bv20
-                                acc01 += a0_2 * bv21
-                                acc10 += a1_2 * bv20
-                                acc11 += a1_2 * bv21
-                                acc20 += a2_2 * bv20
-                                acc21 += a2_2 * bv21
-                                acc30 += a3_2 * bv20
-                                acc31 += a3_2 * bv21
+                            # Unroll 2
+                            var b_row_2 = b_ptr + (p + 2) * n + j0
+                            var bv20 = b_row_2.load[width=NELTS](offset=j)
+                            var bv21 = b_row_2.load[width=NELTS](offset=j + NELTS)
+                            var a0_2 = a_ptr[i * k + p + 2]
+                            var a1_2 = a_ptr[(i + 1) * k + p + 2]
+                            var a2_2 = a_ptr[(i + 2) * k + p + 2]
+                            var a3_2 = a_ptr[(i + 3) * k + p + 2]
+                            acc00 += a0_2 * bv20
+                            acc01 += a0_2 * bv21
+                            acc10 += a1_2 * bv20
+                            acc11 += a1_2 * bv21
+                            acc20 += a2_2 * bv20
+                            acc21 += a2_2 * bv21
+                            acc30 += a3_2 * bv20
+                            acc31 += a3_2 * bv21
 
-                                # Unroll 3
-                                var b_row_3 = b_ptr + (p + 3) * n + j0
-                                var bv30 = b_row_3.load[width=NELTS](offset=j)
-                                var bv31 = b_row_3.load[width=NELTS](offset=j + NELTS)
-                                var a0_3 = a_ptr[i * k + p + 3]
-                                var a1_3 = a_ptr[(i + 1) * k + p + 3]
-                                var a2_3 = a_ptr[(i + 2) * k + p + 3]
-                                var a3_3 = a_ptr[(i + 3) * k + p + 3]
-                                acc00 += a0_3 * bv30
-                                acc01 += a0_3 * bv31
-                                acc10 += a1_3 * bv30
-                                acc11 += a1_3 * bv31
-                                acc20 += a2_3 * bv30
-                                acc21 += a2_3 * bv31
-                                acc30 += a3_3 * bv30
-                                acc31 += a3_3 * bv31
+                            # Unroll 3
+                            var b_row_3 = b_ptr + (p + 3) * n + j0
+                            var bv30 = b_row_3.load[width=NELTS](offset=j)
+                            var bv31 = b_row_3.load[width=NELTS](offset=j + NELTS)
+                            var a0_3 = a_ptr[i * k + p + 3]
+                            var a1_3 = a_ptr[(i + 1) * k + p + 3]
+                            var a2_3 = a_ptr[(i + 2) * k + p + 3]
+                            var a3_3 = a_ptr[(i + 3) * k + p + 3]
+                            acc00 += a0_3 * bv30
+                            acc01 += a0_3 * bv31
+                            acc10 += a1_3 * bv30
+                            acc11 += a1_3 * bv31
+                            acc20 += a2_3 * bv30
+                            acc21 += a2_3 * bv31
+                            acc30 += a3_3 * bv30
+                            acc31 += a3_3 * bv31
 
-                                pk += KU
+                            pk += KU
 
-                            # Handle remaining k-values (< KU)
-                            while pk < tile_k:
-                                var p = p0 + pk
-                                var b_row = b_ptr + p * n + j0
-                                var bv0 = b_row.load[width=NELTS](offset=j)
-                                var bv1 = b_row.load[width=NELTS](offset=j + NELTS)
-                                var a0 = a_ptr[i * k + p]
-                                var a1 = a_ptr[(i + 1) * k + p]
-                                var a2 = a_ptr[(i + 2) * k + p]
-                                var a3 = a_ptr[(i + 3) * k + p]
-                                acc00 += a0 * bv0
-                                acc01 += a0 * bv1
-                                acc10 += a1 * bv0
-                                acc11 += a1 * bv1
-                                acc20 += a2 * bv0
-                                acc21 += a2 * bv1
-                                acc30 += a3 * bv0
-                                acc31 += a3 * bv1
-                                pk += 1
+                        # Handle remaining k-values
+                        while pk < tile_k:
+                            var p = p0 + pk
+                            var b_row = b_ptr + p * n + j0
+                            var bv0 = b_row.load[width=NELTS](offset=j)
+                            var bv1 = b_row.load[width=NELTS](offset=j + NELTS)
+                            var a0 = a_ptr[i * k + p]
+                            var a1 = a_ptr[(i + 1) * k + p]
+                            var a2 = a_ptr[(i + 2) * k + p]
+                            var a3 = a_ptr[(i + 3) * k + p]
+                            acc00 += a0 * bv0
+                            acc01 += a0 * bv1
+                            acc10 += a1 * bv0
+                            acc11 += a1 * bv1
+                            acc20 += a2 * bv0
+                            acc21 += a2 * bv1
+                            acc30 += a3 * bv0
+                            acc31 += a3 * bv1
+                            pk += 1
 
-                            # Store accumulators back (once per k-tile)
-                            c_row0.store(offset=j, val=acc00)
-                            c_row0.store(offset=j + NELTS, val=acc01)
-                            c_row1.store(offset=j, val=acc10)
-                            c_row1.store(offset=j + NELTS, val=acc11)
-                            c_row2.store(offset=j, val=acc20)
-                            c_row2.store(offset=j + NELTS, val=acc21)
-                            c_row3.store(offset=j, val=acc30)
-                            c_row3.store(offset=j + NELTS, val=acc31)
-                            j += NR * NELTS
+                        # Store accumulators back
+                        c_row0.store(offset=j, val=acc00)
+                        c_row0.store(offset=j + NELTS, val=acc01)
+                        c_row1.store(offset=j, val=acc10)
+                        c_row1.store(offset=j + NELTS, val=acc11)
+                        c_row2.store(offset=j, val=acc20)
+                        c_row2.store(offset=j + NELTS, val=acc21)
+                        c_row3.store(offset=j, val=acc30)
+                        c_row3.store(offset=j + NELTS, val=acc31)
+                        j += NR * NELTS
 
-                        # Handle remaining columns with single-vector path
-                        while j + NELTS <= tile_n:
-                            var acc0 = c_row0.load[width=NELTS](offset=j)
-                            var acc1 = c_row1.load[width=NELTS](offset=j)
-                            var acc2 = c_row2.load[width=NELTS](offset=j)
-                            var acc3 = c_row3.load[width=NELTS](offset=j)
-                            for pk in range(tile_k):
-                                var p = p0 + pk
-                                var bv = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
-                                acc0 += a_ptr[i * k + p] * bv
-                                acc1 += a_ptr[(i + 1) * k + p] * bv
-                                acc2 += a_ptr[(i + 2) * k + p] * bv
-                                acc3 += a_ptr[(i + 3) * k + p] * bv
-                            c_row0.store(offset=j, val=acc0)
-                            c_row1.store(offset=j, val=acc1)
-                            c_row2.store(offset=j, val=acc2)
-                            c_row3.store(offset=j, val=acc3)
-                            j += NELTS
+                    # Handle remaining columns with single-vector path
+                    while j + NELTS <= tile_n:
+                        var acc0 = c_row0.load[width=NELTS](offset=j)
+                        var acc1 = c_row1.load[width=NELTS](offset=j)
+                        var acc2 = c_row2.load[width=NELTS](offset=j)
+                        var acc3 = c_row3.load[width=NELTS](offset=j)
+                        for pk in range(tile_k):
+                            var p = p0 + pk
+                            var bv = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
+                            acc0 += a_ptr[i * k + p] * bv
+                            acc1 += a_ptr[(i + 1) * k + p] * bv
+                            acc2 += a_ptr[(i + 2) * k + p] * bv
+                            acc3 += a_ptr[(i + 3) * k + p] * bv
+                        c_row0.store(offset=j, val=acc0)
+                        c_row1.store(offset=j, val=acc1)
+                        c_row2.store(offset=j, val=acc2)
+                        c_row3.store(offset=j, val=acc3)
+                        j += NELTS
 
-                        # Scalar remainder for j
-                        while j < tile_n:
-                            var acc0 = c_row0[j]
-                            var acc1 = c_row1[j]
-                            var acc2 = c_row2[j]
-                            var acc3 = c_row3[j]
-                            for pk in range(tile_k):
-                                var p = p0 + pk
-                                var b_val = b_ptr[p * n + j0 + j]
-                                acc0 += a_ptr[i * k + p] * b_val
-                                acc1 += a_ptr[(i + 1) * k + p] * b_val
-                                acc2 += a_ptr[(i + 2) * k + p] * b_val
-                                acc3 += a_ptr[(i + 3) * k + p] * b_val
-                            c_row0[j] = acc0
-                            c_row1[j] = acc1
-                            c_row2[j] = acc2
-                            c_row3[j] = acc3
-                            j += 1
+                    # Scalar remainder for j
+                    while j < tile_n:
+                        var acc0 = c_row0[j]
+                        var acc1 = c_row1[j]
+                        var acc2 = c_row2[j]
+                        var acc3 = c_row3[j]
+                        for pk in range(tile_k):
+                            var p = p0 + pk
+                            var b_val = b_ptr[p * n + j0 + j]
+                            acc0 += a_ptr[i * k + p] * b_val
+                            acc1 += a_ptr[(i + 1) * k + p] * b_val
+                            acc2 += a_ptr[(i + 2) * k + p] * b_val
+                            acc3 += a_ptr[(i + 3) * k + p] * b_val
+                        c_row0[j] = acc0
+                        c_row1[j] = acc1
+                        c_row2[j] = acc2
+                        c_row3[j] = acc3
+                        j += 1
 
-                        i += MR
+                    i += MR
 
-                    # Handle remaining rows (< MR) with single-row accumulation
-                    while i < i_end:
-                        var c_row = c_ptr + i * n + j0
-                        var j = 0
-                        while j + NELTS <= tile_n:
-                            var acc = c_row.load[width=NELTS](offset=j)
-                            for pk in range(tile_k):
-                                var p = p0 + pk
-                                var bv = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
-                                acc += a_ptr[i * k + p] * bv
-                            c_row.store(offset=j, val=acc)
-                            j += NELTS
-                        while j < tile_n:
-                            var acc = c_row[j]
-                            for pk in range(tile_k):
-                                var p = p0 + pk
-                                acc += a_ptr[i * k + p] * b_ptr[p * n + j0 + j]
-                            c_row[j] = acc
-                            j += 1
-                        i += 1
+                # Handle remaining rows (< MR)
+                while i < m:
+                    var c_row = c_ptr + i * n + j0
+                    var j = 0
+                    while j + NELTS <= tile_n:
+                        var acc = c_row.load[width=NELTS](offset=j)
+                        for pk in range(tile_k):
+                            var p = p0 + pk
+                            var bv = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
+                            acc += a_ptr[i * k + p] * bv
+                        c_row.store(offset=j, val=acc)
+                        j += NELTS
+                    while j < tile_n:
+                        var acc = c_row[j]
+                        for pk in range(tile_k):
+                            var p = p0 + pk
+                            acc += a_ptr[i * k + p] * b_ptr[p * n + j0 + j]
+                        c_row[j] = acc
+                        j += 1
+                    i += 1
 
-    parallelize[process_i_tile](num_i_tiles, num_physical_cores())
+    parallelize[process_j_tile](num_j_tiles, num_physical_cores())
 
 
 # Default matmul points to the tiled version
