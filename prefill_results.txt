@@ -1,0 +1,38 @@
+=== prefill benchmark: goto vs prefill (96x11008x2048) ===
+
+  max diff (goto vs prefill): 0.0
+  correctness: OK
+
+  goto    : 53.17483239111112 ms (mean) | 52.217239130434784 ms (min) | 81.40169951383939 GFLOPS (mean) | 82.89449614882308 GFLOPS (min)
+  prefill : 35.27241512979351 ms (mean) | 34.52449903508772 ms (min) | 122.71690815817804 GFLOPS (mean) | 125.3753667388733 GFLOPS (min)
+
+  speedup mean (goto/prefill): 1.507547248903747 x
+  improvement mean: 50.75472489037469 %
+  speedup min  (goto/prefill): 1.5124691332194478 x
+  improvement min: 51.246913321944774 %
+
+--- full reports ---
+
+goto:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.05317483239111111
+Total: 11.964337288
+Iters: 225
+Warmup Total: 0.069245853
+Fastest Mean: 0.05221723913043478
+Slowest Mean: 0.0550014478
+
+
+prefill:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.03527241512979351
+Total: 11.957348729
+Iters: 339
+Warmup Total: 0.03450803
+Fastest Mean: 0.03452449903508772
+Slowest Mean: 0.03622912275
+

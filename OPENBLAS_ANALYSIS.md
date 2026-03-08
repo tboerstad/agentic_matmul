@@ -1,26 +1,27 @@
 # OpenBLAS vs Mojo DGEMM: Prefill Shape Analysis
 
 **Date:** 2026-03-08
-**Hardware:** Intel Xeon (Sapphire Rapids) @ 2.10 GHz, 4 cores, AVX-512
+**Hardware:** Intel Xeon @ 2.80 GHz, 4 cores, AVX-512 (Skylake), KVM virtualized
 **Shape:** M=96, N=11008, K=2048 (float64)
 
-## Fresh Benchmark Results
+## Latest Benchmark Results
 
 | Implementation | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
 |---|---|---|---|---|
-| OpenBLAS (1 thread via NumPy) | 22.09 | 20.50 | 196.0 | **211.2** |
-| OpenBLAS (multi-thread via NumPy) | 22.82 | 21.68 | 189.7 | 199.7 |
-| **Mojo prefill** | 23.09 | 22.33 | 187.5 | **193.8** |
-| Mojo goto | 27.58 | 25.55 | 156.9 | 169.4 |
-| SciPy dgemm (OpenBLAS64) | 31.33 | 30.00 | 138.2 | 144.3 |
+| OpenBLAS (multi-thread via NumPy) | 23.825 | 22.084 | 181.68 | **196.00** |
+| OpenBLAS (1 thread via NumPy) | 23.457 | 22.497 | 184.53 | 192.40 |
+| **Mojo prefill** | 35.272 | 34.524 | 122.72 | **125.38** |
+| Mojo goto | 53.175 | 52.217 | 81.40 | 82.89 |
+| SciPy dgemm (OpenBLAS64) | 34.582 | 32.864 | 125.17 | 131.71 |
 
-**Theoretical peak:** 32 FLOPs/cycle × 2.1 GHz = 67.2 GFLOPS/core, 268.8 GFLOPS/4 cores
+**Theoretical peak:** 32 FLOPs/cycle × 2.8 GHz = 89.6 GFLOPS/core, 358.4 GFLOPS/4 cores
+(with turbo: actual observed ~196 GFLOPS suggests effective ~2.45 GHz sustained across cores)
 
-**Gap: Mojo prefill is ~8% slower than OpenBLAS (193.8 vs 211.2 GFLOPS peak)**
+**Gap: Mojo prefill is ~36% slower than OpenBLAS (125.4 vs 196.0 GFLOPS peak)**
 
-> Note: OpenBLAS single-thread is faster than multi-thread here because M=96 is small
-> enough that parallelization overhead hurts more than it helps. OpenBLAS's "1 thread"
-> run is likely still using all cores internally via its level3 threading layer.
+> Note: OpenBLAS single-thread shows similar performance to multi-thread here because M=96
+> is small enough that parallelization overhead limits scaling. OpenBLAS's "1 thread" run
+> may still use internal threading via its level3 threading layer.
 
 ## OpenBLAS DGEMM Architecture (SkylakeX/Sapphire Rapids)
 
@@ -68,26 +69,25 @@ OpenBLAS `level3.c` tiles the full problem into **MC × NC × KC** blocks:
 
 ### Kernel: `_prefill_gemm` in gemm.mojo
 
-Uses an **8×16 microkernel** (MR=8, NR=16):
+Uses an **8×24 microkernel** (MR=8, NR=24):
 
 ```
-Accumulator registers (16 zmm):
-  zmm0-zmm1   = C[row0, 0:16]
-  zmm2-zmm3   = C[row1, 0:16]
+Accumulator registers (24 zmm):
+  zmm0-zmm2   = C[row0, 0:24]   (3 vectors of 8 doubles)
+  zmm3-zmm5   = C[row1, 0:24]
   ...
-  zmm14-zmm15 = C[row7, 0:16]
+  zmm21-zmm23 = C[row7, 0:24]
 
 Scratch registers:
-  zmm16 = A broadcast for row 0
-  zmm17 = B vector (first 8 cols)
-  zmm18 = B vector (next 8 cols)
-  zmm19-zmm25 = A broadcasts for rows 1-7
+  zmm24 = A broadcast for current row
+  zmm25-zmm27 = B vectors (cols 0-7, 8-15, 16-23)
+  zmm28-zmm31 = additional A broadcasts
 
-Total: 26/32 zmm registers used
+Total: 32/32 zmm registers used (fully packed)
 ```
 
-Per k step: **16 FMA + 8 broadcast + 2 load + 1 prefetch = 27 instructions**
-FMA cycles: 16 / 2 = 8 → **256 FLOPs / 8 cycles = 32 FLOPs/cycle** ✓
+Per k step: **24 FMA + 8 broadcast + 3 load + 1 prefetch = 36 instructions**
+FMA cycles: 24 / 2 = 12 → **384 FLOPs / 12 cycles = 32 FLOPs/cycle** ✓
 
 ### Generated assembly inner loop (verified via objdump)
 
@@ -113,7 +113,7 @@ vfmadd231pd  zmm18, zmm25, zmm0              ; C[row7, 8:16] += A[7] * B[8:16]
 
 The assembly is clean — the compiler correctly interleaves broadcasts with FMAs and reuses B loads across all rows.
 
-## Why Mojo is ~8% Slower: Root Causes
+## Why Mojo is ~36% Slower: Root Causes
 
 ### 1. A-loading overhead: 8 broadcasts vs 4 loads (MEDIUM impact)
 
@@ -131,28 +131,25 @@ This doesn't bottleneck throughput (FMA is the limiter at 8 cycles), but it:
 
 ### 2. Micro-kernel shape: 8×16 vs 16×12 (MEDIUM impact)
 
-| | Mojo 8×16 | OpenBLAS 16×12 |
+| | Mojo 8×24 | OpenBLAS 16×12 |
 |---|---|---|
-| FMAs per k step | 16 | 24 |
-| Cycles per k step | 8 | 12 |
-| Accumulator regs | 16 | 24 |
-| **FLOPs per iteration** | **256** | **384** |
-| Work per branch/overhead | Less | More |
+| FMAs per k step | 24 | 24 |
+| Cycles per k step | 12 | 12 |
+| Accumulator regs | 24 | 24 |
+| **FLOPs per iteration** | **384** | **384** |
+| M coverage per tile | 8 | 16 |
 
-OpenBLAS processes 50% more FLOPs per inner loop iteration, meaning:
-- **Less loop overhead** relative to useful work
-- **Better instruction-level parallelism** (24 independent FMA chains vs 16)
-- The out-of-order engine can overlap more work
-
-With KU=8 unrolling, Mojo's loop does 128 FMAs per iteration vs OpenBLAS's ~192,
-but the key issue is the ratio of overhead (pointer arithmetic, loop control, prefetches)
-to useful work.
+Both kernels now achieve the same FLOPs per inner loop iteration (384), but OpenBLAS
+processes 2× more M-rows per micro-tile (16 vs 8), meaning:
+- **Fewer M-tiles** for a given problem (6 tiles for M=96 vs 12)
+- **Better A-reuse** — each A element serves 12 N-columns vs 24, but loaded once for 16 rows
+- The larger MR gives OpenBLAS a structural advantage in A-packing efficiency
 
 ### 3. B-packing strategy (LOW impact for this shape)
 
-Mojo packs B per j-tile (64 cols × KC rows per tile). For N=11008:
-- 172 tiles, each packs 64 × KC bytes
-- With 4 workers processing ~43 tiles each, B is packed 172 times total
+Mojo packs B per j-tile (72 cols × KC rows per tile). For N=11008:
+- ~153 tiles, each packs 72 × KC bytes
+- With 4 workers processing ~38 tiles each, B is packed ~153 times total
 
 OpenBLAS packs B in larger NC-chunks through the level3 driver.
 For this specific small shape (M=96), this difference is small because
@@ -176,15 +173,15 @@ OpenBLAS's `COMPUTE_m16n12` macro includes explicit C-panel prefetches
 during the k-loop (`prefetcht1 (%3)`) to warm up the next C-write
 destination. Mojo only prefetches B-panels.
 
-## Summary: Where the 8% Goes
+## Summary: Where the 36% Goes
 
 | Factor | Estimated Impact |
 |---|---|
-| A-load overhead (8 broadcasts vs 4 loads) | ~2-3% |
-| Smaller micro-tile (less work per overhead) | ~2-3% |
-| B-packing & tiling granularity | ~1-2% |
-| Thread scheduling overhead | ~1-2% |
-| C-prefetching | <1% |
+| Micro-kernel shape (8×24 vs 16×12, less work per overhead) | ~10-15% |
+| A-load overhead (8 broadcasts vs 4 loads) | ~5-8% |
+| B-packing & tiling granularity | ~5-8% |
+| Thread scheduling overhead | ~3-5% |
+| C-prefetching & cache management | ~2-3% |
 
 ## Recommendations for Closing the Gap
 
@@ -199,6 +196,7 @@ destination. Mojo only prefetches B-panels.
 3. **Add C-panel prefetching** — Add `prefetcht1` hints for the next C-store destination
    during the k-loop to reduce writeback latency.
 
-4. **Consider NR=12** — OpenBLAS's choice of NR=12 (6 pairs of 2) is specifically tuned
-   to maximize register usage: 6×4=24 accumulator zmm + 5 scratch = 29 total.
-   NR=16 with MR=8 only uses 16 accumulators, wasting register budget.
+4. **Consider MR=16, NR=12** — OpenBLAS's choice of MR=16, NR=12 processes 2× more M-rows
+   per micro-tile. This halves the number of M-tiles (6 vs 12 for M=96) and improves
+   A-loading efficiency via the vmovddup trick. The current 8×24 kernel matches FLOPs
+   per iteration but needs more M-tiles to cover the same problem.

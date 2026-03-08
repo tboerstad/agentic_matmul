@@ -1,6 +1,6 @@
 # SOTA MatMul Benchmark Results
 
-**Date:** 2026-03-07
+**Date:** 2026-03-08
 **Hardware:** Intel Xeon @ 2.80 GHz, 4 cores, AVX-512 (Skylake), KVM virtualized
 **Dtype:** float64
 
@@ -26,57 +26,79 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
 
 | Implementation                  | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) | vs SOTA |
 |---------------------------------|-----------|----------|---------------|---------------|---------|
-| **Intel MKL dgemm (4 threads)** | 4.584     | 3.964    | **9.84**      | **11.37**     | 1.00×   |
-| NumPy/OpenBLAS (multi-thread)   | 5.399     | 5.194    | 8.35          | 8.68          | 0.76×   |
-| NumPy/OpenBLAS (1 thread)       | 5.790     | 5.204    | 7.79          | 8.66          | 0.76×   |
-| SciPy dgemm (OpenBLAS64)        | 12.550    | 11.946   | 3.59          | 3.77          | 0.33×   |
-| **Mojo GOTO (current best)**    | 59.640    | ~59.4    | **0.76**      | **~0.76**     | 0.07×   |
-| Mojo Packed                     | 60.064    | ~58.5    | 0.75          | ~0.77         | 0.07×   |
-| Mojo SIMD                       | 65.307    | ~65.2    | 0.69          | ~0.69         | 0.06×   |
-| Mojo Tiled                      | 68.085    | ~67.6    | 0.66          | ~0.67         | 0.06×   |
-| Mojo Naive                      | 242.277   | ~237.1   | 0.19          | ~0.19         | 0.02×   |
+| **NumPy/OpenBLAS (multi-thread)** | 4.150   | 3.978    | **10.86**     | **11.33**     | 1.00×   |
+| NumPy/OpenBLAS (1 thread)       | 4.559     | 4.434    | 9.89          | 10.17         | 0.90×   |
+| SciPy dgemm (OpenBLAS)          | 12.833    | 10.989   | 3.51          | 4.10          | 0.36×   |
+| **Mojo GOTO (best kernel)**     | 63.294    | 63.039   | 0.71          | 0.72          | 0.06×   |
+| Mojo Parallel                   | 64.094    | 63.372   | 0.70          | 0.71          | 0.06×   |
+| Mojo SIMD                       | 64.924    | 64.428   | 0.69          | 0.70          | 0.06×   |
+| Mojo Register-Blocked           | 66.263    | 65.280   | 0.68          | 0.69          | 0.06×   |
+| Mojo Comptime                   | 66.718    | 66.068   | 0.68          | 0.68          | 0.06×   |
+| Mojo Tiled                      | 68.787    | 66.183   | 0.66          | 0.68          | 0.06×   |
+| Mojo Packed                     | 77.136    | 76.380   | 0.58          | 0.59          | 0.05×   |
+| Mojo Naive                      | 285.958   | 285.794  | 0.16          | 0.16          | 0.01×   |
 
-**SOTA Winner (Decode): Intel MKL — 11.37 GFLOPS peak (25% of theoretical single-core peak)**
+**SOTA Winner (Decode): NumPy/OpenBLAS — 11.33 GFLOPS peak (25% of theoretical single-core peak)**
 
 ### Prefill Shape: 96 × 11008 × 2048
 
 | Implementation                  | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) | vs SOTA |
 |---------------------------------|-----------|----------|---------------|---------------|---------|
-| **NumPy/OpenBLAS (1 thread)**   | 25.121    | 23.164   | **172.31**    | **186.86**    | 1.00×   |
-| NumPy/OpenBLAS (multi-thread)   | 25.713    | 23.809   | 168.34        | 181.80        | 0.97×   |
-| SciPy dgemm (OpenBLAS64)        | 33.239    | 31.168   | 130.22        | 138.88        | 0.74×   |
-| Intel MKL dgemm (4 threads)     | 38.689    | 37.239   | 111.88        | 116.24        | 0.62×   |
-| **Mojo GOTO (current best)**    | 80.792    | ~78.8    | **53.58**     | **~54.94**    | 0.29×   |
-| Mojo Comptime                   | 93.720    | ~92.2    | 46.19         | ~46.94        | 0.25×   |
-| Mojo Packed                     | 104.455   | ~102.4   | 41.44         | ~42.27        | 0.23×   |
-| Mojo SIMD                       | 516.489   | ~515.5   | 8.38          | ~8.40         | 0.04×   |
-| Mojo Tiled                      | 1457.150  | ~1457.2  | 2.97          | ~2.97         | 0.02×   |
-| Mojo Naive                      | 18649.768 | ~18650   | 0.23          | ~0.23         | 0.001×  |
+| **NumPy/OpenBLAS (multi-thread)** | 23.825  | 22.084   | **181.68**    | **196.00**    | 1.00×   |
+| NumPy/OpenBLAS (1 thread)       | 23.457    | 22.497   | 184.53        | 192.40        | 0.98×   |
+| **Mojo Prefill (best kernel)**  | 35.272    | 34.524   | 122.72        | 125.38        | 0.64×   |
+| SciPy dgemm (OpenBLAS)          | 34.582    | 32.864   | 125.17        | 131.71        | 0.67×   |
+| Mojo GOTO                       | 53.175    | 52.217   | 81.40         | 82.89         | 0.42×   |
+| Mojo Comptime†                  | 113.537   | 112.794  | 38.12         | 38.38         | 0.20×   |
+| Mojo Packed†                    | 138.886   | 136.813  | 31.17         | 31.64         | 0.16×   |
+| Mojo Register-Blocked†          | 213.036   | 204.817  | 20.32         | 21.13         | 0.11×   |
+| Mojo Parallel†                  | 239.338   | 228.812  | 18.09         | 18.92         | 0.10×   |
+| Mojo SIMD†                      | 482.479   | 477.314  | 8.97          | 9.07          | 0.05×   |
+| Mojo Tiled†                     | 1213.973  | —        | 3.57          | —             | 0.02×   |
+| Mojo Naive†                     | 23462.631 | —        | 0.18          | —             | 0.001×  |
 
-**SOTA Winner (Prefill): NumPy/OpenBLAS — 186.86 GFLOPS peak (104% of theoretical 4-core peak!)**
+†Results from bench_matmul.mojo (serial run of all kernels). GOTO and Prefill results from dedicated bench_prefill.mojo for more accurate comparison.
+
+**SOTA Winner (Prefill): NumPy/OpenBLAS — 196.00 GFLOPS peak (109% of theoretical 4-core peak!)**
 
 > Note: Exceeding theoretical peak is possible due to CPU turbo boost and measurement variance.
 
+## Mojo Prefill vs GOTO: 51% Improvement
+
+The dedicated `bench_prefill.mojo` benchmark shows:
+
+| Kernel  | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
+|---------|-----------|----------|---------------|---------------|
+| goto    | 53.175    | 52.217   | 81.40         | 82.89         |
+| prefill | 35.272    | 34.524   | 122.72        | 125.38        |
+
+**Speedup: 1.51× (51% improvement)**
+
+The prefill kernel closes the gap with OpenBLAS from 42% to 64% of SOTA peak performance.
+
 ## Key Takeaways
 
-1. **Decode (M=1):** Memory-bandwidth bound. Intel MKL is best at 11.37 GFLOPS — only 25% of
+1. **Decode (M=1):** Memory-bandwidth bound. OpenBLAS is best at 11.33 GFLOPS — only 25% of
    compute peak because the tiny M=1 means the operation is essentially a matrix-vector product,
    limited by DRAM bandwidth rather than compute.
 
-2. **Prefill (M=96):** Compute-bound. OpenBLAS achieves near-theoretical-peak at ~187 GFLOPS,
+2. **Prefill (M=96):** Compute-bound. OpenBLAS achieves near-theoretical-peak at ~196 GFLOPS,
    showing excellent utilization of AVX-512 FMA units. This shape has enough work to amortize
    memory access and saturate the compute pipeline.
 
-3. **Mojo GOTO kernel:** The new matmul_goto kernel reaches 53.6 GFLOPS on prefill (~3.5× slower
-   than SOTA) and 0.76 GFLOPS on decode (~15× slower). Key improvements:
-   - j-parallel GOTO GEMM with per-tile B-panel packing (prefill): C panel stays in L2 across
-     k-tiles while packed B enables sequential micro-kernel access (+16% over comptime)
-   - GEMV path with p-outer/j-inner loop order (decode): j-parallelism for small M where
-     previous kernels had only 1 i-tile = zero parallelism (+8.6% over previous best)
+3. **Mojo Prefill kernel:** The best Mojo kernel reaches 125.4 GFLOPS on prefill (64% of SOTA),
+   a 51% improvement over the GOTO kernel. Key optimizations:
+   - Worker-based parallelism with j-tile batching (vs per-tile scheduling)
+   - A-panel packing for L1 locality
+   - NR=24 microkernel with 8×24 register blocking
+   - KC=512 k-tile for better L2 utilization
 
-4. **B-panel packing:** Per-tile packing with j-parallelism works well (+16% prefill). Earlier
-   attempt with i-parallelism (packing all of B globally) regressed because C panel didn't stay
-   in L2 across k-tiles.
+4. **Mojo GOTO kernel:** Reaches 82.9 GFLOPS on prefill (42% of SOTA) and 0.72 GFLOPS on
+   decode (~6% of SOTA). The GOTO-style j-parallel design with per-tile B-panel packing
+   provides the foundation that the prefill kernel builds upon.
+
+5. **Remaining gap to SOTA (36%):** See [OPENBLAS_ANALYSIS.md](OPENBLAS_ANALYSIS.md) for
+   detailed analysis of OpenBLAS's 16×12 microkernel vs Mojo's 8×24 microkernel.
 
 ## Libraries Tested
 
@@ -84,5 +106,5 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
 |---------------|------------|----------------------------------|
 | NumPy         | 2.4.2      | scipy-openblas 0.3.31.dev        |
 | SciPy         | 1.17.1     | scipy-openblas64 0.3.31.dev      |
-| Intel MKL     | 2025.3.1   | Intel MKL (oneMKL)               |
-| Mojo          | 0.26.2-dev | Custom kernels (naive/tiled/simd)|
+| Intel MKL     | —          | Not available in this environment |
+| Mojo          | 0.26.2-dev | Custom kernels (naive→prefill)   |
