@@ -4,7 +4,7 @@ from std.collections import InlineArray
 from std.math import ceildiv, fma
 from std.memory.unsafe_pointer import alloc
 from std.sys import num_physical_cores, simd_width_of
-from std.sys.intrinsics import prefetch, PrefetchOptions
+from std.sys.intrinsics import prefetch, PrefetchOptions, likely, unlikely
 
 
 fn matmul_naive[dtype: DType = DType.float64](
@@ -602,7 +602,7 @@ fn _goto_gemm[
             for jp in range(num_panels):
                 var jr = jp * NR
                 var panel_base = bp_tile + jp * kc * NR
-                if jr + NR <= tile_n:
+                if likely(jr + NR <= tile_n):
                     for pk in range(kc):
                         var src = b_ptr + (pc + pk) * n + j0 + jr
                         var dst = panel_base + pk * NR
@@ -627,7 +627,7 @@ fn _goto_gemm[
                 for jp in range(num_panels):
                     var jr = jp * NR
                     var bp_panel = bp_tile + jp * kc * NR
-                    if jr + NR > tile_n:
+                    if unlikely(jr + NR > tile_n):
                         # Opt 2: vectorize handles SIMD + scalar remainder
                         var jj_limit = tile_n - jr
                         for ii in range(i, i + MR):
@@ -657,7 +657,7 @@ fn _goto_gemm[
                     var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
                         fill=SIMD[dtype, NELTS](0)
                     )
-                    if not first_k:
+                    if likely(not first_k):
                         comptime for mr in range(MR):
                             comptime for nr in range(NR_VECS):
                                 acc[mr * NR_VECS + nr] = (
@@ -850,7 +850,7 @@ fn _prefill_gemm[
                     for jp in range(num_panels):
                         var jr = jp * NR
                         var panel_base = bp_worker + jp * kc * NR
-                        if jr + NR <= tile_n:
+                        if likely(jr + NR <= tile_n):
                             for pk in range(kc):
                                 var src = b_ptr + (pc + pk) * n + j0 + jr
                                 var dst = panel_base + pk * NR
@@ -880,7 +880,7 @@ fn _prefill_gemm[
                         var jr = jp * NR
                         var bp_panel = bp_worker + jp * kc * NR
 
-                        if jr + NR > tile_n:
+                        if unlikely(jr + NR > tile_n):
                             # Remainder columns: process all i-panels
                             var jj_limit = tile_n - jr
                             i = 0
@@ -933,7 +933,7 @@ fn _prefill_gemm[
                                 fill=SIMD[dtype, NELTS](0)
                             )
                             # Load C accumulators (skip for first k-tile — already zero)
-                            if not is_first_k:
+                            if likely(not is_first_k):
                                 comptime for mr in range(MR):
                                     comptime for nr in range(NR_VECS):
                                         acc[mr * NR_VECS + nr] = (
