@@ -784,7 +784,6 @@ fn _prefill_gemm[
     comptime NELTS = simd_width_of[dtype]()
     comptime NR_VECS = NR // NELTS
     comptime PREFETCH_B_DIST = 8  # rows ahead to prefetch during B packing
-    comptime PREFETCH_DIST = 4    # k-steps ahead to prefetch packed A/B
 
     var m = a.rows
     var n = c.cols
@@ -941,50 +940,37 @@ fn _prefill_gemm[
                                         ).load[width=NELTS](offset=nr * NELTS)
 
                             # K-loop with KU unrolling, reading from packed A
+                            # Packed A/B are accessed sequentially — hardware L2
+                            # prefetcher handles this pattern well. Software
+                            # prefetches removed to free execution port bandwidth
+                            # for FMA throughput.
                             var pk = 0
                             var pk_end = kc - (kc % KU)
                             while pk < pk_end:
                                 comptime for ku in range(KU):
                                     var bp_k = bp_panel + (pk + ku) * NR
-                                    prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-                                        bp_panel + (pk + ku + PREFETCH_DIST) * NR
-                                    )
                                     var ap_k = ap_panel + (pk + ku) * MR
-                                    # Prefetch packed A ahead
-                                    prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-                                        ap_panel + (pk + ku + PREFETCH_DIST) * MR
-                                    )
-                                    var a_vals = InlineArray[Scalar[dtype], MR](
-                                        fill=Scalar[dtype](0)
-                                    )
-                                    comptime for mr in range(MR):
-                                        a_vals[mr] = ap_k[mr]
                                     comptime for nr in range(NR_VECS):
                                         var bv = bp_k.load[width=NELTS](
                                             offset=nr * NELTS
                                         )
                                         comptime for mr in range(MR):
                                             acc[mr * NR_VECS + nr] = fma(
-                                                SIMD[dtype, NELTS](a_vals[mr]), bv, acc[mr * NR_VECS + nr]
+                                                SIMD[dtype, NELTS](ap_k[mr]), bv, acc[mr * NR_VECS + nr]
                                             )
                                 pk += KU
 
                             # K remainder
                             while pk < kc:
                                 var bp_k = bp_panel + pk * NR
-                                var a_vals = InlineArray[Scalar[dtype], MR](
-                                    fill=Scalar[dtype](0)
-                                )
                                 var ap_k = ap_panel + pk * MR
-                                comptime for mr in range(MR):
-                                    a_vals[mr] = ap_k[mr]
                                 comptime for nr in range(NR_VECS):
                                     var bv = bp_k.load[width=NELTS](
                                         offset=nr * NELTS
                                     )
                                     comptime for mr in range(MR):
                                         acc[mr * NR_VECS + nr] = fma(
-                                            SIMD[dtype, NELTS](a_vals[mr]), bv, acc[mr * NR_VECS + nr]
+                                            SIMD[dtype, NELTS](ap_k[mr]), bv, acc[mr * NR_VECS + nr]
                                         )
                                 pk += 1
 
