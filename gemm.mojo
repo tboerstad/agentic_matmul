@@ -805,6 +805,253 @@ fn matmul_goto[
         _goto_gemm[dtype, MR, NR, KC, KU, TILE_N](c, a, b)
 
 
+fn _prefill_gemm[
+    dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
+    NC_TILES: Int,
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # Optimized prefill GEMM with A-panel packing + B-panel packing.
+    #
+    # Key improvements over _goto_gemm:
+    #   1. Worker-based parallelism: each thread gets a contiguous chunk of
+    #      j-tiles instead of individual tiles. Reduces parallelize overhead.
+    #   2. A-panel packing: pack A into MR-contiguous layout, shared across
+    #      NC_TILES j-tiles per batch. Amortizes packing cost.
+    #   3. Batched j-tile processing: process NC_TILES j-tiles per k-tile
+    #      iteration to keep C panel in L2 while reusing packed A.
+    #   4. Eliminates separate zero-fill pass: first k-tile uses zero accumulators.
+    comptime NELTS = simd_width_of[dtype]()
+    comptime NR_VECS = NR // NELTS
+
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+    var c_ptr = c.data.unsafe_ptr()
+    var a_ptr = a.data.unsafe_ptr()
+    var b_ptr = b.data.unsafe_ptr()
+
+    var num_j_tiles = ceildiv(n, TILE_N)
+    var num_i_panels = ceildiv(m, MR)
+    var num_workers = num_physical_cores()
+
+    # Per-worker buffers
+    # B pack: one TILE_N worth of NR-panels
+    var num_nr_panels = ceildiv(TILE_N, NR)
+    var bp_per_worker = num_nr_panels * KC * NR + KU * NR
+    var bp_total = num_workers * bp_per_worker
+    var bp_buf = alloc[Scalar[dtype]](bp_total)
+
+    # A pack: all i-panels × MR × KC (shared across j-tiles within worker)
+    var ap_per_worker = num_i_panels * MR * KC
+    var ap_total = num_workers * ap_per_worker
+    var ap_buf = alloc[Scalar[dtype]](ap_total)
+
+    fn process_worker(worker_id: Int) capturing:
+        var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
+        var j_tile_start = worker_id * tiles_per_worker
+        var j_tile_end = min(j_tile_start + tiles_per_worker, num_j_tiles)
+        if j_tile_start >= num_j_tiles:
+            return
+
+        var bp_worker = bp_buf + worker_id * bp_per_worker
+        var ap_worker = ap_buf + worker_id * ap_per_worker
+
+        # Process j-tiles in batches of NC_TILES to keep C in L2
+        var jt = j_tile_start
+        while jt < j_tile_end:
+            var jt_batch_end = min(jt + NC_TILES, j_tile_end)
+
+            for pc in range(0, k, KC):
+                var kc = min(KC, k - pc)
+                var is_first_k = (pc == 0)
+
+                # ---- Pack A once for this k-tile (shared across all j-tiles in batch) ----
+                var i = 0
+                var ip = 0
+                while i + MR <= m:
+                    var ap_panel = ap_worker + ip * MR * kc
+                    for pk in range(kc):
+                        var dst = ap_panel + pk * MR
+                        comptime for mr in range(MR):
+                            dst[mr] = a_ptr[(i + mr) * k + pc + pk]
+                    i += MR
+                    ip += 1
+
+                # ---- Process each j-tile in this batch ----
+                for j_tile_idx in range(jt, jt_batch_end):
+                    var j0 = j_tile_idx * TILE_N
+                    var tile_n = min(TILE_N, n - j0)
+                    var num_panels = ceildiv(tile_n, NR)
+
+                    # Pack B into NR-wide panels
+                    for jp in range(num_panels):
+                        var jr = jp * NR
+                        var panel_base = bp_worker + jp * kc * NR
+                        if jr + NR <= tile_n:
+                            for pk in range(kc):
+                                var src = b_ptr + (pc + pk) * n + j0 + jr
+                                var dst = panel_base + pk * NR
+                                comptime for nv in range(NR_VECS):
+                                    dst.store[width=NELTS](
+                                        offset=nv * NELTS,
+                                        val=src.load[width=NELTS](offset=nv * NELTS),
+                                    )
+                        else:
+                            var nr_actual = tile_n - jr
+                            for pk in range(kc):
+                                var src = b_ptr + (pc + pk) * n + j0 + jr
+                                var dst = panel_base + pk * NR
+                                for nr in range(nr_actual):
+                                    dst[nr] = src[nr]
+                                for nr in range(nr_actual, NR):
+                                    dst[nr] = Scalar[dtype](0)
+
+                    # Micro-kernel with packed A + packed B
+                    i = 0
+                    ip = 0
+                    while i + MR <= m:
+                        var ap_panel = ap_worker + ip * MR * kc
+
+                        for jp in range(num_panels):
+                            var jr = jp * NR
+                            var bp_panel = bp_worker + jp * kc * NR
+
+                            if jr + NR > tile_n:
+                                var jj_limit = tile_n - jr
+                                for ii in range(i, i + MR):
+                                    var c_row = c_ptr + ii * n + j0 + jr
+                                    var a_row = a_ptr + ii * k + pc
+
+                                    fn fma_remainder[width: Int](jj: Int) unified {mut}:
+                                        var acc = c_row.load[width=width](offset=jj)
+                                        if is_first_k:
+                                            acc = SIMD[dtype, width](0)
+                                        for ppk in range(kc):
+                                            acc = fma(
+                                                SIMD[dtype, width](a_row[ppk]),
+                                                (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                                acc,
+                                            )
+                                        c_row.store(offset=jj, val=acc)
+
+                                    vectorize[NELTS](jj_limit, fma_remainder)
+                                continue
+
+                            # ---- Full MR×NR micro-kernel ----
+                            var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
+                                fill=SIMD[dtype, NELTS](0)
+                            )
+                            # Load C accumulators (skip for first k-tile — already zero)
+                            if not is_first_k:
+                                comptime for mr in range(MR):
+                                    comptime for nr in range(NR_VECS):
+                                        acc[mr * NR_VECS + nr] = (
+                                            c_ptr + (i + mr) * n + j0 + jr
+                                        ).load[width=NELTS](offset=nr * NELTS)
+
+                            # K-loop with KU unrolling, reading from packed A
+                            var pk = 0
+                            var pk_end = kc - (kc % KU)
+                            while pk < pk_end:
+                                comptime for ku in range(KU):
+                                    var bp_k = bp_panel + (pk + ku) * NR
+                                    prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
+                                        bp_panel + (pk + ku + 4) * NR
+                                    )
+                                    var a_vals = InlineArray[Scalar[dtype], MR](
+                                        fill=Scalar[dtype](0)
+                                    )
+                                    var ap_k = ap_panel + (pk + ku) * MR
+                                    comptime for mr in range(MR):
+                                        a_vals[mr] = ap_k[mr]
+                                    comptime for nr in range(NR_VECS):
+                                        var bv = bp_k.load[width=NELTS](
+                                            offset=nr * NELTS
+                                        )
+                                        comptime for mr in range(MR):
+                                            acc[mr * NR_VECS + nr] = fma(
+                                                SIMD[dtype, NELTS](a_vals[mr]), bv, acc[mr * NR_VECS + nr]
+                                            )
+                                pk += KU
+
+                            # K remainder
+                            while pk < kc:
+                                var bp_k = bp_panel + pk * NR
+                                var a_vals = InlineArray[Scalar[dtype], MR](
+                                    fill=Scalar[dtype](0)
+                                )
+                                var ap_k = ap_panel + pk * MR
+                                comptime for mr in range(MR):
+                                    a_vals[mr] = ap_k[mr]
+                                comptime for nr in range(NR_VECS):
+                                    var bv = bp_k.load[width=NELTS](
+                                        offset=nr * NELTS
+                                    )
+                                    comptime for mr in range(MR):
+                                        acc[mr * NR_VECS + nr] = fma(
+                                            SIMD[dtype, NELTS](a_vals[mr]), bv, acc[mr * NR_VECS + nr]
+                                        )
+                                pk += 1
+
+                            # Store accumulators back to C
+                            comptime for mr in range(MR):
+                                comptime for nr in range(NR_VECS):
+                                    (c_ptr + (i + mr) * n + j0 + jr).store(
+                                        offset=nr * NELTS, val=acc[mr * NR_VECS + nr],
+                                    )
+
+                        i += MR
+                        ip += 1
+
+                    # Handle remaining rows (< MR)
+                    while i < m:
+                        for jp in range(num_panels):
+                            var jr = jp * NR
+                            var bp_panel = bp_worker + jp * kc * NR
+                            var jj_limit = min(NR, tile_n - jr)
+                            var c_row = c_ptr + i * n + j0 + jr
+
+                            fn fma_tail[width: Int](jj: Int) unified {mut}:
+                                var acc = c_row.load[width=width](offset=jj)
+                                if is_first_k:
+                                    acc = SIMD[dtype, width](0)
+                                for ppk in range(kc):
+                                    acc = fma(
+                                        SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                        (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                        acc,
+                                    )
+                                c_row.store(offset=jj, val=acc)
+
+                            vectorize[NELTS](jj_limit, fma_tail)
+                        i += 1
+
+            jt += NC_TILES
+
+    parallelize[process_worker](num_workers, num_workers)
+    bp_buf.free()
+    ap_buf.free()
+
+
+fn matmul_prefill[
+    dtype: DType = DType.float64
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # Computes C = A * B  —  optimized for prefill shapes (M >= MR).
+    # Worker-based parallelism with A-panel packing amortized across j-tile batches.
+    comptime NELTS = simd_width_of[dtype]()
+    comptime MR = 8
+    comptime NR = 2 * NELTS
+    comptime KC = 256
+    comptime KU = 8
+    comptime TILE_N = 64
+    comptime NC_TILES = 256  # process all j-tiles per k-tile (A packed once)
+
+    if a.rows < MR:
+        _zero_fill[dtype](c)
+        _goto_gemv[dtype](c, a, b)
+    else:
+        _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
+
+
 # Default matmul points to the tiled version
 fn matmul[dtype: DType = DType.float64](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
