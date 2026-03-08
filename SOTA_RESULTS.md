@@ -48,7 +48,7 @@ Calculation: clock × 8 doubles/cycle (512-bit) × 2 (FMA) = GFLOPS/core
 | Mojo Parallel | 64.094 | 0.71 | 0.06× | | 72.779 | 0.62 | 0.04× |
 | Mojo Naive | 285.958 | 0.16 | 0.01× | | 247.265 | 0.18 | 0.01× |
 
-**Machine A notes:** Decode/dispatch kernels not yet implemented at time of benchmarking. GOTO results from bench_matmul.mojo (serial run).
+**Machine A notes:** Decode/dispatch kernels were not benchmarked on this machine. GOTO results from bench_matmul.mojo (serial run).
 
 **Machine B notes:** Mojo Dispatch, Decode, and GOTO results from dedicated `bench_decode.mojo` (M=1 shape). Remaining kernels from `bench_matmul.mojo`.
 
