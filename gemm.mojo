@@ -1156,22 +1156,15 @@ fn _decode_gemv[
         while p + KU <= k1:
             var b_base = b_ptr + p * n
 
-            prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-                b_ptr + (p + KU) * n
-            )
-
             for i in range(m):
                 var ci = my_c + i * n
                 var ai = a_ptr + i * k
-                var a_vals = InlineArray[Scalar[dtype], KU](fill=Scalar[dtype](0))
-                comptime for ku in range(KU):
-                    a_vals[ku] = ai[p + ku]
 
                 fn do_fma[width: Int](j: Int) unified {mut}:
                     var acc = ci.load[width=width](offset=j)
                     comptime for ku in range(KU):
                         acc = fma(
-                            SIMD[dtype, width](a_vals[ku]),
+                            SIMD[dtype, width](ai[p + ku]),
                             (b_base + ku * n).load[width=width](offset=j),
                             acc,
                         )
@@ -1180,7 +1173,6 @@ fn _decode_gemv[
                 vectorize[NELTS, unroll_factor=4](n, do_fma)
             p += KU
 
-        # Remainder
         while p < k1:
             var bp = b_ptr + p * n
             for i in range(m):
