@@ -4,5 +4,6 @@ __pycache__/
 *.o
 *.so
 bench_matmul
+bench_prefill
 main
 test_gemm
