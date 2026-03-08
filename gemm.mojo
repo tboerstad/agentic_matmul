@@ -781,6 +781,9 @@ fn _prefill_gemm[
     #   4. Eliminates separate zero-fill pass: first k-tile uses zero accumulators.
     #   5. B-packing prefetch hides strided memory access latency.
     #   6. Packed-A prefetch in micro-kernel ensures data is in L1 before use.
+    #   7. Row-major B packing: packs all NR-panels per row in inner loop,
+    #      crossing the stride-N gap once per row instead of once per panel.
+    #   8. C-panel prefetch with write intent before loading accumulators.
     comptime NELTS = simd_width_of[dtype]()
     comptime NR_VECS = NR // NELTS
     comptime PREFETCH_B_DIST = 8  # rows ahead to prefetch during B packing
@@ -846,32 +849,46 @@ fn _prefill_gemm[
                     var tile_n = min(TILE_N, n - j0)
                     var num_panels = ceildiv(tile_n, NR)
 
-                    # Pack B into NR-wide panels with prefetching
-                    for jp in range(num_panels):
-                        var jr = jp * NR
-                        var panel_base = bp_worker + jp * kc * NR
-                        if jr + NR <= tile_n:
-                            for pk in range(kc):
-                                var src = b_ptr + (pc + pk) * n + j0 + jr
-                                var dst = panel_base + pk * NR
-                                # Prefetch B rows ahead to hide stride-N latency
-                                prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-                                    b_ptr + (pc + pk + PREFETCH_B_DIST) * n + j0 + jr
+                    # Pack B row-major: iterate rows (pk) in outer loop,
+                    # panels (jp) in inner loop. Each B row's TILE_N columns
+                    # are contiguous in memory so all panels read from the
+                    # same cache lines, crossing the stride-N gap only once
+                    # per row instead of once per panel (3× fewer strides).
+                    var last_full_panel = num_panels
+                    var has_remainder = False
+                    var nr_actual = 0
+                    if num_panels > 0:
+                        var last_jr = (num_panels - 1) * NR
+                        if last_jr + NR > tile_n:
+                            last_full_panel = num_panels - 1
+                            has_remainder = True
+                            nr_actual = tile_n - last_jr
+
+                    for pk in range(kc):
+                        var row_base = b_ptr + (pc + pk) * n + j0
+                        # Prefetch entire tile width of next rows
+                        prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
+                            b_ptr + (pc + pk + PREFETCH_B_DIST) * n + j0
+                        )
+                        # Pack full NR-panels from this row
+                        for jp in range(last_full_panel):
+                            var jr = jp * NR
+                            var src = row_base + jr
+                            var dst = bp_worker + jp * kc * NR + pk * NR
+                            comptime for nv in range(NR_VECS):
+                                dst.store[width=NELTS](
+                                    offset=nv * NELTS,
+                                    val=src.load[width=NELTS](offset=nv * NELTS),
                                 )
-                                comptime for nv in range(NR_VECS):
-                                    dst.store[width=NELTS](
-                                        offset=nv * NELTS,
-                                        val=src.load[width=NELTS](offset=nv * NELTS),
-                                    )
-                        else:
-                            var nr_actual = tile_n - jr
-                            for pk in range(kc):
-                                var src = b_ptr + (pc + pk) * n + j0 + jr
-                                var dst = panel_base + pk * NR
-                                for nr in range(nr_actual):
-                                    dst[nr] = src[nr]
-                                for nr in range(nr_actual, NR):
-                                    dst[nr] = Scalar[dtype](0)
+                        # Pack remainder panel (if any)
+                        if has_remainder:
+                            var jr = last_full_panel * NR
+                            var src = row_base + jr
+                            var dst = bp_worker + last_full_panel * kc * NR + pk * NR
+                            for nr in range(nr_actual):
+                                dst[nr] = src[nr]
+                            for nr in range(nr_actual, NR):
+                                dst[nr] = Scalar[dtype](0)
 
                     # Micro-kernel with packed A + packed B
                     # jp-outer, i-inner: B panel stays in L2 across all i-panels,
@@ -928,6 +945,12 @@ fn _prefill_gemm[
                         ip = 0
                         while i + MR <= m:
                             var ap_panel = ap_worker + ip * MR * kc
+
+                            # Prefetch C rows with write intent into L1
+                            comptime for mr in range(MR):
+                                prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
+                                    c_ptr + (i + mr) * n + j0 + jr
+                                )
 
                             var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
                                 fill=SIMD[dtype, NELTS](0)
