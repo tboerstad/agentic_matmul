@@ -375,7 +375,7 @@ fn matmul_comptime[
     #   - LLVM prefetch intrinsic: software prefetching for B data
     #   - vectorize: SIMD zero-fill with automatic remainder handling
     comptime NELTS = simd_width_of[dtype]()
-    comptime MR = 6          # rows of C per micro-kernel (6 > 4: more B-reuse)
+    comptime MR = 6          # rows of C per micro-kernel
     comptime NR = 2          # SIMD vectors of C cols per micro-kernel
     comptime MICRO_N = NR * NELTS  # columns per micro-kernel pass
     comptime TILE_K = 256    # k-tile: B chunk = 256*64*8 = 128KB fits L2

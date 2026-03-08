@@ -107,16 +107,6 @@ Results from dedicated `bench_decode.mojo`:
 
 **Speedup (goto→dispatch): 1.50× (50% improvement)**
 
-### Small-batch decode: 4 × 11008 × 2048
-
-| Kernel | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
-|--------|-----------|----------|---------------|---------------|
-| goto | 14.614 | 14.307 | 12.34 | 12.61 |
-| decode | 5.682 | 5.141 | 31.74 | 35.08 |
-| dispatch | 5.289 | 4.901 | 34.10 | 36.80 |
-
-**Speedup (goto→dispatch): 2.78× (178% improvement)**
-
 ### Batch decode: 7 × 11008 × 2048
 
 | Kernel | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
@@ -144,7 +134,7 @@ Results from dedicated `bench_decode.mojo`:
 
 4. **Decode kernel breakthrough:** The k-parallel GEMV decode kernel is the star on Machine B,
    beating OpenBLAS multi-threaded by 40% on M=1 decode. The improvement grows with batch
-   size: 2.78× speedup over GOTO at M=4, 2.79× at M=7.
+   size: 2.79× speedup over GOTO at M=7.
 
 5. **Remaining gap to SOTA (prefill, 9%):** See [OPENBLAS_ANALYSIS.md](OPENBLAS_ANALYSIS.md) for
    detailed analysis of OpenBLAS's 16×12 microkernel vs Mojo's 8×24 microkernel.
