@@ -1,5 +1,11 @@
 # OpenBLAS vs Mojo DGEMM: Prefill Shape Analysis
 
+> **Hardware-specific analysis.** The benchmark numbers and performance gaps described here are
+> specific to the machine listed below. Results will differ on other CPUs — different SIMD widths
+> (AVX2 vs AVX-512), core counts, cache sizes, and clock speeds all change absolute GFLOPS and
+> relative rankings. Always verify your hardware first (see [AGENTS.md](AGENTS.md)) and re-run
+> benchmarks before drawing conclusions.
+
 **Date:** 2026-03-08
 **Hardware:** Intel Xeon @ 2.80 GHz, 4 cores, AVX-512 (Skylake), KVM virtualized
 **Shape:** M=96, N=11008, K=2048 (float64)

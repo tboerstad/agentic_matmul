@@ -1,5 +1,10 @@
 # SOTA MatMul Benchmark Results
 
+> **Hardware-specific results.** All numbers below were measured on a specific machine.
+> Performance varies significantly across CPUs, core counts, SIMD widths, and virtualization.
+> Before comparing or citing these numbers, verify your hardware — see [AGENTS.md](AGENTS.md)
+> for the verification steps. Re-run benchmarks on your own machine for accurate comparisons.
+
 **Date:** 2026-03-08
 **Hardware:** Intel Xeon @ 2.80 GHz, 4 cores, AVX-512 (Skylake), KVM virtualized
 **Dtype:** float64

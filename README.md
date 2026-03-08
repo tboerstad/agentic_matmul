@@ -8,6 +8,10 @@ High-performance matrix multiplication kernels in Mojo, benchmarked against SOTA
 
 ## Results (2026-03-08)
 
+> **These results are hardware-specific.** Measured on Intel Xeon @ 2.80 GHz, 4 cores, AVX-512,
+> KVM virtualized. Your numbers will differ — verify your hardware and re-run benchmarks.
+> See [AGENTS.md](AGENTS.md) for hardware verification steps.
+
 ### Prefill (96 × 11008 × 2048) — GFLOPS (higher is better)
 
 | Kernel | GFLOPS (peak) | vs OpenBLAS |
