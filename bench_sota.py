@@ -191,8 +191,33 @@ def main():
 
     # System info
     import platform
-    print(f"\nPlatform: {platform.platform()}")
-    print(f"CPU: {platform.processor() or 'N/A'}")
+    cpu_model = "N/A"
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if "model name" in line:
+                    cpu_model = line.split(":")[1].strip()
+                    break
+    except Exception:
+        cpu_model = platform.processor() or "N/A"
+
+    num_cores = os.cpu_count() or 1
+    l2_kb = 1024  # default
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cache/index2/size") as f:
+            s = f.read().strip()
+            if s.endswith("K"):
+                l2_kb = int(s[:-1])
+            elif s.endswith("M"):
+                l2_kb = int(s[:-1]) * 1024
+    except Exception:
+        pass
+
+    print(f"\n*** VERIFY THIS HARDWARE MATCHES YOUR SYSTEM BEFORE COMPARING RESULTS ***")
+    print(f"CPU: {cpu_model}")
+    print(f"Cores: {num_cores}")
+    print(f"L2 cache: {l2_kb} KB/core")
+    print(f"Platform: {platform.platform()}")
     print(f"NumPy version: {np.__version__}")
     print(f"NumPy BLAS info: ", end="")
     try:
@@ -208,13 +233,23 @@ def main():
     print(f"Dtype: float64 | Warmup: {WARMUP} | Iterations: {ITERS}")
     print()
 
-    # Theoretical peak: Xeon @ 2.8 GHz, AVX-512, FMA
+    # Theoretical peak: AVX-512, FMA, float64
     # float64: 512-bit / 64-bit = 8 doubles, 2 ops (FMA) = 16 flops/cycle
-    # Single core: 2.8e9 * 16 = 44.8 GFLOPS
-    # 4 cores: 179.2 GFLOPS
-    print("Theoretical peak (Intel Xeon @ 2.80 GHz, AVX-512, float64):")
-    print("  Single core: 44.8 GFLOPS")
-    print("  4 cores:    179.2 GFLOPS")
+    # Read CPU frequency from /proc/cpuinfo
+    cpu_ghz = 2.8  # fallback
+    try:
+        with open("/proc/cpuinfo") as f:
+            for line in f:
+                if "cpu MHz" in line:
+                    cpu_ghz = float(line.split(":")[1].strip()) / 1000.0
+                    break
+    except Exception:
+        pass
+    peak_1core = cpu_ghz * 16  # GFLOPS
+    peak_all = peak_1core * num_cores
+    print(f"Theoretical peak ({cpu_model}, AVX-512, float64):")
+    print(f"  Single core: {peak_1core:.1f} GFLOPS ({cpu_ghz:.2f} GHz × 8 doubles × 2 FMA)")
+    print(f"  {num_cores} cores:    {peak_all:.1f} GFLOPS")
     print()
 
     summary = []

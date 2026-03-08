@@ -25,6 +25,8 @@
 - Mojo source files use the `.mojo` extension
 - The Mojo compiler and runtime are installed in `.venv/` via `uv`
 - Always activate the venv before running `mojo` commands
+- `gemm.mojo` exports `detect_l2_cache_kb()`, `detect_cpu_model()`, and `print_hw_info()` for hardware detection — use `print_hw_info()` at the start of any new benchmark
+- **IMPORTANT:** All benchmark results are hardware-specific. Always record and display the exact hardware (CPU model, clock, L2 cache, core count) alongside any performance numbers. Never compare results from different hardware without noting the difference.
 
 ## Style preferences
 

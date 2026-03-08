@@ -1,4 +1,4 @@
-from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_comptime, matmul_goto
+from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_comptime, matmul_goto, print_hw_info
 from matrix import Matrix
 import std.benchmark
 from std.time import perf_counter_ns
@@ -18,6 +18,7 @@ fn fill(mut m: Matrix, seed: Int):
 fn main() raises:
     var t_start = perf_counter_ns()
     print("=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs comptime (Qwen 2.5 VL 3B shapes) ===\n")
+    print_hw_info()
 
     # ---- 1x11008x2048 (single-token decode) ---------------------------------
 

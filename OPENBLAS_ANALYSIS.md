@@ -1,10 +1,15 @@
 # OpenBLAS vs Mojo DGEMM: Prefill Shape Analysis
 
+> **YOU MUST VERIFY WHAT HARDWARE YOU ARE RUNNING ON BEFORE COMPARING AGAINST THESE RESULTS.**
+> The numbers below were measured on specific hardware. If your CPU, cache sizes, or core count differ, your results WILL be different. Run `mojo run bench_prefill.mojo` to see your detected hardware.
+
 **Date:** 2026-03-08
-**Hardware:** Intel Xeon (Sapphire Rapids) @ 2.10 GHz, 4 cores, AVX-512
+**Hardware:** Intel Xeon (Sapphire Rapids) @ 2.10 GHz, 4 cores, AVX-512, 2 MB L2/core
 **Shape:** M=96, N=11008, K=2048 (float64)
 
-## Fresh Benchmark Results
+> **Note:** These results are from a DIFFERENT machine than SOTA_RESULTS.md (which used Skylake @ 2.80 GHz, 1 MB L2/core). Do NOT directly compare absolute numbers between the two documents.
+
+## Benchmark Results (Sapphire Rapids @ 2.10 GHz, 4 cores, 2 MB L2/core)
 
 | Implementation | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
 |---|---|---|---|---|

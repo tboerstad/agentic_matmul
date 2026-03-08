@@ -1118,6 +1118,109 @@ fn matmul_prefill[
         _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
 
 
+# ---------------------------------------------------------------------------
+# Hardware detection utilities
+# ---------------------------------------------------------------------------
+
+fn detect_l2_cache_kb() -> Int:
+    """Read per-core L2 cache size from /sys (Linux). Returns KB."""
+    try:
+        with open("/sys/devices/system/cpu/cpu0/cache/index2/size", "r") as f:
+            var s = f.read().strip()
+            if s.endswith("K"):
+                return Int(s[:-1])
+            elif s.endswith("M"):
+                return Int(s[:-1]) * 1024
+            return 1024
+    except:
+        return 1024  # conservative default
+
+
+fn detect_cpu_model() -> String:
+    """Read CPU model name from /proc/cpuinfo (Linux)."""
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            var info = f.read()
+            var idx = info.find("model name")
+            if idx >= 0:
+                var colon = info.find(":", idx)
+                var nl = info.find("\n", colon)
+                if colon >= 0 and nl >= 0:
+                    return String(info[colon + 2 : nl])
+            return "unknown"
+    except:
+        return "unknown"
+
+
+fn print_hw_info():
+    """Print hardware info for benchmark reproducibility."""
+    var cpu = detect_cpu_model()
+    var l2 = detect_l2_cache_kb()
+    var cores = num_physical_cores()
+    comptime NELTS = simd_width_of[DType.float64]()
+    print("Hardware: " + cpu)
+    print("  L2 cache: " + String(l2) + " KB/core")
+    print("  Cores: " + String(cores))
+    print("  SIMD width (float64): " + String(NELTS))
+    print("  *** VERIFY THIS MATCHES YOUR HW BEFORE COMPARING RESULTS ***")
+    print()
+
+
+fn _adaptive_kc(l2_kb: Int) -> Int:
+    """Pick KC so A-panel + B-panel + C-tile fit in L2.
+    Panels: (MR + NR) × KC × 8 = 256 × KC bytes.
+    C-tile: MR × TILE_N × 8 = 8 × 72 × 8 = 4608 bytes.
+    Target: panels + C-tile ≤ 50% of L2 (leave room for other data).
+    For 1MB L2: (512K - 4608) / 256 = ~1990, clamp to 512.
+    For 2MB L2: (1MB - 4608) / 256 = ~3990, clamp to 512.
+    KC > 512 rarely helps (diminishing returns on k-tile count)."""
+    var l2_half = l2_kb * 1024 // 2
+    var kc = (l2_half - 4608) // 256
+    # Clamp to [128, 512] and round down to multiple of 64
+    if kc < 128:
+        kc = 128
+    if kc > 512:
+        kc = 512
+    return (kc // 64) * 64
+
+
+# ---------------------------------------------------------------------------
+# Adaptive matmul: auto-tunes tile parameters based on detected hardware
+# ---------------------------------------------------------------------------
+
+fn matmul_adaptive[
+    dtype: DType = DType.float64
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Hardware-adaptive matmul. Detects L2 cache size at runtime and
+    picks KC accordingly. Dispatches to GEMV for M<MR, otherwise uses
+    the prefill GEMM with A+B packing."""
+    comptime NELTS = simd_width_of[dtype]()
+    comptime MR = 8
+    comptime NR = 3 * NELTS   # 24 for float64 AVX-512
+    comptime KU = 8
+    comptime TILE_N = 72      # 3 × NR panels per tile
+    comptime NC_TILES = 256
+
+    if a.rows < MR:
+        _zero_fill[dtype](c)
+        _goto_gemv[dtype](c, a, b)
+    else:
+        # Runtime KC selection based on L2 cache size.
+        # Pre-instantiate a few KC values so inner loops stay fully
+        # unrolled. The runtime kc selects the best-fitting variant.
+        var l2_kb = detect_l2_cache_kb()
+        var kc = _adaptive_kc(l2_kb)
+
+        if kc >= 512:
+            _prefill_gemm[dtype, MR, NR, 512, KU, TILE_N, NC_TILES](c, a, b)
+        elif kc >= 384:
+            _prefill_gemm[dtype, MR, NR, 384, KU, TILE_N, NC_TILES](c, a, b)
+        elif kc >= 256:
+            _prefill_gemm[dtype, MR, NR, 256, KU, TILE_N, NC_TILES](c, a, b)
+        else:
+            _prefill_gemm[dtype, MR, NR, 128, KU, TILE_N, NC_TILES](c, a, b)
+
+
 # Default matmul points to the tiled version
 fn matmul[dtype: DType = DType.float64](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
