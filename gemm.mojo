@@ -570,7 +570,6 @@ fn matmul_comptime[
     parallelize[process_j_tile](num_j_tiles, num_physical_cores())
 
 
-@always_inline
 fn _goto_gemv[
     dtype: DType,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -589,7 +588,6 @@ fn _goto_gemv[
 
     var num_j_tiles = ceildiv(n, TILE_J)
 
-    @__copy_capture(m, n, k, c_ptr, a_ptr, b_ptr)
     fn process_gemv_tile(tile_idx: Int) capturing:
         var j0 = tile_idx * TILE_J
         var tile_n = min(TILE_J, n - j0)
@@ -1120,7 +1118,6 @@ fn matmul_prefill[
         _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
 
 
-@always_inline
 fn _decode_gemv[
     dtype: DType,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1149,7 +1146,6 @@ fn _decode_gemv[
 
     vectorize[NELTS, unroll_factor=4](part_size, _zero)
 
-    @__copy_capture(m, n, k, c_ptr, a_ptr, b_ptr, nw, part)
     fn worker(wid: Int) capturing:
         var rows_per = ceildiv(k, nw)
         var k0 = wid * rows_per
