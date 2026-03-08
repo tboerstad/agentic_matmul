@@ -308,69 +308,39 @@ fn matmul_packed[
                 # across all k-values, then store back once.
                 var i = i0
                 while i + MR <= i_end:
-                    # Process NELTS columns at a time
-                    var j = 0
-                    while j + NELTS <= tile_n:
-                        # Load MR C accumulators from memory (once per tile)
-                        var acc = InlineArray[SIMD[dtype, NELTS], MR](
-                            fill=SIMD[dtype, NELTS](0)
+                    fn process_cols[width: Int](j: Int) unified {mut}:
+                        var acc = InlineArray[SIMD[dtype, width], MR](
+                            fill=SIMD[dtype, width](0)
                         )
                         comptime for mr in range(MR):
                             acc[mr] = (c_ptr + (i + mr) * n + j0).load[
-                                width=NELTS
+                                width=width
                             ](offset=j)
-
-                        # Accumulate across entire k-tile in registers
                         for pk in range(tile_k):
                             var p = p0 + pk
-                            var b_vec = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
+                            var b_vec = (b_ptr + p * n + j0).load[width=width](offset=j)
                             comptime for mr in range(MR):
                                 acc[mr] += a_ptr[(i + mr) * k + p] * b_vec
-
-                        # Store accumulators back (once per tile)
                         comptime for mr in range(MR):
                             (c_ptr + (i + mr) * n + j0).store(
                                 offset=j, val=acc[mr]
                             )
-                        j += NELTS
 
-                    # Scalar remainder for j
-                    while j < tile_n:
-                        var acc = InlineArray[Scalar[dtype], MR](
-                            fill=Scalar[dtype](0)
-                        )
-                        comptime for mr in range(MR):
-                            acc[mr] = (c_ptr + (i + mr) * n + j0)[j]
-                        for pk in range(tile_k):
-                            var p = p0 + pk
-                            var b_val = b_ptr[p * n + j0 + j]
-                            comptime for mr in range(MR):
-                                acc[mr] += a_ptr[(i + mr) * k + p] * b_val
-                        comptime for mr in range(MR):
-                            (c_ptr + (i + mr) * n + j0)[j] = acc[mr]
-                        j += 1
-
+                    vectorize[NELTS](tile_n, process_cols)
                     i += MR
 
                 # Handle remaining rows (< MR) with single-row accumulation
                 while i < i_end:
                     var c_row = c_ptr + i * n + j0
-                    var j = 0
-                    while j + NELTS <= tile_n:
-                        var acc = c_row.load[width=NELTS](offset=j)
+
+                    fn process_tail_col[width: Int](j: Int) unified {mut}:
+                        var acc = c_row.load[width=width](offset=j)
                         for pk in range(tile_k):
                             var p = p0 + pk
-                            var b_vec = (b_ptr + p * n + j0).load[width=NELTS](offset=j)
-                            acc += a_ptr[i * k + p] * b_vec
+                            acc += a_ptr[i * k + p] * (b_ptr + p * n + j0).load[width=width](offset=j)
                         c_row.store(offset=j, val=acc)
-                        j += NELTS
-                    while j < tile_n:
-                        var acc = c_row[j]
-                        for pk in range(tile_k):
-                            var p = p0 + pk
-                            acc += a_ptr[i * k + p] * b_ptr[p * n + j0 + j]
-                        c_row[j] = acc
-                        j += 1
+
+                    vectorize[NELTS](tile_n, process_tail_col)
                     i += 1
 
     parallelize[process_i_tile](num_i_tiles, num_physical_cores())
@@ -508,63 +478,44 @@ fn matmul_comptime[
 
                     j += MICRO_N
 
-                # Remainder columns: single SIMD vector at a time
-                while j + NELTS <= tile_n:
-                    var jj = j0 + j
-                    var acc_r = InlineArray[SIMD[dtype, NELTS], MR](
-                        fill=SIMD[dtype, NELTS](0)
+                # Remainder columns: vectorize handles SIMD + scalar
+                var rem_n = tile_n - j
+                var rem_base = j0 + j
+
+                fn process_rem[width: Int](j_off: Int) unified {mut}:
+                    var jj = rem_base + j_off
+                    var acc_r = InlineArray[SIMD[dtype, width], MR](
+                        fill=SIMD[dtype, width](0)
                     )
                     comptime for mr in range(MR):
                         acc_r[mr] = (c_ptr + (i + mr) * n + jj).load[
-                            width=NELTS
+                            width=width
                         ]()
                     for pk in range(tile_k):
                         var p = p0 + pk
-                        var bv = (b_ptr + p * n + jj).load[width=NELTS]()
+                        var bv = (b_ptr + p * n + jj).load[width=width]()
                         comptime for mr in range(MR):
                             acc_r[mr] += a_ptr[(i + mr) * k + p] * bv
                     comptime for mr in range(MR):
                         (c_ptr + (i + mr) * n + jj).store(
                             val=acc_r[mr]
                         )
-                    j += NELTS
 
-                # Scalar remainder for j
-                while j < tile_n:
-                    var jj = j0 + j
-                    comptime for mr in range(MR):
-                        var acc_s = c_ptr[(i + mr) * n + jj]
-                        for pk in range(tile_k):
-                            acc_s += (
-                                a_ptr[(i + mr) * k + p0 + pk]
-                                * b_ptr[(p0 + pk) * n + jj]
-                            )
-                        c_ptr[(i + mr) * n + jj] = acc_s
-                    j += 1
-
+                vectorize[NELTS](rem_n, process_rem)
                 i += MR
 
             # Handle remaining rows (< MR) with single-row SIMD
             while i < m:
                 var c_row = c_ptr + i * n + j0
-                var j = 0
-                while j + NELTS <= tile_n:
-                    var acc = c_row.load[width=NELTS](offset=j)
+
+                fn process_tail[width: Int](j: Int) unified {mut}:
+                    var acc = c_row.load[width=width](offset=j)
                     for pk in range(tile_k):
                         var p = p0 + pk
-                        var bv = (b_ptr + p * n + j0).load[width=NELTS](
-                            offset=j
-                        )
-                        acc += a_ptr[i * k + p] * bv
+                        acc += a_ptr[i * k + p] * (b_ptr + p * n + j0).load[width=width](offset=j)
                     c_row.store(offset=j, val=acc)
-                    j += NELTS
-                while j < tile_n:
-                    var acc = c_row[j]
-                    for pk in range(tile_k):
-                        var p = p0 + pk
-                        acc += a_ptr[i * k + p] * b_ptr[p * n + j0 + j]
-                    c_row[j] = acc
-                    j += 1
+
+                vectorize[NELTS](tile_n, process_tail)
                 i += 1
 
     parallelize[process_j_tile](num_j_tiles, num_physical_cores())
@@ -683,30 +634,19 @@ fn _goto_gemm[
                             var c_row = c_ptr + ii * n + j0 + jr
                             var a_row = a_ptr + ii * k + pc
 
-                            if first_k:
-                                fn fma_rem_first[width: Int](jj: Int) unified {mut}:
-                                    var acc = SIMD[dtype, width](0)
-                                    for ppk in range(kc):
-                                        acc = fma(
-                                            SIMD[dtype, width](a_row[ppk]),
-                                            (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                            acc,
-                                        )
-                                    c_row.store(offset=jj, val=acc)
+                            fn fma_remainder[width: Int](jj: Int) unified {mut}:
+                                var acc = c_row.load[width=width](offset=jj)
+                                if first_k:
+                                    acc = SIMD[dtype, width](0)
+                                for ppk in range(kc):
+                                    acc = fma(
+                                        SIMD[dtype, width](a_row[ppk]),
+                                        (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                        acc,
+                                    )
+                                c_row.store(offset=jj, val=acc)
 
-                                vectorize[NELTS](jj_limit, fma_rem_first)
-                            else:
-                                fn fma_remainder[width: Int](jj: Int) unified {mut}:
-                                    var acc = c_row.load[width=width](offset=jj)
-                                    for ppk in range(kc):
-                                        acc = fma(
-                                            SIMD[dtype, width](a_row[ppk]),
-                                            (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                            acc,
-                                        )
-                                    c_row.store(offset=jj, val=acc)
-
-                                vectorize[NELTS](jj_limit, fma_remainder)
+                            vectorize[NELTS](jj_limit, fma_remainder)
                         continue
 
                     # ---- Full MR×NR micro-kernel ----
@@ -787,30 +727,19 @@ fn _goto_gemm[
                     var jj_limit = min(NR, tile_n - jr)
                     var c_row = c_ptr + i * n + j0 + jr
 
-                    if first_k:
-                        fn fma_tail_first[width: Int](jj: Int) unified {mut}:
-                            var acc = SIMD[dtype, width](0)
-                            for ppk in range(kc):
-                                acc = fma(
-                                    SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
-                                    (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                    acc,
-                                )
-                            c_row.store(offset=jj, val=acc)
+                    fn fma_tail[width: Int](jj: Int) unified {mut}:
+                        var acc = c_row.load[width=width](offset=jj)
+                        if first_k:
+                            acc = SIMD[dtype, width](0)
+                        for ppk in range(kc):
+                            acc = fma(
+                                SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                acc,
+                            )
+                        c_row.store(offset=jj, val=acc)
 
-                        vectorize[NELTS](jj_limit, fma_tail_first)
-                    else:
-                        fn fma_tail[width: Int](jj: Int) unified {mut}:
-                            var acc = c_row.load[width=width](offset=jj)
-                            for ppk in range(kc):
-                                acc = fma(
-                                    SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
-                                    (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                    acc,
-                                )
-                            c_row.store(offset=jj, val=acc)
-
-                        vectorize[NELTS](jj_limit, fma_tail)
+                    vectorize[NELTS](jj_limit, fma_tail)
                 i += 1
 
     parallelize[process_j_tile](num_j_tiles, num_physical_cores())
