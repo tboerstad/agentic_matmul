@@ -1118,6 +1118,126 @@ fn matmul_prefill[
         _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
 
 
+fn _decode_gemv[
+    dtype: DType,
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # K-parallel GEMV optimized for decode (small M, large K×N).
+    #
+    # Flips goto_gemv's j-parallel (88KB B stride) to k-parallel
+    # (sequential B scan). Each worker streams a contiguous slice of
+    # B rows with p-outer/i-inner order so B is loaded once and reused
+    # across all M output rows. Final lightweight reduction sums partials.
+    comptime NELTS = simd_width_of[dtype]()
+    comptime KU = 8
+
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+    var c_ptr = c.data.unsafe_ptr()
+    var a_ptr = a.data.unsafe_ptr()
+    var b_ptr = b.data.unsafe_ptr()
+    var nw = num_physical_cores()
+
+    var part_size = nw * m * n
+    var part = alloc[Scalar[dtype]](part_size)
+
+    fn _zero[width: Int](idx: Int) unified {mut}:
+        part.store[width=width](offset=idx, val=SIMD[dtype, width](0))
+
+    vectorize[NELTS, unroll_factor=4](part_size, _zero)
+
+    fn worker(wid: Int) capturing:
+        var rows_per = ceildiv(k, nw)
+        var k0 = wid * rows_per
+        var k1 = min(k0 + rows_per, k)
+        var my_c = part + wid * m * n
+        var p = k0
+
+        while p + KU <= k1:
+            var b_base = b_ptr + p * n
+
+            for i in range(m):
+                var ci = my_c + i * n
+                var ai = a_ptr + i * k
+
+                fn do_fma[width: Int](j: Int) unified {mut}:
+                    var acc = ci.load[width=width](offset=j)
+                    comptime for ku in range(KU):
+                        acc = fma(
+                            SIMD[dtype, width](ai[p + ku]),
+                            (b_base + ku * n).load[width=width](offset=j),
+                            acc,
+                        )
+                    ci.store(offset=j, val=acc)
+
+                vectorize[NELTS, unroll_factor=4](n, do_fma)
+            p += KU
+
+        while p < k1:
+            var bp = b_ptr + p * n
+            for i in range(m):
+                var a_val = a_ptr[i * k + p]
+                var ci = my_c + i * n
+
+                fn do_fma_tail[width: Int](j: Int) unified {mut}:
+                    ci.store(
+                        offset=j,
+                        val=fma(
+                            SIMD[dtype, width](a_val),
+                            bp.load[width=width](offset=j),
+                            ci.load[width=width](offset=j),
+                        ),
+                    )
+
+                vectorize[NELTS](n, do_fma_tail)
+            p += 1
+
+    parallelize[worker](nw, nw)
+
+    # Reduce partials into C
+    for i in range(m):
+        var ci_off = i * n
+
+        fn reduce[width: Int](j: Int) unified {mut}:
+            var s = SIMD[dtype, width](0)
+            for w in range(nw):
+                s += (part + w * m * n + ci_off).load[width=width](offset=j)
+            (c_ptr + ci_off).store(offset=j, val=s)
+
+        vectorize[NELTS](n, reduce)
+
+    part.free()
+
+
+fn matmul_decode[
+    dtype: DType = DType.float64
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # Computes C = A * B  —  optimized for decode shapes (small M).
+    # Uses k-parallel GEMV with sequential B streaming for maximum
+    # memory bandwidth utilization.
+    _decode_gemv[dtype](c, a, b)
+
+
+fn matmul_dispatch[
+    dtype: DType = DType.float64
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # Computes C = A * B  —  dispatches to the fastest kernel.
+    #   - M < 8 (decode): k-parallel GEMV with sequential B streaming
+    #   - M >= 8 (prefill): worker-based GEMM with A+B panel packing
+    comptime NELTS = simd_width_of[dtype]()
+    comptime MR = 8
+
+    if a.rows < MR:
+        _decode_gemv[dtype](c, a, b)
+    else:
+        comptime NR = 3 * NELTS
+        comptime KC = 512
+        comptime KU = 8
+        comptime TILE_N = 72
+        comptime NC_TILES = 256
+        _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
+
+
 # Default matmul points to the tiled version
 fn matmul[dtype: DType = DType.float64](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]

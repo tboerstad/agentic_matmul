@@ -1,4 +1,4 @@
-from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_comptime, matmul_goto
+from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_comptime, matmul_goto, matmul_decode, matmul_dispatch
 from matrix import Matrix
 import std.benchmark
 from std.time import perf_counter_ns
@@ -184,8 +184,49 @@ fn main() raises:
         "GFLOPS",
     )
 
+    @parameter
+    fn bench_decode_decode():
+        var a = Matrix(M1, K1)
+        var b = Matrix(K1, N1)
+        var c = Matrix(M1, N1)
+        fill(a, 17)
+        fill(b, 13)
+        matmul_decode(c, a, b)
+
+    @parameter
+    fn bench_decode_dispatch():
+        var a = Matrix(M1, K1)
+        var b = Matrix(K1, N1)
+        var c = Matrix(M1, N1)
+        fill(a, 17)
+        fill(b, 13)
+        matmul_dispatch(c, a, b)
+
+    var r_decode_1 = std.benchmark.run[bench_decode_decode]()
+    var s_decode_1 = r_decode_1.mean("s")
+    print(
+        "  decode :",
+        r_decode_1.mean("ms"),
+        "ms |",
+        gflops(M1, N1, K1, s_decode_1),
+        "GFLOPS",
+    )
+
+    var r_dispatch_1 = std.benchmark.run[bench_decode_dispatch]()
+    var s_dispatch_1 = r_dispatch_1.mean("s")
+    print(
+        "  dispatch:",
+        r_dispatch_1.mean("ms"),
+        "ms |",
+        gflops(M1, N1, K1, s_dispatch_1),
+        "GFLOPS",
+    )
+
     print("  speedup (naive/comptime)   :", s_naive_1 / s_comptime_1, "x")
-    print("  speedup (naive/goto)       :", s_naive_1 / s_goto_1, "x\n")
+    print("  speedup (naive/goto)       :", s_naive_1 / s_goto_1, "x")
+    print("  speedup (naive/decode)     :", s_naive_1 / s_decode_1, "x")
+    print("  speedup (naive/dispatch)   :", s_naive_1 / s_dispatch_1, "x")
+    print("  speedup (goto/decode)      :", s_goto_1 / s_decode_1, "x\n")
 
     # ---- 96x11008x2048 (prefill batch) --------------------------------------
 
@@ -352,8 +393,28 @@ fn main() raises:
         "GFLOPS",
     )
 
+    @parameter
+    fn bench_prefill_dispatch():
+        var a = Matrix(M2, K2)
+        var b = Matrix(K2, N2)
+        var c = Matrix(M2, N2)
+        fill(a, 17)
+        fill(b, 13)
+        matmul_dispatch(c, a, b)
+
+    var r_dispatch_2 = std.benchmark.run[bench_prefill_dispatch]()
+    var s_dispatch_2 = r_dispatch_2.mean("s")
+    print(
+        "  dispatch:",
+        r_dispatch_2.mean("ms"),
+        "ms |",
+        gflops(M2, N2, K2, s_dispatch_2),
+        "GFLOPS",
+    )
+
     print("  speedup (naive/comptime)   :", s_naive_2 / s_comptime_2, "x")
-    print("  speedup (naive/goto)       :", s_naive_2 / s_goto_2, "x\n")
+    print("  speedup (naive/goto)       :", s_naive_2 / s_goto_2, "x")
+    print("  speedup (naive/dispatch)   :", s_naive_2 / s_dispatch_2, "x\n")
 
     # ---- full reports --------------------------------------------------------
 
