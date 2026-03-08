@@ -645,6 +645,7 @@ fn _goto_gemm[
 
         for pc in range(0, k, KC):
             var kc = min(KC, k - pc)
+            var first_k = (pc == 0)
 
             # Pack B[pc:pc+kc, j0:j0+tile_n] into NR-panels
             for jp in range(num_panels):
@@ -682,28 +683,46 @@ fn _goto_gemm[
                             var c_row = c_ptr + ii * n + j0 + jr
                             var a_row = a_ptr + ii * k + pc
 
-                            fn fma_remainder[width: Int](jj: Int) unified {mut}:
-                                var acc = c_row.load[width=width](offset=jj)
-                                for ppk in range(kc):
-                                    acc = fma(
-                                        SIMD[dtype, width](a_row[ppk]),
-                                        (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                        acc,
-                                    )
-                                c_row.store(offset=jj, val=acc)
+                            if first_k:
+                                fn fma_rem_first[width: Int](jj: Int) unified {mut}:
+                                    var acc = SIMD[dtype, width](0)
+                                    for ppk in range(kc):
+                                        acc = fma(
+                                            SIMD[dtype, width](a_row[ppk]),
+                                            (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                            acc,
+                                        )
+                                    c_row.store(offset=jj, val=acc)
 
-                            vectorize[NELTS](jj_limit, fma_remainder)
+                                vectorize[NELTS](jj_limit, fma_rem_first)
+                            else:
+                                fn fma_remainder[width: Int](jj: Int) unified {mut}:
+                                    var acc = c_row.load[width=width](offset=jj)
+                                    for ppk in range(kc):
+                                        acc = fma(
+                                            SIMD[dtype, width](a_row[ppk]),
+                                            (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                            acc,
+                                        )
+                                    c_row.store(offset=jj, val=acc)
+
+                                vectorize[NELTS](jj_limit, fma_remainder)
                         continue
 
                     # ---- Full MR×NR micro-kernel ----
+                    # Opt 5: Skip zero-fill + first-tile C load — on the first
+                    # k-tile (pc==0), initialize accumulators to zero instead
+                    # of loading from C. Saves writing 8.4MB of zeros
+                    # (_zero_fill) and reading them back (first C load).
                     var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
                         fill=SIMD[dtype, NELTS](0)
                     )
-                    comptime for mr in range(MR):
-                        comptime for nr in range(NR_VECS):
-                            acc[mr * NR_VECS + nr] = (
-                                c_ptr + (i + mr) * n + j0 + jr
-                            ).load[width=NELTS](offset=nr * NELTS)
+                    if not first_k:
+                        comptime for mr in range(MR):
+                            comptime for nr in range(NR_VECS):
+                                acc[mr * NR_VECS + nr] = (
+                                    c_ptr + (i + mr) * n + j0 + jr
+                                ).load[width=NELTS](offset=nr * NELTS)
 
                     # K-loop with KU unrolling + prefetching
                     var pk = 0
@@ -768,17 +787,30 @@ fn _goto_gemm[
                     var jj_limit = min(NR, tile_n - jr)
                     var c_row = c_ptr + i * n + j0 + jr
 
-                    fn fma_tail[width: Int](jj: Int) unified {mut}:
-                        var acc = c_row.load[width=width](offset=jj)
-                        for ppk in range(kc):
-                            acc = fma(
-                                SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
-                                (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                acc,
-                            )
-                        c_row.store(offset=jj, val=acc)
+                    if first_k:
+                        fn fma_tail_first[width: Int](jj: Int) unified {mut}:
+                            var acc = SIMD[dtype, width](0)
+                            for ppk in range(kc):
+                                acc = fma(
+                                    SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                    (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                    acc,
+                                )
+                            c_row.store(offset=jj, val=acc)
 
-                    vectorize[NELTS](jj_limit, fma_tail)
+                        vectorize[NELTS](jj_limit, fma_tail_first)
+                    else:
+                        fn fma_tail[width: Int](jj: Int) unified {mut}:
+                            var acc = c_row.load[width=width](offset=jj)
+                            for ppk in range(kc):
+                                acc = fma(
+                                    SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                    (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                    acc,
+                                )
+                            c_row.store(offset=jj, val=acc)
+
+                        vectorize[NELTS](jj_limit, fma_tail)
                 i += 1
 
     parallelize[process_j_tile](num_j_tiles, num_physical_cores())
@@ -791,15 +823,14 @@ fn matmul_goto[
     # Computes C = A * B  —  GOTO-style GEMM with B-panel packing.
     # Dispatches to _goto_gemv (M < MR) or _goto_gemm (M >= MR).
     comptime NELTS = simd_width_of[dtype]()
-    comptime MR = 6          # rows of C per micro-kernel
+    comptime MR = 8          # rows of C per micro-kernel (8 > 6: more B-reuse per A load)
     comptime NR = 2 * NELTS  # columns per micro-kernel (16 for float64 AVX-512)
-    comptime KC = 256        # k-tile: Bp NR-panel = 256*16*8 = 32KB fits L1
+    comptime KC = 512        # k-tile: fewer k-tiles halves B-packing + C load/store overhead
     comptime KU = 8          # k-unroll factor
     comptime TILE_N = 64     # j-tile: C panel = M*64*8 fits L2
 
-    _zero_fill[dtype](c)
-
     if a.rows < MR:
+        _zero_fill[dtype](c)
         _goto_gemv[dtype](c, a, b)
     else:
         _goto_gemm[dtype, MR, NR, KC, KU, TILE_N](c, a, b)
