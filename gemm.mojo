@@ -1123,29 +1123,10 @@ fn _decode_gemv[
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # K-parallel GEMV optimized for decode (small M, large K×N).
     #
-    # The old _goto_gemv tiles on j and iterates all K per tile.
-    # That creates an N*8-byte stride between consecutive B accesses
-    # (88KB for Qwen decode), far beyond the hardware prefetcher's
-    # reach. Result: nearly every B load is a full DRAM miss.
-    #
-    # This kernel flips the parallelism: each worker owns a contiguous
-    # slice of K rows of B and streams through them sequentially
-    # (p-outer, i-inner, j-vectorized). B is read as a pure sequential
-    # scan, enabling hardware prefetching and maximizing DRAM bandwidth.
-    #
-    # The p-outer/i-inner loop order is critical for M > 1: each B row
-    # is loaded ONCE and reused across all M output rows. This turns
-    # an M-pass scan (i-outer) into a single-pass scan with M× B reuse,
-    # giving near-linear speedup with batch size.
-    #
-    # Optimizations:
-    #   1. K-parallel with sequential B streaming (vs strided in goto)
-    #   2. P-outer loop: B loaded once, reused across M rows (L1/L2 hits)
-    #   3. KU=8 k-unrolling: 8 independent FMA chains hide latency
-    #      and amortize partial-C load/store (once per 8 k-steps)
-    #   4. Software prefetch: bring next B rows into L1 ahead of use
-    #   5. Partial C (m×N ≈ 88KB per row) fits in L2 across k-steps
-    #   6. Lightweight final reduction (nw arrays, single SIMD pass)
+    # Flips goto_gemv's j-parallel (88KB B stride) to k-parallel
+    # (sequential B scan). Each worker streams a contiguous slice of
+    # B rows with p-outer/i-inner order so B is loaded once and reused
+    # across all M output rows. Final lightweight reduction sums partials.
     comptime NELTS = simd_width_of[dtype]()
     comptime KU = 8
 
@@ -1157,15 +1138,13 @@ fn _decode_gemv[
     var b_ptr = b.data.unsafe_ptr()
     var nw = num_physical_cores()
 
-    # Allocate per-worker partial C buffers (raw, uninitialized)
     var part_size = nw * m * n
     var part = alloc[Scalar[dtype]](part_size)
 
-    # Zero partial buffers using SIMD
-    fn _zero_part[width: Int](idx: Int) unified {mut}:
+    fn _zero[width: Int](idx: Int) unified {mut}:
         part.store[width=width](offset=idx, val=SIMD[dtype, width](0))
 
-    vectorize[NELTS](part_size, _zero_part)
+    vectorize[NELTS, unroll_factor=4](part_size, _zero)
 
     fn worker(wid: Int) capturing:
         var rows_per = ceildiv(k, nw)
@@ -1174,55 +1153,34 @@ fn _decode_gemv[
         var my_c = part + wid * m * n
         var p = k0
 
-        # Main unrolled loop: KU=8 B-rows per iteration, all M rows per B row
         while p + KU <= k1:
-            # Compute 8 B row pointers (loaded once, reused across M rows)
-            var b0 = b_ptr + p * n
-            var b1 = b_ptr + (p + 1) * n
-            var b2 = b_ptr + (p + 2) * n
-            var b3 = b_ptr + (p + 3) * n
-            var b4 = b_ptr + (p + 4) * n
-            var b5 = b_ptr + (p + 5) * n
-            var b6 = b_ptr + (p + 6) * n
-            var b7 = b_ptr + (p + 7) * n
+            var b_base = b_ptr + p * n
 
-            # Prefetch next B rows into L1
             prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
                 b_ptr + (p + KU) * n
             )
-            prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-                b_ptr + (p + KU + 1) * n
-            )
 
-            # Process all M rows for these 8 B rows (B stays in L1/L2)
             for i in range(m):
                 var ci = my_c + i * n
                 var ai = a_ptr + i * k
-                var a0 = ai[p]
-                var a1 = ai[p + 1]
-                var a2 = ai[p + 2]
-                var a3 = ai[p + 3]
-                var a4 = ai[p + 4]
-                var a5 = ai[p + 5]
-                var a6 = ai[p + 6]
-                var a7 = ai[p + 7]
+                var a_vals = InlineArray[Scalar[dtype], KU](fill=Scalar[dtype](0))
+                comptime for ku in range(KU):
+                    a_vals[ku] = ai[p + ku]
 
                 fn do_fma[width: Int](j: Int) unified {mut}:
                     var acc = ci.load[width=width](offset=j)
-                    acc = fma(SIMD[dtype, width](a0), b0.load[width=width](offset=j), acc)
-                    acc = fma(SIMD[dtype, width](a1), b1.load[width=width](offset=j), acc)
-                    acc = fma(SIMD[dtype, width](a2), b2.load[width=width](offset=j), acc)
-                    acc = fma(SIMD[dtype, width](a3), b3.load[width=width](offset=j), acc)
-                    acc = fma(SIMD[dtype, width](a4), b4.load[width=width](offset=j), acc)
-                    acc = fma(SIMD[dtype, width](a5), b5.load[width=width](offset=j), acc)
-                    acc = fma(SIMD[dtype, width](a6), b6.load[width=width](offset=j), acc)
-                    acc = fma(SIMD[dtype, width](a7), b7.load[width=width](offset=j), acc)
+                    comptime for ku in range(KU):
+                        acc = fma(
+                            SIMD[dtype, width](a_vals[ku]),
+                            (b_base + ku * n).load[width=width](offset=j),
+                            acc,
+                        )
                     ci.store(offset=j, val=acc)
 
-                vectorize[NELTS](n, do_fma)
+                vectorize[NELTS, unroll_factor=4](n, do_fma)
             p += KU
 
-        # Remainder: process one B-row at a time, all M rows per B row
+        # Remainder
         while p < k1:
             var bp = b_ptr + p * n
             for i in range(m):
@@ -1244,7 +1202,7 @@ fn _decode_gemv[
 
     parallelize[worker](nw, nw)
 
-    # Reduce: C = sum of all partial-C buffers
+    # Reduce partials into C
     for i in range(m):
         var ci_off = i * n
 
