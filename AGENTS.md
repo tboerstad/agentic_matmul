@@ -1,5 +1,33 @@
 # Agent Instructions
 
+## Verify hardware FIRST
+
+Before running any benchmarks or interpreting any results, identify the hardware you are running on.
+All performance numbers in this repo are **hardware-specific** — they will vary significantly across
+different CPUs, core counts, cache sizes, SIMD widths, and virtualization environments.
+
+Run this immediately:
+```bash
+lscpu | grep -E "Model name|CPU\(s\)|MHz|cache|Flags"
+python -c "import numpy; numpy.show_config()"
+```
+
+Check for:
+- **CPU model and clock speed** (e.g. Intel Xeon @ 2.80 GHz)
+- **Core count** (physical cores available for parallelism)
+- **SIMD support** (AVX-512, AVX2, SSE4 — determines FLOPS/cycle)
+- **Virtualization** (KVM/container overhead reduces effective throughput)
+- **BLAS backend** (OpenBLAS version, MKL, etc.)
+
+The theoretical peak GFLOPS formula is:
+```
+peak = clock_GHz × doubles_per_SIMD × 2(FMA) × cores
+```
+For example: 2.8 GHz × 8 (AVX-512) × 2 × 4 cores = 179.2 GFLOPS.
+
+**All benchmark numbers in SOTA_RESULTS.md, OPENBLAS_ANALYSIS.md, and README.md were measured on
+a specific machine (Intel Xeon @ 2.80 GHz, 4 cores, AVX-512, KVM). Your results WILL differ.**
+
 ## First-time setup after cloning
 
 1. Run `bash setup.sh` to install dependencies (uv, Mojo nightly)
