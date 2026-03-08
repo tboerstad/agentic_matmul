@@ -838,7 +838,7 @@ fn matmul_goto[
 
 fn _prefill_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
-    NC_TILES: Int,
+    NC_TILES: Int, ROW_PACK: Bool = False,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Optimized prefill GEMM with A-panel packing + B-panel packing.
     #
@@ -877,10 +877,13 @@ fn _prefill_gemm[
     var ap_buf = alloc[Scalar[dtype]](ap_total)
 
     fn process_worker(worker_id: Int) capturing:
-        var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
-        var j_tile_start = worker_id * tiles_per_worker
-        var j_tile_end = min(j_tile_start + tiles_per_worker, num_j_tiles)
-        if j_tile_start >= num_j_tiles:
+        # Balanced distribution: base + extras avoids worst-case imbalance
+        var base_tiles = num_j_tiles // num_workers
+        var extras = num_j_tiles % num_workers
+        var j_tile_start = worker_id * base_tiles + min(worker_id, extras)
+        var j_tile_count = base_tiles + (1 if worker_id < extras else 0)
+        var j_tile_end = j_tile_start + j_tile_count
+        if j_tile_count <= 0:
             return
 
         var bp_worker = bp_buf + worker_id * bp_per_worker
@@ -914,20 +917,23 @@ fn _prefill_gemm[
                     var num_panels = ceildiv(tile_n, NR)
 
                     # Pack B into NR-wide panels
-                    for jp in range(num_panels):
-                        var jr = jp * NR
-                        var panel_base = bp_worker + jp * kc * NR
-                        if jr + NR <= tile_n:
-                            for pk in range(kc):
-                                var src = b_ptr + (pc + pk) * n + j0 + jr
-                                var dst = panel_base + pk * NR
+                    comptime if ROW_PACK:
+                        # Row-by-row: read contiguous B row, scatter to panels
+                        var num_full_panels = tile_n // NR
+                        for pk in range(kc):
+                            var b_row = b_ptr + (pc + pk) * n + j0
+                            for jp in range(num_full_panels):
+                                var src = b_row + jp * NR
+                                var dst = bp_worker + jp * kc * NR + pk * NR
                                 comptime for nv in range(NR_VECS):
                                     dst.store[width=NELTS](
                                         offset=nv * NELTS,
                                         val=src.load[width=NELTS](offset=nv * NELTS),
                                     )
-                        else:
+                        if num_full_panels < num_panels:
+                            var jr = num_full_panels * NR
                             var nr_actual = tile_n - jr
+                            var panel_base = bp_worker + num_full_panels * kc * NR
                             for pk in range(kc):
                                 var src = b_ptr + (pc + pk) * n + j0 + jr
                                 var dst = panel_base + pk * NR
@@ -935,6 +941,29 @@ fn _prefill_gemm[
                                     dst[nr] = src[nr]
                                 for nr in range(nr_actual, NR):
                                     dst[nr] = Scalar[dtype](0)
+                    else:
+                        # Panel-by-panel: original order
+                        for jp in range(num_panels):
+                            var jr = jp * NR
+                            var panel_base = bp_worker + jp * kc * NR
+                            if jr + NR <= tile_n:
+                                for pk in range(kc):
+                                    var src = b_ptr + (pc + pk) * n + j0 + jr
+                                    var dst = panel_base + pk * NR
+                                    comptime for nv in range(NR_VECS):
+                                        dst.store[width=NELTS](
+                                            offset=nv * NELTS,
+                                            val=src.load[width=NELTS](offset=nv * NELTS),
+                                        )
+                            else:
+                                var nr_actual = tile_n - jr
+                                for pk in range(kc):
+                                    var src = b_ptr + (pc + pk) * n + j0 + jr
+                                    var dst = panel_base + pk * NR
+                                    for nr in range(nr_actual):
+                                        dst[nr] = src[nr]
+                                    for nr in range(nr_actual, NR):
+                                        dst[nr] = Scalar[dtype](0)
 
                     # Micro-kernel with packed A + packed B
                     i = 0
@@ -1063,6 +1092,10 @@ fn _prefill_gemm[
     ap_buf.free()
 
 
+# _prefill_gemm_v2 and _prefill_gemm_v3 removed — replaced by ROW_PACK
+# parameter on _prefill_gemm.
+
+
 fn matmul_prefill[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1081,6 +1114,25 @@ fn matmul_prefill[
         _goto_gemv[dtype](c, a, b)
     else:
         _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
+
+
+fn matmul_prefill_v2[
+    dtype: DType = DType.float64
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # Optimized prefill GEMM v2: v1 kernel with tuned parameters.
+    comptime NELTS = simd_width_of[dtype]()
+    comptime MR = 8
+    comptime NR = 2 * NELTS
+    comptime KC = 256
+    comptime KU = 4
+    comptime TILE_N = 64
+    comptime NC_TILES = 256
+
+    if a.rows < MR:
+        _zero_fill[dtype](c)
+        _goto_gemv[dtype](c, a, b)
+    else:
+        _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES, ROW_PACK=True](c, a, b)
 
 
 # Default matmul points to the tiled version
