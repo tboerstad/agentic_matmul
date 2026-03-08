@@ -17,22 +17,6 @@
   speedup peak (goto/decode): 1.5018384410925747 x
   improvement peak: 50.18384410925747 %
 
---- small-batch decode (M=4): 4x11008x2048 ---
-
-  max diff (goto vs decode): 1.3642420526593924e-12
-  correctness: OK
-  max diff (goto vs dispatch): 1.3642420526593924e-12
-  correctness: OK
-
-  goto    : 14.613843334581773 ms (mean) | 14.307464788235293 ms (min) | 12.341385347495343 GFLOPS (mean) | 12.6056624754584 GFLOPS (peak)
-  decode  : 5.681575021901443 ms (mean) | 5.140994246666667 ms (min) | 31.743851186469215 GFLOPS (mean) | 35.081749433378405 GFLOPS (peak)
-  dispatch: 5.289161520424404 ms (mean) | 4.90081961589404 ms (min) | 34.09899117346832 GFLOPS (mean) | 36.801001900801126 GFLOPS (peak)
-
-  speedup mean (goto/decode): 2.572146504842064 x
-  improvement mean: 157.21465048420643 %
-  speedup peak (goto/decode): 2.7830151332131927 x
-  improvement peak: 178.30151332131928 %
-
 --- batch decode (M=7): 7x11008x2048 ---
 
   max diff (goto vs decode): 1.3642420526593924e-12

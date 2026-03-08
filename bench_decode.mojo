@@ -121,8 +121,5 @@ fn main() raises:
     # M=1: single-token decode (pure bandwidth bound)
     bench_shape(1, 11008, 2048, "single-token decode")
 
-    # M=4: speculative decode / small batch (B reuse across rows)
-    bench_shape(4, 11008, 2048, "small-batch decode (M=4)")
-
     # M=7: max batch before MR=8 threshold
     bench_shape(7, 11008, 2048, "batch decode (M=7)")
