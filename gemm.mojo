@@ -765,6 +765,7 @@ fn matmul_goto[
         _goto_gemm[dtype, MR, NR, KC, KU, TILE_N](c, a, b)
 
 
+@always_inline
 fn _prefill_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
     NC_TILES: Int,
@@ -1025,6 +1026,7 @@ fn _prefill_gemm[
     ap_buf.free()
 
 
+@always_inline
 fn matmul_prefill[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
