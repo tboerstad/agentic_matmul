@@ -840,7 +840,7 @@ fn _prefill_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
     NC_TILES: Int,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # Optimized prefill GEMM with A-panel packing + B-panel packing.
+    # Optimized prefill GEMM with per-worker A-panel packing + B-panel packing.
     #
     # Key improvements over _goto_gemm:
     #   1. Worker-based parallelism: each thread gets a contiguous chunk of
@@ -850,8 +850,12 @@ fn _prefill_gemm[
     #   3. Batched j-tile processing: process NC_TILES j-tiles per k-tile
     #      iteration to keep C panel in L2 while reusing packed A.
     #   4. Eliminates separate zero-fill pass: first k-tile uses zero accumulators.
+    #   5. B-packing prefetch hides strided memory access latency.
+    #   6. Packed-A prefetch in micro-kernel ensures data is in L1 before use.
     comptime NELTS = simd_width_of[dtype]()
     comptime NR_VECS = NR // NELTS
+    comptime PREFETCH_B_DIST = 8  # rows ahead to prefetch during B packing
+    comptime PREFETCH_DIST = 4    # k-steps ahead to prefetch packed A/B
 
     var m = a.rows
     var n = c.cols
@@ -913,7 +917,7 @@ fn _prefill_gemm[
                     var tile_n = min(TILE_N, n - j0)
                     var num_panels = ceildiv(tile_n, NR)
 
-                    # Pack B into NR-wide panels
+                    # Pack B into NR-wide panels with prefetching
                     for jp in range(num_panels):
                         var jr = jp * NR
                         var panel_base = bp_worker + jp * kc * NR
@@ -921,6 +925,10 @@ fn _prefill_gemm[
                             for pk in range(kc):
                                 var src = b_ptr + (pc + pk) * n + j0 + jr
                                 var dst = panel_base + pk * NR
+                                # Prefetch B rows ahead to hide stride-N latency
+                                prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
+                                    b_ptr + (pc + pk + PREFETCH_B_DIST) * n + j0 + jr
+                                )
                                 comptime for nv in range(NR_VECS):
                                     dst.store[width=NELTS](
                                         offset=nv * NELTS,
@@ -937,17 +945,17 @@ fn _prefill_gemm[
                                     dst[nr] = Scalar[dtype](0)
 
                     # Micro-kernel with packed A + packed B
-                    i = 0
-                    ip = 0
-                    while i + MR <= m:
-                        var ap_panel = ap_worker + ip * MR * kc
+                    # jp-outer, i-inner: B panel stays in L2 across all i-panels,
+                    # reducing L2→L1 traffic by ~2.7× vs the i-outer order.
+                    for jp in range(num_panels):
+                        var jr = jp * NR
+                        var bp_panel = bp_worker + jp * kc * NR
 
-                        for jp in range(num_panels):
-                            var jr = jp * NR
-                            var bp_panel = bp_worker + jp * kc * NR
-
-                            if jr + NR > tile_n:
-                                var jj_limit = tile_n - jr
+                        if jr + NR > tile_n:
+                            # Remainder columns: process all i-panels
+                            var jj_limit = tile_n - jr
+                            i = 0
+                            while i + MR <= m:
                                 for ii in range(i, i + MR):
                                     var c_row = c_ptr + ii * n + j0 + jr
                                     var a_row = a_ptr + ii * k + pc
@@ -965,9 +973,33 @@ fn _prefill_gemm[
                                         c_row.store(offset=jj, val=acc)
 
                                     vectorize[NELTS](jj_limit, fma_remainder)
-                                continue
+                                i += MR
+                            # Remaining rows for remainder columns
+                            while i < m:
+                                var c_row = c_ptr + i * n + j0 + jr
 
-                            # ---- Full MR×NR micro-kernel ----
+                                fn fma_tail_rem[width: Int](jj: Int) unified {mut}:
+                                    var acc = c_row.load[width=width](offset=jj)
+                                    if is_first_k:
+                                        acc = SIMD[dtype, width](0)
+                                    for ppk in range(kc):
+                                        acc = fma(
+                                            SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                            (bp_panel + ppk * NR).load[width=width](offset=jj),
+                                            acc,
+                                        )
+                                    c_row.store(offset=jj, val=acc)
+
+                                vectorize[NELTS](jj_limit, fma_tail_rem)
+                                i += 1
+                            continue
+
+                        # ---- Full NR-panel: process all i-panels ----
+                        i = 0
+                        ip = 0
+                        while i + MR <= m:
+                            var ap_panel = ap_worker + ip * MR * kc
+
                             var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
                                 fill=SIMD[dtype, NELTS](0)
                             )
@@ -986,12 +1018,16 @@ fn _prefill_gemm[
                                 comptime for ku in range(KU):
                                     var bp_k = bp_panel + (pk + ku) * NR
                                     prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-                                        bp_panel + (pk + ku + 4) * NR
+                                        bp_panel + (pk + ku + PREFETCH_DIST) * NR
+                                    )
+                                    var ap_k = ap_panel + (pk + ku) * MR
+                                    # Prefetch packed A ahead
+                                    prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
+                                        ap_panel + (pk + ku + PREFETCH_DIST) * MR
                                     )
                                     var a_vals = InlineArray[Scalar[dtype], MR](
                                         fill=Scalar[dtype](0)
                                     )
-                                    var ap_k = ap_panel + (pk + ku) * MR
                                     comptime for mr in range(MR):
                                         a_vals[mr] = ap_k[mr]
                                     comptime for nr in range(NR_VECS):
@@ -1030,14 +1066,11 @@ fn _prefill_gemm[
                                         offset=nr * NELTS, val=acc[mr * NR_VECS + nr],
                                     )
 
-                        i += MR
-                        ip += 1
+                            i += MR
+                            ip += 1
 
-                    # Handle remaining rows (< MR)
-                    while i < m:
-                        for jp in range(num_panels):
-                            var jr = jp * NR
-                            var bp_panel = bp_worker + jp * kc * NR
+                        # Handle remaining rows (< MR)
+                        while i < m:
                             var jj_limit = min(NR, tile_n - jr)
                             var c_row = c_ptr + i * n + j0 + jr
 
@@ -1054,7 +1087,7 @@ fn _prefill_gemm[
                                 c_row.store(offset=jj, val=acc)
 
                             vectorize[NELTS](jj_limit, fma_tail)
-                        i += 1
+                            i += 1
 
             jt += NC_TILES
 
@@ -1068,13 +1101,15 @@ fn matmul_prefill[
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  optimized for prefill shapes (M >= MR).
     # Worker-based parallelism with A-panel packing amortized across j-tile batches.
+    # NR=3*NELTS improves compute intensity (6.0 vs 5.33 FLOP/byte), reducing memory
+    # pressure. KC=512 halves k-tile count for less B packing + C traffic.
     comptime NELTS = simd_width_of[dtype]()
     comptime MR = 8
-    comptime NR = 2 * NELTS
-    comptime KC = 256
+    comptime NR = 3 * NELTS   # 24 for float64: higher compute intensity (8×24)
+    comptime KC = 512
     comptime KU = 8
-    comptime TILE_N = 64
-    comptime NC_TILES = 256  # process all j-tiles per k-tile (A packed once)
+    comptime TILE_N = 72      # 3 × NR = 3 full NR-panels per tile
+    comptime NC_TILES = 256
 
     if a.rows < MR:
         _zero_fill[dtype](c)
