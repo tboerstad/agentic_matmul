@@ -612,7 +612,6 @@ fn _goto_gemv[
     parallelize[process_gemv_tile](num_j_tiles, num_physical_cores())
 
 
-@always_inline
 fn _goto_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -639,7 +638,6 @@ fn _goto_gemm[
     var bp_total = num_j_tiles * bp_per_tile
     var bp_buf = alloc[Scalar[dtype]](bp_total)
 
-    @__copy_capture(m, n, k, c_ptr, a_ptr, b_ptr, bp_buf, num_j_tiles, bp_per_tile)
     fn process_j_tile(j_tile_idx: Int) capturing:
         var j0 = j_tile_idx * TILE_N
         var tile_n = min(TILE_N, n - j0)
@@ -840,7 +838,6 @@ fn matmul_goto[
         _goto_gemm[dtype, MR, NR, KC, KU, TILE_N](c, a, b)
 
 
-@always_inline
 fn _prefill_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
     NC_TILES: Int,
@@ -885,7 +882,6 @@ fn _prefill_gemm[
     var ap_total = num_workers * ap_per_worker
     var ap_buf = alloc[Scalar[dtype]](ap_total)
 
-    @__copy_capture(m, n, k, c_ptr, a_ptr, b_ptr, bp_buf, ap_buf, num_j_tiles, num_workers, num_i_panels, bp_per_worker, ap_per_worker)
     fn process_worker(worker_id: Int) capturing:
         var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
         var j_tile_start = worker_id * tiles_per_worker
