@@ -1,22 +1,27 @@
 # SOTA MatMul Benchmark Results
 
-> **Hardware-specific results.** All numbers below were measured on a specific machine.
+> **Hardware-specific results.** All numbers below were measured on specific machines.
 > Performance varies significantly across CPUs, core counts, SIMD widths, and virtualization.
 > Before comparing or citing these numbers, verify your hardware — see [AGENTS.md](AGENTS.md)
 > for the verification steps. Re-run benchmarks on your own machine for accurate comparisons.
 
 **Date:** 2026-03-08
-**Hardware:** Intel Xeon @ 2.80 GHz, 4 cores, AVX-512 (Skylake), KVM virtualized
 **Dtype:** float64
 
-## Theoretical Peak Performance (float64, AVX-512 FMA)
+## Hardware Configurations
 
-| Cores | GFLOPS |
-|-------|--------|
-| 1     | 44.8   |
-| 4     | 179.2  |
+| | Machine A | Machine B |
+|---|---|---|
+| **CPU** | Intel Xeon @ 2.80 GHz | Intel Xeon @ 2.10 GHz |
+| **Microarchitecture** | Skylake | Granite Rapids |
+| **Cores** | 4 | 4 |
+| **SIMD** | AVX-512 | AVX-512 |
+| **Virtualization** | KVM | KVM |
+| **L3 Cache** | — | 260 MiB |
+| **Theoretical Peak (1 core)** | 44.8 GFLOPS | 33.6 GFLOPS |
+| **Theoretical Peak (4 cores)** | 179.2 GFLOPS | 134.4 GFLOPS |
 
-Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
+Calculation: clock × 8 doubles/cycle (512-bit) × 2 (FMA) = GFLOPS/core
 
 ## Benchmark Shapes (Qwen 2.5 VL 3B MLP)
 
@@ -29,80 +34,119 @@ Calculation: 2.8 GHz × 8 doubles/cycle (512-bit) × 2 (FMA) = 44.8 GFLOPS/core
 
 ### Decode Shape: 1 × 11008 × 2048
 
-| Implementation                  | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) | vs SOTA |
-|---------------------------------|-----------|----------|---------------|---------------|---------|
-| **NumPy/OpenBLAS (multi-thread)** | 4.150   | 3.978    | **10.86**     | **11.33**     | 1.00×   |
-| NumPy/OpenBLAS (1 thread)       | 4.559     | 4.434    | 9.89          | 10.17         | 0.90×   |
-| SciPy dgemm (OpenBLAS)          | 12.833    | 10.989   | 3.51          | 4.10          | 0.36×   |
-| **Mojo GOTO (best kernel)**     | 63.294    | 63.039   | 0.71          | 0.72          | 0.06×   |
-| Mojo Parallel                   | 64.094    | 63.372   | 0.70          | 0.71          | 0.06×   |
-| Mojo SIMD                       | 64.924    | 64.428   | 0.69          | 0.70          | 0.06×   |
-| Mojo Register-Blocked           | 66.263    | 65.280   | 0.68          | 0.69          | 0.06×   |
-| Mojo Comptime                   | 66.718    | 66.068   | 0.68          | 0.68          | 0.06×   |
-| Mojo Tiled                      | 68.787    | 66.183   | 0.66          | 0.68          | 0.06×   |
-| Mojo Packed                     | 77.136    | 76.380   | 0.58          | 0.59          | 0.05×   |
-| Mojo Naive                      | 285.958   | 285.794  | 0.16          | 0.16          | 0.01×   |
+| Implementation | Mean (ms) | GFLOPS (peak) | vs SOTA | | Mean (ms) | GFLOPS (peak) | vs SOTA |
+|---|---|---|---|---|---|---|---|
+| | **Machine A** | | | | **Machine B** | | |
+| **NumPy/OpenBLAS (multi-thread)** | 4.150 | **11.33** | 1.00× | | 3.329 | **14.32** | 1.00× |
+| NumPy/OpenBLAS (1 thread) | 4.559 | 10.17 | 0.90× | | 2.081 | 22.58 | 1.58× |
+| SciPy dgemm (OpenBLAS) | 12.833 | 4.10 | 0.36× | | 9.004 | 5.33 | 0.37× |
+| **Mojo Dispatch** | — | — | — | | 2.625 | **20.08** | **1.40×** |
+| **Mojo Decode** | — | — | — | | 2.845 | 18.61 | 1.30× |
+| Mojo GOTO | 63.294 | 0.72 | 0.06× | | 4.162 | 12.39 | 0.87× |
+| Mojo Comptime | 66.718 | 0.68 | 0.06× | | 65.324 | 0.69 | 0.05× |
+| Mojo SIMD | 64.924 | 0.70 | 0.06× | | 71.836 | 0.63 | 0.04× |
+| Mojo Parallel | 64.094 | 0.71 | 0.06× | | 72.779 | 0.62 | 0.04× |
+| Mojo Naive | 285.958 | 0.16 | 0.01× | | 247.265 | 0.18 | 0.01× |
 
-**SOTA Winner (Decode): NumPy/OpenBLAS — 11.33 GFLOPS peak (25% of theoretical single-core peak)**
+**Machine A notes:** Decode/dispatch kernels not yet implemented at time of benchmarking. GOTO results from bench_matmul.mojo (serial run).
+
+**Machine B notes:** Mojo Dispatch, Decode, and GOTO results from dedicated `bench_decode.mojo` (M=1 shape). Remaining kernels from `bench_matmul.mojo`.
+
+**Machine B highlight:** Mojo Dispatch achieves **20.08 GFLOPS** — 1.40× faster than NumPy/OpenBLAS multi-threaded and 89% of OpenBLAS single-threaded peak (22.58 GFLOPS). The k-parallel GEMV optimization is highly effective on this hardware.
 
 ### Prefill Shape: 96 × 11008 × 2048
 
-| Implementation                  | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) | vs SOTA |
-|---------------------------------|-----------|----------|---------------|---------------|---------|
-| **NumPy/OpenBLAS (multi-thread)** | 23.825  | 22.084   | **181.68**    | **196.00**    | 1.00×   |
-| NumPy/OpenBLAS (1 thread)       | 23.457    | 22.497   | 184.53        | 192.40        | 0.98×   |
-| **Mojo Prefill (best kernel)**  | 35.272    | 34.524   | 122.72        | 125.38        | 0.64×   |
-| SciPy dgemm (OpenBLAS)          | 34.582    | 32.864   | 125.17        | 131.71        | 0.67×   |
-| Mojo GOTO                       | 53.175    | 52.217   | 81.40         | 82.89         | 0.42×   |
-| Mojo Comptime†                  | 113.537   | 112.794  | 38.12         | 38.38         | 0.20×   |
-| Mojo Packed†                    | 138.886   | 136.813  | 31.17         | 31.64         | 0.16×   |
-| Mojo Register-Blocked†          | 213.036   | 204.817  | 20.32         | 21.13         | 0.11×   |
-| Mojo Parallel†                  | 239.338   | 228.812  | 18.09         | 18.92         | 0.10×   |
-| Mojo SIMD†                      | 482.479   | 477.314  | 8.97          | 9.07          | 0.05×   |
-| Mojo Tiled†                     | 1213.973  | —        | 3.57          | —             | 0.02×   |
-| Mojo Naive†                     | 23462.631 | —        | 0.18          | —             | 0.001×  |
+| Implementation | Mean (ms) | GFLOPS (peak) | vs SOTA | | Mean (ms) | GFLOPS (peak) | vs SOTA |
+|---|---|---|---|---|---|---|---|
+| | **Machine A** | | | | **Machine B** | | |
+| **NumPy/OpenBLAS (multi-thread)** | 23.825 | **196.00** | 1.00× | | 18.768 | **239.43** | 1.00× |
+| NumPy/OpenBLAS (1 thread) | 23.457 | 192.40 | 0.98× | | 20.360 | 239.31 | 1.00× |
+| **Mojo Prefill (best kernel)** | 35.272 | 125.38 | 0.64× | | 20.528 | **217.94** | **0.91×** |
+| SciPy dgemm (OpenBLAS) | 34.582 | 131.71 | 0.67× | | 28.500 | 163.93 | 0.68× |
+| Mojo GOTO | 53.175 | 82.89 | 0.42× | | 23.371 | 192.73 | 0.81× |
+| Mojo Dispatch† | — | — | — | | 80.623 | 53.69 | 0.22× |
+| Mojo Comptime† | 113.537 | 38.38 | 0.20× | | 95.134 | 45.50 | 0.19× |
+| Mojo Packed† | 138.886 | 31.64 | 0.16× | | 106.273 | 40.73 | 0.17× |
+| Mojo Register-Blocked† | 213.036 | 21.13 | 0.11× | | 154.197 | 28.07 | 0.12× |
+| Mojo Parallel† | 239.338 | 18.92 | 0.10× | | 176.735 | 24.49 | 0.10× |
+| Mojo SIMD† | 482.479 | 9.07 | 0.05× | | 359.243 | 12.05 | 0.05× |
+| Mojo Tiled† | 1213.973 | 3.57 | 0.02× | | 1512.646 | 2.86 | 0.01× |
+| Mojo Naive† | 23462.631 | 0.18 | 0.001× | | 17943.288 | 0.24 | 0.001× |
 
-†Results from bench_matmul.mojo (serial run of all kernels). GOTO and Prefill results from dedicated bench_prefill.mojo for more accurate comparison.
+†Results from bench_matmul.mojo (serial run of all kernels). GOTO and Prefill results from dedicated bench_prefill.mojo for more accurate comparison. Dispatch uses the decode kernel for prefill shape (suboptimal — it's designed for decode).
 
-**SOTA Winner (Prefill): NumPy/OpenBLAS — 196.00 GFLOPS peak (109% of theoretical 4-core peak!)**
+**Machine B highlight:** Mojo Prefill achieves **217.94 GFLOPS** — **91% of OpenBLAS peak!** The gap narrowed dramatically from 36% (Machine A) to just 9% (Machine B).
 
-> Note: Exceeding theoretical peak is possible due to CPU turbo boost and measurement variance.
+> Note: Exceeding theoretical peak (Machine B: 239 GFLOPS vs 134.4 theoretical) is due to
+> turbo boost — the 2.10 GHz is the base frequency; actual boost clocks are significantly higher.
 
-## Mojo Prefill vs GOTO: 51% Improvement
+## Mojo Prefill vs GOTO
 
-The dedicated `bench_prefill.mojo` benchmark shows:
+Results from dedicated `bench_prefill.mojo` (96 × 11008 × 2048):
 
-| Kernel  | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
-|---------|-----------|----------|---------------|---------------|
-| goto    | 53.175    | 52.217   | 81.40         | 82.89         |
-| prefill | 35.272    | 34.524   | 122.72        | 125.38        |
+| | Machine A | | Machine B | |
+|---|---|---|---|---|
+| Kernel | GFLOPS (peak) | Mean (ms) | GFLOPS (peak) | Mean (ms) |
+| goto | 82.89 | 53.175 | 192.73 | 23.371 |
+| prefill | 125.38 | 35.272 | 217.94 | 20.528 |
+| **Speedup** | **1.51×** | | **1.14×** | |
 
-**Speedup: 1.51× (51% improvement)**
+Machine A: 51% improvement. Machine B: 14% improvement (both kernels run faster, narrowing relative gap).
 
-The prefill kernel closes the gap with OpenBLAS from 42% to 64% of SOTA peak performance.
+## Mojo Decode Kernel Results (Machine B only)
+
+Results from dedicated `bench_decode.mojo`:
+
+### Single-token decode: 1 × 11008 × 2048
+
+| Kernel | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
+|--------|-----------|----------|---------------|---------------|
+| goto | 4.162 | 3.638 | 10.83 | 12.39 |
+| decode | 2.845 | 2.422 | 15.85 | 18.61 |
+| dispatch | 2.625 | 2.246 | 17.18 | 20.08 |
+
+**Speedup (goto→dispatch): 1.50× (50% improvement)**
+
+### Small-batch decode: 4 × 11008 × 2048
+
+| Kernel | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
+|--------|-----------|----------|---------------|---------------|
+| goto | 14.614 | 14.307 | 12.34 | 12.61 |
+| decode | 5.682 | 5.141 | 31.74 | 35.08 |
+| dispatch | 5.289 | 4.901 | 34.10 | 36.80 |
+
+**Speedup (goto→dispatch): 2.78× (178% improvement)**
+
+### Batch decode: 7 × 11008 × 2048
+
+| Kernel | Mean (ms) | Min (ms) | GFLOPS (mean) | GFLOPS (peak) |
+|--------|-----------|----------|---------------|---------------|
+| goto | 21.400 | 19.809 | 14.75 | 15.93 |
+| decode | 7.799 | 7.100 | 40.47 | 44.45 |
+| dispatch | 7.703 | 6.979 | 40.97 | 45.23 |
+
+**Speedup (goto→dispatch): 2.79× (179% improvement)**
 
 ## Key Takeaways
 
-1. **Decode (M=1):** Memory-bandwidth bound. OpenBLAS is best at 11.33 GFLOPS — only 25% of
-   compute peak because the tiny M=1 means the operation is essentially a matrix-vector product,
-   limited by DRAM bandwidth rather than compute.
+1. **Decode (M=1):** Memory-bandwidth bound. On Machine B, the specialized decode kernel with
+   k-parallel GEMV reaches 20.08 GFLOPS — **1.40× faster than OpenBLAS multi-threaded** and
+   89% of OpenBLAS single-threaded. This is a dramatic improvement over Machine A where the
+   best Mojo kernel managed only 6% of SOTA.
 
-2. **Prefill (M=96):** Compute-bound. OpenBLAS achieves near-theoretical-peak at ~196 GFLOPS,
-   showing excellent utilization of AVX-512 FMA units. This shape has enough work to amortize
-   memory access and saturate the compute pipeline.
+2. **Prefill (M=96):** Compute-bound. On Machine B, Mojo Prefill reaches **217.94 GFLOPS (91% of
+   OpenBLAS)**. On Machine A, it was 125.38 GFLOPS (64% of OpenBLAS). The Granite Rapids
+   microarchitecture with its large L3 cache (260 MiB) benefits Mojo's packing strategy.
 
-3. **Mojo Prefill kernel:** The best Mojo kernel reaches 125.4 GFLOPS on prefill (64% of SOTA),
-   a 51% improvement over the GOTO kernel. Key optimizations:
-   - Worker-based parallelism with j-tile batching (vs per-tile scheduling)
-   - A-panel packing for L1 locality
-   - NR=24 microkernel with 8×24 register blocking
-   - KC=512 k-tile for better L2 utilization
+3. **Hardware matters enormously:** The same code runs dramatically differently across machines.
+   Machine B's Granite Rapids with large L3 cache and higher effective clock speeds narrows
+   or closes many gaps with OpenBLAS.
 
-4. **Mojo GOTO kernel:** Reaches 82.9 GFLOPS on prefill (42% of SOTA) and 0.72 GFLOPS on
-   decode (~6% of SOTA). The GOTO-style j-parallel design with per-tile B-panel packing
-   provides the foundation that the prefill kernel builds upon.
+4. **Decode kernel breakthrough:** The k-parallel GEMV decode kernel is the star on Machine B,
+   beating OpenBLAS multi-threaded by 40% on M=1 decode. The improvement grows with batch
+   size: 2.78× speedup over GOTO at M=4, 2.79× at M=7.
 
-5. **Remaining gap to SOTA (36%):** See [OPENBLAS_ANALYSIS.md](OPENBLAS_ANALYSIS.md) for
+5. **Remaining gap to SOTA (prefill, 9%):** See [OPENBLAS_ANALYSIS.md](OPENBLAS_ANALYSIS.md) for
    detailed analysis of OpenBLAS's 16×12 microkernel vs Mojo's 8×24 microkernel.
 
 ## Libraries Tested

@@ -1,0 +1,51 @@
+=== Mojo Decode ===
+=== decode benchmark: goto vs decode vs dispatch ===
+
+--- single-token decode: 1x11008x2048 ---
+
+  max diff (goto vs decode): 1.3642420526593924e-12
+  correctness: OK
+  max diff (goto vs dispatch): 1.3642420526593924e-12
+  correctness: OK
+
+  goto    : 4.161584525287356 ms (mean) | 3.638122770949721 ms (min) | 10.834519334167947 GFLOPS (mean) | 12.393415736278111 GFLOPS (peak)
+  decode  : 2.845311498558247 ms (mean) | 2.4224461642512076 ms (min) | 15.846689553269304 GFLOPS (mean) | 18.612908169184102 GFLOPS (peak)
+  dispatch: 2.6248380699392984 ms (mean) | 2.245528223809524 ms (min) | 17.17773317766712 GFLOPS (mean) | 20.07935928923984 GFLOPS (peak)
+
+  speedup mean (goto/decode): 1.462611221089881 x
+  improvement mean: 46.2611221089881 %
+  speedup peak (goto/decode): 1.5018384410925747 x
+  improvement peak: 50.18384410925747 %
+
+--- small-batch decode (M=4): 4x11008x2048 ---
+
+  max diff (goto vs decode): 1.3642420526593924e-12
+  correctness: OK
+  max diff (goto vs dispatch): 1.3642420526593924e-12
+  correctness: OK
+
+  goto    : 14.613843334581773 ms (mean) | 14.307464788235293 ms (min) | 12.341385347495343 GFLOPS (mean) | 12.6056624754584 GFLOPS (peak)
+  decode  : 5.681575021901443 ms (mean) | 5.140994246666667 ms (min) | 31.743851186469215 GFLOPS (mean) | 35.081749433378405 GFLOPS (peak)
+  dispatch: 5.289161520424404 ms (mean) | 4.90081961589404 ms (min) | 34.09899117346832 GFLOPS (mean) | 36.801001900801126 GFLOPS (peak)
+
+  speedup mean (goto/decode): 2.572146504842064 x
+  improvement mean: 157.21465048420643 %
+  speedup peak (goto/decode): 2.7830151332131927 x
+  improvement peak: 178.30151332131928 %
+
+--- batch decode (M=7): 7x11008x2048 ---
+
+  max diff (goto vs decode): 1.3642420526593924e-12
+  correctness: OK
+  max diff (goto vs dispatch): 1.3642420526593924e-12
+  correctness: OK
+
+  goto    : 21.39964126748252 ms (mean) | 19.80910504166667 ms (min) | 14.748909668854935 GFLOPS (mean) | 15.93314666846982 GFLOPS (peak)
+  decode  : 7.798869354771784 ms (mean) | 7.0999801031746035 ms (min) | 40.470145304701795 GFLOPS (mean) | 44.45383950567364 GFLOPS (peak)
+  dispatch: 7.702821652719666 ms (mean) | 6.97881968 ms (min) | 40.974773950343554 GFLOPS (mean) | 45.225609841233215 GFLOPS (peak)
+
+  speedup mean (goto/decode): 2.7439414989544635 x
+  improvement mean: 174.39414989544636 %
+  speedup peak (goto/decode): 2.7900226132759793 x
+  improvement peak: 179.00226132759792 %
+

@@ -1,15 +1,16 @@
+=== Mojo Prefill ===
 === prefill benchmark: goto vs prefill (96x11008x2048) ===
 
   max diff (goto vs prefill): 0.0
   correctness: OK
 
-  goto    : 53.17483239111112 ms (mean) | 52.217239130434784 ms (min) | 81.40169951383939 GFLOPS (mean) | 82.89449614882308 GFLOPS (min)
-  prefill : 35.27241512979351 ms (mean) | 34.52449903508772 ms (min) | 122.71690815817804 GFLOPS (mean) | 125.3753667388733 GFLOPS (min)
+  goto    : 23.370603078674947 ms (mean) | 22.458577463768115 ms (min) | 185.21223921472784 GFLOPS (mean) | 192.7335662725344 GFLOPS (min)
+  prefill : 20.528281696551723 ms (mean) | 19.861090726027395 ms (min) | 210.85650479587346 GFLOPS (mean) | 217.93977922509538 GFLOPS (min)
 
-  speedup mean (goto/prefill): 1.507547248903747 x
-  improvement mean: 50.75472489037469 %
-  speedup min  (goto/prefill): 1.5124691332194478 x
-  improvement min: 51.246913321944774 %
+  speedup mean (goto/prefill): 1.1384588064475298 x
+  improvement mean: 13.845880644752985 %
+  speedup min  (goto/prefill): 1.1307826832660701 x
+  improvement min: 13.078268326607013 %
 
 --- full reports ---
 
@@ -17,22 +18,22 @@ goto:
 --------------------------------------------------------------------------------
 Benchmark Report (s)
 --------------------------------------------------------------------------------
-Mean: 0.05317483239111111
-Total: 11.964337288
-Iters: 225
-Warmup Total: 0.069245853
-Fastest Mean: 0.05221723913043478
-Slowest Mean: 0.0550014478
+Mean: 0.02337060307867495
+Total: 11.288001287
+Iters: 483
+Warmup Total: 0.029862131
+Fastest Mean: 0.022458577463768118
+Slowest Mean: 0.02442892989552239
 
 
 prefill:
 --------------------------------------------------------------------------------
 Benchmark Report (s)
 --------------------------------------------------------------------------------
-Mean: 0.03527241512979351
-Total: 11.957348729
-Iters: 339
-Warmup Total: 0.03450803
-Fastest Mean: 0.03452449903508772
-Slowest Mean: 0.03622912275
+Mean: 0.020528281696551725
+Total: 11.906403384
+Iters: 580
+Warmup Total: 0.021009861
+Fastest Mean: 0.019861090726027396
+Slowest Mean: 0.021615929608108108
 
