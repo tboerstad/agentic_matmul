@@ -1,4 +1,4 @@
-from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_comptime, matmul_goto
+from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_comptime, matmul_goto, matmul_2d_dispatch
 from matrix import Matrix
 import std.benchmark
 from std.time import perf_counter_ns
@@ -17,7 +17,7 @@ fn fill(mut m: Matrix, seed: Int):
 
 fn main() raises:
     var t_start = perf_counter_ns()
-    print("=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs comptime (Qwen 2.5 VL 3B shapes) ===\n")
+    print("=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs comptime vs goto vs 2d_dispatch (Qwen 2.5 VL 3B shapes) ===\n")
 
     # ---- 1x11008x2048 (single-token decode) ---------------------------------
 
@@ -96,6 +96,15 @@ fn main() raises:
         fill(a, 17)
         fill(b, 13)
         matmul_goto(c, a, b)
+
+    @parameter
+    fn bench_decode_2d():
+        var a = Matrix(M1, K1)
+        var b = Matrix(K1, N1)
+        var c = Matrix(M1, N1)
+        fill(a, 17)
+        fill(b, 13)
+        matmul_2d_dispatch(c, a, b)
 
     print("--- 1x11008x2048 (decode) ---")
 
@@ -184,8 +193,19 @@ fn main() raises:
         "GFLOPS",
     )
 
+    var r_2d_1 = std.benchmark.run[bench_decode_2d]()
+    var s_2d_1 = r_2d_1.mean("s")
+    print(
+        "  2d_disp:",
+        r_2d_1.mean("ms"),
+        "ms |",
+        gflops(M1, N1, K1, s_2d_1),
+        "GFLOPS",
+    )
+
     print("  speedup (naive/comptime)   :", s_naive_1 / s_comptime_1, "x")
-    print("  speedup (naive/goto)       :", s_naive_1 / s_goto_1, "x\n")
+    print("  speedup (naive/goto)       :", s_naive_1 / s_goto_1, "x")
+    print("  speedup (naive/2d_dispatch):", s_naive_1 / s_2d_1, "x\n")
 
     # ---- 96x11008x2048 (prefill batch) --------------------------------------
 
@@ -264,6 +284,15 @@ fn main() raises:
         fill(a, 17)
         fill(b, 13)
         matmul_goto(c, a, b)
+
+    @parameter
+    fn bench_prefill_2d():
+        var a = Matrix(M2, K2)
+        var b = Matrix(K2, N2)
+        var c = Matrix(M2, N2)
+        fill(a, 17)
+        fill(b, 13)
+        matmul_2d_dispatch(c, a, b)
 
     print("--- 96x11008x2048 (prefill) ---")
 
@@ -352,8 +381,19 @@ fn main() raises:
         "GFLOPS",
     )
 
+    var r_2d_2 = std.benchmark.run[bench_prefill_2d]()
+    var s_2d_2 = r_2d_2.mean("s")
+    print(
+        "  2d_disp:",
+        r_2d_2.mean("ms"),
+        "ms |",
+        gflops(M2, N2, K2, s_2d_2),
+        "GFLOPS",
+    )
+
     print("  speedup (naive/comptime)   :", s_naive_2 / s_comptime_2, "x")
-    print("  speedup (naive/goto)       :", s_naive_2 / s_goto_2, "x\n")
+    print("  speedup (naive/goto)       :", s_naive_2 / s_goto_2, "x")
+    print("  speedup (naive/2d_dispatch):", s_naive_2 / s_2d_2, "x\n")
 
     # ---- full reports --------------------------------------------------------
 
@@ -390,6 +430,10 @@ fn main() raises:
     r_goto_1.print()
     print("\n96x11008x2048 goto:")
     r_goto_2.print()
+    print("\n1x11008x2048 2d_dispatch:")
+    r_2d_1.print()
+    print("\n96x11008x2048 2d_dispatch:")
+    r_2d_2.print()
 
     var t_end = perf_counter_ns()
     var elapsed_s = Float64(t_end - t_start) / 1e9
