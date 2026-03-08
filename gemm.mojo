@@ -809,6 +809,8 @@ fn _prefill_gemm[
     var ap_total = num_workers * ap_per_worker
     var ap_buf = alloc[Scalar[dtype]](ap_total)
 
+    @always_inline
+    @__copy_capture(m, n, k, c_ptr, a_ptr, b_ptr, num_j_tiles, num_i_panels, num_workers, bp_buf, ap_buf, bp_per_worker, ap_per_worker)
     fn process_worker(worker_id: Int) capturing:
         var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
         var j_tile_start = worker_id * tiles_per_worker
@@ -889,6 +891,7 @@ fn _prefill_gemm[
                                     var c_row = c_ptr + ii * n + j0 + jr
                                     var a_row = a_ptr + ii * k + pc
 
+                                    @always_inline
                                     fn fma_remainder[width: Int](jj: Int) unified {mut}:
                                         var acc = c_row.load[width=width](offset=jj)
                                         if is_first_k:
@@ -907,6 +910,7 @@ fn _prefill_gemm[
                             while i < m:
                                 var c_row = c_ptr + i * n + j0 + jr
 
+                                @always_inline
                                 fn fma_tail_rem[width: Int](jj: Int) unified {mut}:
                                     var acc = c_row.load[width=width](offset=jj)
                                     if is_first_k:
@@ -1003,6 +1007,7 @@ fn _prefill_gemm[
                             var jj_limit = min(NR, tile_n - jr)
                             var c_row = c_ptr + i * n + j0 + jr
 
+                            @always_inline
                             fn fma_tail[width: Int](jj: Int) unified {mut}:
                                 var acc = c_row.load[width=width](offset=jj)
                                 if is_first_k:
