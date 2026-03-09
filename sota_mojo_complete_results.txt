@@ -1,0 +1,415 @@
+================================================================================================
+COMPLETE BENCHMARK SUITE - SOTA + MOJO (SERIAL EXECUTION)
+================================================================================================
+Start time: Mon Mar  9 11:06:28 UTC 2026
+
+================================================================================================
+PART 1: SOTA BENCHMARKS (NumPy/OpenBLAS/SciPy)
+================================================================================================
+
+====================================================================================================
+SOTA MatMul Benchmark — Qwen 2.5 VL 3B shapes (float64)
+====================================================================================================
+
+Platform: Linux-6.18.5-x86_64-with-glibc2.39
+CPU: x86_64
+NumPy version: 2.4.3
+NumPy BLAS info: scipy-openblas 0.3.31.dev
+Intel MKL available: False
+Dtype: float64 | Warmup: 5 | Iterations: 20
+
+Theoretical peak (Intel Xeon @ 2.80 GHz, AVX-512, float64):
+  Single core: 44.8 GFLOPS
+  4 cores:    179.2 GFLOPS
+
+----------------------------------------------------------------------------------------------------
+Shape: decode  (1x11008x2048)   (M=1, N=11008, K=2048)
+FLOPs per matmul: 45,088,768
+----------------------------------------------------------------------------------------------------
+  NumPy (OpenBLAS, multi-thread)  mean=   3.676 ms  median=   3.682 ms  min=   3.507 ms  max=   3.820 ms  std=   0.098 ms  GFLOPS(mean)=  12.27  GFLOPS(peak)=  12.86
+  NumPy (OpenBLAS, 1 thread)      mean=   3.616 ms  median=   3.617 ms  min=   3.430 ms  max=   3.992 ms  std=   0.130 ms  GFLOPS(mean)=  12.47  GFLOPS(peak)=  13.14
+  SciPy dgemm (OpenBLAS)          mean=   9.786 ms  median=   9.788 ms  min=   9.653 ms  max=   9.978 ms  std=   0.104 ms  GFLOPS(mean)=   4.61  GFLOPS(peak)=   4.67
+
+----------------------------------------------------------------------------------------------------
+Shape: prefill (96x11008x2048)   (M=96, N=11008, K=2048)
+FLOPs per matmul: 4,328,521,728
+----------------------------------------------------------------------------------------------------
+  NumPy (OpenBLAS, multi-thread)  mean=  20.726 ms  median=  20.297 ms  min=  19.905 ms  max=  22.522 ms  std=   0.869 ms  GFLOPS(mean)= 208.85  GFLOPS(peak)= 217.46
+  NumPy (OpenBLAS, 1 thread)      mean=  24.012 ms  median=  23.600 ms  min=  21.457 ms  max=  29.810 ms  std=   2.048 ms  GFLOPS(mean)= 180.26  GFLOPS(peak)= 201.73
+  SciPy dgemm (OpenBLAS)          mean=  36.461 ms  median=  33.614 ms  min=  31.648 ms  max=  53.116 ms  std=   6.115 ms  GFLOPS(mean)= 118.72  GFLOPS(peak)= 136.77
+
+====================================================================================================
+SUMMARY TABLE
+====================================================================================================
+Shape                          Library                          Mean(ms)    Min(ms)   GFLOPS(mean)   GFLOPS(peak)
+----------------------------------------------------------------------------------------------------
+decode  (1x11008x2048)         NumPy OpenBLAS (multi)              3.676      3.507          12.27          12.86
+decode  (1x11008x2048)         NumPy OpenBLAS (1 thread)           3.616      3.430          12.47          13.14
+decode  (1x11008x2048)         SciPy dgemm                         9.786      9.653           4.61           4.67
+prefill (96x11008x2048)        NumPy OpenBLAS (multi)             20.726     19.905         208.85         217.46
+prefill (96x11008x2048)        NumPy OpenBLAS (1 thread)          24.012     21.457         180.26         201.73
+prefill (96x11008x2048)        SciPy dgemm                        36.461     31.648         118.72         136.77
+====================================================================================================
+
+================================================================================================
+PART 2: MOJO BENCHMARKS (Optimized Kernels)
+================================================================================================
+
+Note: Mojo benchmarks presented from latest cached results (Mojo compiler not available)
+
+=== Mojo All Kernels ===
+=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs comptime (Qwen 2.5 VL 3B shapes) ===
+
+--- 1x11008x2048 (decode) ---
+  naive : 247.26461165079365 ms | 0.1823502671853337 GFLOPS
+  tiled : 74.42803598101266 ms | 0.6058035443996211 GFLOPS
+  simd  : 71.83540230379747 ms | 0.6276677871074782 GFLOPS
+  parallel: 72.7790612278481 ms | 0.6195293981443564 GFLOPS
+  regblk : 79.42149759090908 ms | 0.5677149055064034 GFLOPS
+  packed : 74.13592737012988 ms | 0.6081905170605141 GFLOPS
+  comptime: 65.32417134500001 ms | 0.6902309982911273 GFLOPS
+  speedup (naive/tiled)      : 3.3221971853976275 x
+  speedup (naive/simd)       : 3.4420996294430495 x
+  speedup (naive/parallel)   : 3.3974691000298387 x
+  speedup (naive/regblk)     : 3.1133209414461676 x
+  speedup (naive/packed)     : 3.3352872274235437 x
+  goto   : 62.82861955714286 ms | 0.7176469627665717 GFLOPS
+  decode : 60.45116842790697 ms | 0.745870909902628 GFLOPS
+  dispatch: 61.397509076190474 ms | 0.7343745483883989 GFLOPS
+  speedup (naive/comptime)   : 3.7851932379654993 x
+  speedup (naive/goto)       : 3.9355410542787044 x
+  speedup (naive/decode)     : 4.09031980822136 x
+  speedup (naive/dispatch)   : 4.027274320590982 x
+  speedup (goto/decode)      : 1.0393284561914 x
+
+--- 96x11008x2048 (prefill) ---
+  naive : 17943.288426666666 ms | 0.24123346986760286 GFLOPS
+  tiled : 1512.6458282222222 ms | 2.8615566494419995 GFLOPS
+  simd  : 359.2427812857143 ms | 12.049015188303601 GFLOPS
+  parallel: 176.73528002666666 ms | 24.491554415999406 GFLOPS
+  regblk : 154.19736332098765 ms | 28.071308320554458 GFLOPS
+  packed : 106.27300051538462 ms | 40.730210937945444 GFLOPS
+  comptime: 95.1340836884058 ms | 45.49916875404274 GFLOPS
+  speedup (naive/tiled)      : 11.862187494183619 x
+  speedup (naive/simd)       : 49.947526746253374 x
+  speedup (naive/parallel)   : 101.52635299505168 x
+  speedup (naive/regblk)     : 116.36572792308195 x
+  speedup (naive/packed)     : 168.84145869269122 x
+  goto   : 88.34017435616438 ms | 48.99833806698793 GFLOPS
+  dispatch: 80.62339110273973 ms | 53.68816256418802 GFLOPS
+  speedup (naive/comptime)   : 188.61051403445066 x
+  speedup (naive/goto)       : 203.11583667838417 x
+  speedup (naive/dispatch)   : 222.55685578644585 x
+
+--- full reports ---
+
+1x11008x2048 naive:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.24726461165079364
+Total: 15.577670534
+Iters: 63
+Warmup Total: 0.315212905
+Fastest Mean: 0.24632513295454547
+Slowest Mean: 0.24781226569999998
+
+
+1x11008x2048 tiled:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.07442803598101266
+Total: 11.759629685
+Iters: 158
+Warmup Total: 0.083424392
+Fastest Mean: 0.07315370925641025
+Slowest Mean: 0.07540781387804878
+
+
+1x11008x2048 simd:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.07183540230379747
+Total: 11.349993564
+Iters: 158
+Warmup Total: 0.069742835
+Fastest Mean: 0.07066035364102564
+Slowest Mean: 0.07368894490243903
+
+
+96x11008x2048 naive:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 17.943288426666665
+Total: 53.82986528
+Iters: 3
+Warmup Total: 18.372600545
+Fastest Mean: 17.94328842666667
+Slowest Mean: 17.94328842666667
+
+
+96x11008x2048 tiled:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 1.5126458282222222
+Total: 13.613812454
+Iters: 9
+Warmup Total: 2.551435802
+Fastest Mean: 1.5126458282222224
+Slowest Mean: 1.5126458282222224
+
+
+96x11008x2048 simd:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.3592427812857143
+Total: 12.573497345
+Iters: 35
+Warmup Total: 0.352764368
+Fastest Mean: 0.353548877
+Slowest Mean: 0.36527162111764705
+
+
+1x11008x2048 parallel:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.07277906122784811
+Total: 11.499091674
+Iters: 158
+Warmup Total: 0.076596504
+Fastest Mean: 0.07213384341463415
+Slowest Mean: 0.07384148513157895
+
+
+96x11008x2048 parallel:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.17673528002666666
+Total: 13.255146002
+Iters: 75
+Warmup Total: 0.173351609
+Fastest Mean: 0.17519653188
+Slowest Mean: 0.1786396531153846
+
+
+1x11008x2048 register-blocked:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.0794214975909091
+Total: 12.230910629
+Iters: 154
+Warmup Total: 0.073049549
+Fastest Mean: 0.07778969962162162
+Slowest Mean: 0.08017260984999999
+
+
+96x11008x2048 register-blocked:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.15419736332098766
+Total: 12.489986429
+Iters: 81
+Warmup Total: 0.15413608
+Fastest Mean: 0.15306852207142857
+Slowest Mean: 0.15613258280769232
+
+
+1x11008x2048 packed:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.07413592737012986
+Total: 11.416932815
+Iters: 154
+Warmup Total: 0.076818526
+Fastest Mean: 0.07329029186842105
+Slowest Mean: 0.074556992375
+
+
+96x11008x2048 packed:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.10627300051538462
+Total: 13.815490067
+Iters: 130
+Warmup Total: 0.113711111
+Fastest Mean: 0.10520341951515151
+Slowest Mean: 0.10782497290625
+
+
+1x11008x2048 comptime:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.065324171345
+Total: 13.064834269
+Iters: 200
+Warmup Total: 0.065611305
+Fastest Mean: 0.06313931473809524
+Slowest Mean: 0.06728805555263158
+
+
+96x11008x2048 comptime:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.0951340836884058
+Total: 13.128503549
+Iters: 138
+Warmup Total: 0.088124094
+Fastest Mean: 0.09038976068571429
+Slowest Mean: 0.0968763251111111
+
+
+1x11008x2048 goto:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.06282861955714286
+Total: 13.194010107
+Iters: 210
+Warmup Total: 0.059287467
+Fastest Mean: 0.06171195995454545
+Slowest Mean: 0.063984973925
+
+
+96x11008x2048 goto:
+--------------------------------------------------------------------------------
+Benchmark Report (s)
+--------------------------------------------------------------------------------
+Mean: 0.08834017435616438
+Total: 12.897665456
+Iters: 146
+Warmup Total: 0.096258011
+Fastest Mean: 0.08587162284210527
+Slowest Mean: 0.09266976694285714
+
+
+=== total benchmark wall time: 1230.970529605 s ===
+
+================================================================================================
+PART 3: COMPARATIVE ANALYSIS - SOTA vs MOJO
+================================================================================================
+
+================================================================================================
+COMBINED BENCHMARK RESULTS - SOTA vs MOJO
+================================================================================================
+Generated: $(date)
+Platform: Linux-6.18.5-x86_64-with-glibc2.39
+CPU: x86_64
+
+================================================================================================
+SOTA BENCHMARKS (BASELINE LIBRARIES)
+================================================================================================
+
+--- Decode (1x11008x2048) ---
+  NumPy (OpenBLAS, multi-thread)    3.744 ms   12.04 GFLOPS
+  NumPy (OpenBLAS, 1 thread)        3.494 ms   12.90 GFLOPS
+  SciPy dgemm (OpenBLAS)            9.208 ms    4.90 GFLOPS
+
+--- Prefill (96x11008x2048) ---
+  NumPy (OpenBLAS, multi-thread)   20.209 ms  214.19 GFLOPS
+  NumPy (OpenBLAS, 1 thread)       21.799 ms  198.56 GFLOPS
+  SciPy dgemm (OpenBLAS)           31.813 ms  136.06 GFLOPS
+
+================================================================================================
+MOJO BENCHMARKS (OPTIMIZED KERNELS)
+================================================================================================
+
+--- Decode (1x11008x2048) ---
+  Naive         247.26 ms    0.18 GFLOPS
+  Tiled          74.43 ms    0.61 GFLOPS
+  SIMD           71.84 ms    0.63 GFLOPS
+  Parallel       72.78 ms    0.62 GFLOPS
+  Register-Blk   79.42 ms    0.57 GFLOPS
+  Packed         74.14 ms    0.61 GFLOPS
+  Comptime       65.32 ms    0.69 GFLOPS
+  GOTO           62.83 ms    0.72 GFLOPS
+  Decode         60.45 ms    0.75 GFLOPS
+  Dispatch       61.40 ms    0.73 GFLOPS
+
+Speedups vs Naive:
+  Tiled:      3.32x
+  SIMD:       3.44x
+  Parallel:   3.40x
+  Comptime:   3.79x
+  GOTO:       3.94x
+  Decode:     4.09x
+  Dispatch:   4.03x
+
+--- Prefill (96x11008x2048) ---
+  Naive         17943.29 ms    0.24 GFLOPS
+  Tiled          1512.65 ms    2.86 GFLOPS
+  SIMD            359.24 ms   12.05 GFLOPS
+  Parallel        176.74 ms   24.49 GFLOPS
+  Register-Blk    154.20 ms   28.07 GFLOPS
+  Packed          106.27 ms   40.73 GFLOPS
+  Comptime         95.13 ms   45.50 GFLOPS
+  GOTO             88.34 ms   48.99 GFLOPS
+  Dispatch         80.62 ms   53.69 GFLOPS
+
+Speedups vs Naive:
+  Tiled:       11.86x
+  SIMD:        49.95x
+  Parallel:   101.53x
+  Register-Blk: 116.37x
+  Packed:     168.84x
+  Comptime:   188.61x
+  GOTO:       203.12x
+  Dispatch:   222.56x
+
+================================================================================================
+COMPARISON: SOTA vs MOJO BEST KERNELS
+================================================================================================
+
+Decode (1x11008x2048):
+  NumPy OpenBLAS (multi)       3.744 ms   12.04 GFLOPS  [SOTA BASELINE]
+  Mojo Decode                 60.450 ms    0.75 GFLOPS  [-98.1% slower]
+
+Prefill (96x11008x2048):
+  NumPy OpenBLAS (multi)      20.209 ms  214.19 GFLOPS  [SOTA BASELINE]
+  Mojo Dispatch               80.623 ms   53.69 GFLOPS  [-75.0% slower]
+
+================================================================================================
+KEY INSIGHTS
+================================================================================================
+
+1. SOTA Baseline (NumPy/OpenBLAS):
+   - Decode: 3.7-9.2 ms (4.9-12.9 GFLOPS)
+   - Prefill: 20.2-31.8 ms (136-214 GFLOPS)
+   - Uses multi-threaded BLAS operations (AVX-512)
+
+2. Mojo Performance:
+   - Demonstrates significant optimization potential (up to 222x speedup vs naive)
+   - Best kernels use packing + comptime + dispatch
+   - Still underperforms SOTA by 75-98% on absolute timings
+   - Indicates room for further optimization in Mojo implementation
+
+3. Architecture Insights:
+   - Comptime optimization: 3.79x speedup (decode), 188.6x (prefill)
+   - GOTO pattern: 3.94x speedup (decode), 203.1x (prefill)
+   - Data packing: Critical for prefill performance (168.8x speedup)
+   - SIMD/parallelism: More impactful on larger matrices (49.9x vs 3.44x)
+
+================================================================================================
+
+================================================================================================
+BENCHMARK SUITE COMPLETE
+================================================================================================
+End time: Mon Mar  9 11:06:36 UTC 2026
+
+Summary:
+  - SOTA benchmarks: Freshly executed
+  - Mojo benchmarks: Cached results (latest available)
+  - Comparative analysis: Included
+
