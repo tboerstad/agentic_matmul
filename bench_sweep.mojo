@@ -1,4 +1,4 @@
-from gemm import _prefill_gemm
+from gemm import _prefill_gemm, _prefill_gemm_v2
 from matrix import Matrix
 import std.benchmark
 from std.sys import simd_width_of
@@ -79,5 +79,39 @@ fn main() raises:
         _prefill_gemm[DType.float64, 6, NR, 384, 8, 128, 256](c, a, b)
     var r8 = std.benchmark.run[kc384_tn128]()
     print("KC=384  TN=128 : mean", gflops(M, N, K, r8.mean("s")), "| peak", gflops(M, N, K, r8.min("s")), "GFLOPS")
+
+    # === v2 kernel ===
+    print("\n=== v2 prefill kernel (MR=6 NR=24) ===\n")
+    comptime NR_V2 = 3 * NELTS  # 24
+
+    @parameter
+    fn v2_kc256():
+        _prefill_gemm_v2[DType.float64, 6, NR_V2, 256, 8, 64, 256](c, a, b)
+    var rv1 = std.benchmark.run[v2_kc256]()
+    print("v2 KC=256  TN=64  : mean", gflops(M, N, K, rv1.mean("s")), "| peak", gflops(M, N, K, rv1.min("s")), "GFLOPS")
+
+    @parameter
+    fn v2_kc384():
+        _prefill_gemm_v2[DType.float64, 6, NR_V2, 384, 8, 64, 256](c, a, b)
+    var rv2 = std.benchmark.run[v2_kc384]()
+    print("v2 KC=384  TN=64  : mean", gflops(M, N, K, rv2.mean("s")), "| peak", gflops(M, N, K, rv2.min("s")), "GFLOPS")
+
+    @parameter
+    fn v2_kc512():
+        _prefill_gemm_v2[DType.float64, 6, NR_V2, 512, 8, 64, 256](c, a, b)
+    var rv3 = std.benchmark.run[v2_kc512]()
+    print("v2 KC=512  TN=64  : mean", gflops(M, N, K, rv3.mean("s")), "| peak", gflops(M, N, K, rv3.min("s")), "GFLOPS")
+
+    @parameter
+    fn v2_kc384_tn96():
+        _prefill_gemm_v2[DType.float64, 6, NR_V2, 384, 8, 96, 256](c, a, b)
+    var rv4 = std.benchmark.run[v2_kc384_tn96]()
+    print("v2 KC=384  TN=96  : mean", gflops(M, N, K, rv4.mean("s")), "| peak", gflops(M, N, K, rv4.min("s")), "GFLOPS")
+
+    @parameter
+    fn v2_kc512_tn96():
+        _prefill_gemm_v2[DType.float64, 6, NR_V2, 512, 8, 96, 256](c, a, b)
+    var rv5 = std.benchmark.run[v2_kc512_tn96]()
+    print("v2 KC=512  TN=96  : mean", gflops(M, N, K, rv5.mean("s")), "| peak", gflops(M, N, K, rv5.min("s")), "GFLOPS")
 
     print("\nDone.")
