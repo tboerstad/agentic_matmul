@@ -5,6 +5,8 @@ An experiment in writing optimized matmul kernels in Mojo using only [Claude Cod
 - **Decode:** 1 × 11008 × 2048 (memory-bandwidth bound)
 - **Prefill:** 96 × 11008 × 2048 (compute-bound)
 
+The project implements 12 progressively optimized kernels — from a naive triple-nested loop to a GOTO-style GEMM with automatic shape dispatch — showcasing cache blocking, SIMD vectorization, thread parallelism, register blocking, data packing, and software prefetching in Mojo.
+
 ## Results
 
 Peak GFLOPS by hardware (higher is better):
@@ -41,11 +43,32 @@ Peak GFLOPS by hardware (higher is better):
 11. **decode** — k-parallel GEMV with reduction for memory-bandwidth-bound shapes
 12. **dispatch** — Auto-selects decode (M < 8) or prefill_opt based on shape
 
+## Project structure
+
+```
+├── gemm.mojo            # All 12 GEMM kernel implementations
+├── matrix.mojo          # Matrix[dtype] struct (row-major 2D buffer)
+├── bench_matmul.mojo    # Benchmark all kernels on decode & prefill shapes
+├── bench_linalg.mojo    # Mojo stdlib linalg.matmul baseline
+├── bench_sota.py        # NumPy / SciPy dgemm / Intel MKL benchmarks
+├── test_gemm.mojo       # Correctness tests against naive reference
+├── main.mojo            # Minimal demo (2×2 multiply)
+└── setup.sh             # One-command install (uv + Mojo nightly)
+```
+
+## Prerequisites
+
+- Python >= 3.12
+- An internet connection (setup downloads uv and the Mojo nightly toolchain)
+- NumPy / SciPy (optional, only needed for `bench_sota.py`)
+
 ## Setup
 
 ```bash
 bash setup.sh
 ```
+
+This installs [uv](https://github.com/astral-sh/uv) (if not present), creates a `.venv`, and installs the Mojo nightly compiler via `modular`.
 
 ## Run
 
@@ -55,4 +78,35 @@ mojo bench_matmul.mojo        # All 12 kernels on both shapes
 mojo bench_linalg.mojo        # Mojo stdlib linalg.matmul baseline
 python bench_sota.py           # NumPy/SciPy/MKL benchmarks
 mojo test_gemm.mojo           # Correctness tests
+```
+
+## Optimization techniques
+
+Each kernel builds on the previous one, adding a new optimization:
+
+| Technique | Kernel(s) | Key idea |
+|---|---|---|
+| Cache blocking | tiled | 32×32 tiles that fit in L1/L2 |
+| SIMD vectorization | simd | `vectorize[]` over the inner dimension |
+| Thread parallelism | parallel | `parallelize[]` across tile rows |
+| Register blocking | register_blocked, packed | MR×NR micro-tiles held in registers |
+| Compile-time specialization | comptime | `comptime` parameters for loop unrolling |
+| Data packing | goto, prefill | Repack A/B panels for sequential access |
+| Software prefetching | comptime, prefill | `prefetch[]` intrinsic with configurable locality |
+| Shape dispatch | dispatch | Auto-selects GEMV (M < 8) vs GEMM path |
+
+## Interpreting results
+
+All performance numbers are hardware-specific. Theoretical peak for double-precision FMA:
+
+```
+peak GFLOPS = clock_GHz × doubles_per_SIMD × 2 (FMA) × cores
+```
+
+For example: 2.8 GHz × 8 (AVX-512) × 2 × 4 cores = 179.2 GFLOPS.
+
+Identify your hardware before comparing:
+
+```bash
+lscpu | grep -E "Model name|CPU\(s\)|MHz|cache|Flags"
 ```
