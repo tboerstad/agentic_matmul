@@ -41,11 +41,47 @@ Peak GFLOPS by hardware (higher is better):
 11. **decode** — k-parallel GEMV with reduction for memory-bandwidth-bound shapes
 12. **dispatch** — Auto-selects decode (M < 8) or prefill_opt based on shape
 
+## Key optimization techniques
+
+- **Cache blocking/tiling** — Partition C into tiles that fit in L1/L2 cache
+- **SIMD vectorization** — Process 8 float64 values per instruction (AVX-512) via `vectorize`
+- **Register blocking** — Hold MR×NR micro-tiles of C in registers across the k-loop
+- **Buffer packing** — Repack A/B panels into contiguous memory to eliminate stride overhead
+- **Loop unrolling** — Compile-time `comptime for` with KU=4–8 to reduce loop overhead
+- **Software prefetching** — LLVM prefetch intrinsics to hide memory latency
+- **Fused multiply-add** — Explicit `fma()` for single-instruction multiply-accumulate
+- **Multi-threading** — `parallelize` with per-worker private buffers to avoid synchronization
+- **Shape-based dispatch** — Automatically select bandwidth-optimal (GEMV) or compute-optimal (GEMM) kernel
+
+## Project structure
+
+```
+gemm.mojo            Core GEMM kernels (all 12 implementations)
+matrix.mojo          Generic 2D matrix container (float32/float64)
+bench_matmul.mojo    Benchmark all 12 kernels on both shapes
+bench_linalg.mojo    Mojo stdlib linalg.matmul baseline
+bench_sota.py        NumPy/SciPy/MKL comparison benchmarks
+test_gemm.mojo       Correctness tests (2×2, 1×1, non-square)
+main.mojo            Minimal entry point
+setup.sh             One-command install (uv + Mojo nightly)
+```
+
+## Requirements
+
+- Python >= 3.12
+- Mojo nightly (installed automatically by `setup.sh`)
+
+For SOTA comparison benchmarks (`bench_sota.py`):
+- NumPy (with OpenBLAS or Accelerate backend)
+- SciPy (optional, for direct BLAS dgemm)
+
 ## Setup
 
 ```bash
 bash setup.sh
 ```
+
+This installs [uv](https://github.com/astral-sh/uv) (if needed), creates a virtual environment, and installs the Mojo nightly compiler.
 
 ## Run
 
@@ -56,3 +92,15 @@ mojo bench_linalg.mojo        # Mojo stdlib linalg.matmul baseline
 python bench_sota.py           # NumPy/SciPy/MKL benchmarks
 mojo test_gemm.mojo           # Correctness tests
 ```
+
+## Understanding the numbers
+
+Theoretical peak GFLOPS for a given CPU:
+
+```
+peak = clock_GHz × doubles_per_SIMD × 2 (FMA) × cores
+```
+
+For example, a 4-core Xeon @ 2.8 GHz with AVX-512: 2.8 × 8 × 2 × 4 = **179.2 GFLOPS**.
+
+Results will vary across hardware — clock speed, core count, cache hierarchy, SIMD width, and BLAS backend all affect throughput.
