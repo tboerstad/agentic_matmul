@@ -1,0 +1,101 @@
+================================================================================================
+COMBINED BENCHMARK RESULTS - SOTA vs MOJO
+================================================================================================
+Generated: $(date)
+Platform: Linux-6.18.5-x86_64-with-glibc2.39
+CPU: x86_64
+
+================================================================================================
+SOTA BENCHMARKS (BASELINE LIBRARIES)
+================================================================================================
+
+--- Decode (1x11008x2048) ---
+  NumPy (OpenBLAS, multi-thread)    3.744 ms   12.04 GFLOPS
+  NumPy (OpenBLAS, 1 thread)        3.494 ms   12.90 GFLOPS
+  SciPy dgemm (OpenBLAS)            9.208 ms    4.90 GFLOPS
+
+--- Prefill (96x11008x2048) ---
+  NumPy (OpenBLAS, multi-thread)   20.209 ms  214.19 GFLOPS
+  NumPy (OpenBLAS, 1 thread)       21.799 ms  198.56 GFLOPS
+  SciPy dgemm (OpenBLAS)           31.813 ms  136.06 GFLOPS
+
+================================================================================================
+MOJO BENCHMARKS (OPTIMIZED KERNELS)
+================================================================================================
+
+--- Decode (1x11008x2048) ---
+  Naive         247.26 ms    0.18 GFLOPS
+  Tiled          74.43 ms    0.61 GFLOPS
+  SIMD           71.84 ms    0.63 GFLOPS
+  Parallel       72.78 ms    0.62 GFLOPS
+  Register-Blk   79.42 ms    0.57 GFLOPS
+  Packed         74.14 ms    0.61 GFLOPS
+  Comptime       65.32 ms    0.69 GFLOPS
+  GOTO           62.83 ms    0.72 GFLOPS
+  Decode         60.45 ms    0.75 GFLOPS
+  Dispatch       61.40 ms    0.73 GFLOPS
+
+Speedups vs Naive:
+  Tiled:      3.32x
+  SIMD:       3.44x
+  Parallel:   3.40x
+  Comptime:   3.79x
+  GOTO:       3.94x
+  Decode:     4.09x
+  Dispatch:   4.03x
+
+--- Prefill (96x11008x2048) ---
+  Naive         17943.29 ms    0.24 GFLOPS
+  Tiled          1512.65 ms    2.86 GFLOPS
+  SIMD            359.24 ms   12.05 GFLOPS
+  Parallel        176.74 ms   24.49 GFLOPS
+  Register-Blk    154.20 ms   28.07 GFLOPS
+  Packed          106.27 ms   40.73 GFLOPS
+  Comptime         95.13 ms   45.50 GFLOPS
+  GOTO             88.34 ms   48.99 GFLOPS
+  Dispatch         80.62 ms   53.69 GFLOPS
+
+Speedups vs Naive:
+  Tiled:       11.86x
+  SIMD:        49.95x
+  Parallel:   101.53x
+  Register-Blk: 116.37x
+  Packed:     168.84x
+  Comptime:   188.61x
+  GOTO:       203.12x
+  Dispatch:   222.56x
+
+================================================================================================
+COMPARISON: SOTA vs MOJO BEST KERNELS
+================================================================================================
+
+Decode (1x11008x2048):
+  NumPy OpenBLAS (multi)       3.744 ms   12.04 GFLOPS  [SOTA BASELINE]
+  Mojo Decode                 60.450 ms    0.75 GFLOPS  [-98.1% slower]
+
+Prefill (96x11008x2048):
+  NumPy OpenBLAS (multi)      20.209 ms  214.19 GFLOPS  [SOTA BASELINE]
+  Mojo Dispatch               80.623 ms   53.69 GFLOPS  [-75.0% slower]
+
+================================================================================================
+KEY INSIGHTS
+================================================================================================
+
+1. SOTA Baseline (NumPy/OpenBLAS):
+   - Decode: 3.7-9.2 ms (4.9-12.9 GFLOPS)
+   - Prefill: 20.2-31.8 ms (136-214 GFLOPS)
+   - Uses multi-threaded BLAS operations (AVX-512)
+
+2. Mojo Performance:
+   - Demonstrates significant optimization potential (up to 222x speedup vs naive)
+   - Best kernels use packing + comptime + dispatch
+   - Still underperforms SOTA by 75-98% on absolute timings
+   - Indicates room for further optimization in Mojo implementation
+
+3. Architecture Insights:
+   - Comptime optimization: 3.79x speedup (decode), 188.6x (prefill)
+   - GOTO pattern: 3.94x speedup (decode), 203.1x (prefill)
+   - Data packing: Critical for prefill performance (168.8x speedup)
+   - SIMD/parallelism: More impactful on larger matrices (49.9x vs 3.44x)
+
+================================================================================================
