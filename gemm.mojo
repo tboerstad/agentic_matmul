@@ -1053,14 +1053,15 @@ fn matmul_prefill[
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  optimized for prefill shapes (M >= MR).
     # Worker-based parallelism with A-panel packing amortized across j-tile batches.
-    # NR=3*NELTS improves compute intensity (6.0 vs 5.33 FLOP/byte), reducing memory
-    # pressure. KC=512 halves k-tile count for less B packing + C traffic.
+    # MR=6, NR=4*NELTS=32 matches MAX's AVX512 kernel_type=False config, giving
+    # ~10% improvement over MR=8, NR=24 due to better register utilization
+    # and sequential 4-cache-line B access pattern.
     comptime NELTS = simd_width_of[dtype]()
-    comptime MR = 8
-    comptime NR = 3 * NELTS   # 24 for float64: higher compute intensity (8×24)
+    comptime MR = 6
+    comptime NR = 4 * NELTS   # 32 for float64 AVX512
     comptime KC = 512
     comptime KU = 8
-    comptime TILE_N = 72      # 3 × NR = 3 full NR-panels per tile
+    comptime TILE_N = 64      # 2 × NR panels per tile
     comptime NC_TILES = 256
 
     if a.rows < MR:
@@ -1182,12 +1183,12 @@ fn matmul_dispatch[
     if a.rows < MR:
         _decode_gemv[dtype](c, a, b)
     else:
-        comptime NR = 3 * NELTS
+        comptime NR = 4 * NELTS  # 32 for f64 AVX512 (MAX kernel_type=False)
         comptime KC = 512
         comptime KU = 8
-        comptime TILE_N = 72
+        comptime TILE_N = 64    # 2 × NR panels per tile
         comptime NC_TILES = 256
-        _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
+        _prefill_gemm[dtype, 6, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
 
 
 # Default matmul points to the tiled version
