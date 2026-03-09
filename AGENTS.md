@@ -21,9 +21,9 @@ Check for:
 
 The theoretical peak GFLOPS formula is:
 ```
-peak = clock_GHz × doubles_per_SIMD × 2(FMA) × cores
+peak = clock_GHz × doubles_per_SIMD × 2(FMA) × FMA_units × cores
 ```
-For example: 2.8 GHz × 8 (AVX-512) × 2 × 4 cores = 179.2 GFLOPS.
+For example: 2.8 GHz × 8 (AVX-512) × 2 × 2 (dual FMA) × 4 cores = 358.4 GFLOPS.
 
 **All benchmark numbers in SOTA_RESULTS.md were measured on specific machines — see the Hardware
 Configurations table there for details (Machine A: Intel Xeon @ 2.80 GHz Skylake; Machine B:
