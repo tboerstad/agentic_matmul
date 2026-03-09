@@ -25,8 +25,9 @@ peak = clock_GHz × doubles_per_SIMD × 2(FMA) × cores
 ```
 For example: 2.8 GHz × 8 (AVX-512) × 2 × 4 cores = 179.2 GFLOPS.
 
-**All benchmark numbers in SOTA_RESULTS.md, OPENBLAS_ANALYSIS.md, and README.md were measured on
-a specific machine (Intel Xeon @ 2.80 GHz, 4 cores, AVX-512, KVM). Your results WILL differ.**
+**All benchmark numbers in SOTA_RESULTS.md were measured on specific machines — see the Hardware
+Configurations table there for details (Machine A: Intel Xeon @ 2.80 GHz Skylake; Machine B:
+Intel Xeon @ 2.10 GHz Granite Rapids; both 4 cores, AVX-512, KVM). Your results WILL differ.**
 
 ## First-time setup after cloning
 
