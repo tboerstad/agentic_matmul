@@ -15,7 +15,7 @@ Peak GFLOPS by hardware (higher is better):
 |---|---|---|---|
 | SciPy dgemm | 144.6 | 171.9 | **538.1** |
 | NumPy (Accelerate/OpenBLAS) | 216.9 | 226.0 | 483.1 |
-| **Mojo (agentic matmul)** | 208.4 | **238.5** | 189.9 |
+| **Mojo (agentic matmul)** | 208.4 | **230.3** | 189.9 |
 | Mojo linalg (stdlib) | 182.4 | 127.2 | 104.9 |
 
 ### Decode (1 × 11008 × 2048)
@@ -24,7 +24,7 @@ Peak GFLOPS by hardware (higher is better):
 |---|---|---|---|
 | SciPy dgemm | 5.5 | 7.6 | — |
 | NumPy (Accelerate/OpenBLAS) | 13.4 | 15.6 | **54.3** |
-| **Mojo (agentic matmul)** | **13.9** | 9.6 | **20.7** |
+| **Mojo (agentic matmul)** | **13.9** | **26.4** | **20.7** |
 | Mojo linalg (stdlib) | 5.9 | 4.0 | 4.8 |
 
 ## Kernel evolution
@@ -39,7 +39,7 @@ Peak GFLOPS by hardware (higher is better):
 8. **goto** — GOTO-style GEMM: B-panel packing, GEMV/GEMM dispatch
 9. **prefill** — Worker-based parallelism, A-panel packing, 8×24 microkernel
 10. **prefill_opt** — Optimized v2 microkernel with improved tiling
-11. **decode** — k-parallel GEMV with reduction for memory-bandwidth-bound shapes
+11. **decode** — j-parallel GEMV with L1-resident column chunks for decode shapes
 12. **dispatch** — Auto-selects decode (M < 8) or prefill_opt based on shape
 
 ## Setup
