@@ -1,11 +1,23 @@
-from gemm import matmul_naive, matmul_tiled, matmul_simd, matmul_parallel, matmul_register_blocked, matmul_packed, matmul_comptime, matmul_goto, matmul_decode, matmul_dispatch
+from gemm import (
+    matmul_naive,
+    matmul_tiled,
+    matmul_simd,
+    matmul_parallel,
+    matmul_register_blocked,
+    matmul_packed,
+    matmul_comptime,
+    matmul_goto,
+    matmul_prefill,
+    matmul_prefill_opt,
+    matmul_decode,
+    matmul_dispatch,
+)
 from matrix import Matrix
 import std.benchmark
 from std.time import perf_counter_ns
 
 
 fn gflops(m: Int, n: Int, k: Int, secs: Float64) -> Float64:
-    """GFLOPS for an MxNxK matmul: 2*M*N*K FLOPs."""
     return (2.0 * Float64(m) * Float64(n) * Float64(k)) / (secs * 1e9)
 
 
@@ -17,440 +29,254 @@ fn fill(mut m: Matrix, seed: Int):
 
 fn main() raises:
     var t_start = perf_counter_ns()
-    print("=== matmul benchmark: naive vs tiled vs simd vs parallel vs register-blocked vs packed vs comptime (Qwen 2.5 VL 3B shapes) ===\n")
+    print("=== matmul benchmark: all kernels (Qwen 2.5 VL 3B shapes) ===\n")
 
-    # ---- 1x11008x2048 (single-token decode) ---------------------------------
+    # ---- decode: 1x11008x2048 ------------------------------------------------
 
     comptime M1 = 1
     comptime N1 = 11008
     comptime K1 = 2048
 
-    @parameter
-    fn bench_decode_naive():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_naive(c, a, b)
+    var a1 = Matrix(M1, K1)
+    var b1 = Matrix(K1, N1)
+    var c1 = Matrix(M1, N1)
+    fill(a1, 17)
+    fill(b1, 13)
 
     @parameter
-    fn bench_decode_tiled():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_tiled(c, a, b)
+    fn d_naive():
+        matmul_naive(c1, a1, b1)
 
     @parameter
-    fn bench_decode_simd():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_simd(c, a, b)
+    fn d_tiled():
+        matmul_tiled(c1, a1, b1)
 
     @parameter
-    fn bench_decode_parallel():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_parallel(c, a, b)
+    fn d_simd():
+        matmul_simd(c1, a1, b1)
 
     @parameter
-    fn bench_decode_regblk():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_register_blocked(c, a, b)
+    fn d_parallel():
+        matmul_parallel(c1, a1, b1)
 
     @parameter
-    fn bench_decode_packed():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_packed(c, a, b)
+    fn d_regblk():
+        matmul_register_blocked(c1, a1, b1)
 
     @parameter
-    fn bench_decode_comptime():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_comptime(c, a, b)
+    fn d_packed():
+        matmul_packed(c1, a1, b1)
 
     @parameter
-    fn bench_decode_goto():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_goto(c, a, b)
-
-    print("--- 1x11008x2048 (decode) ---")
-
-    var r_naive_1 = std.benchmark.run[bench_decode_naive]()
-    var s_naive_1 = r_naive_1.mean("s")
-    print(
-        "  naive :",
-        r_naive_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_naive_1),
-        "GFLOPS",
-    )
-
-    var r_tiled_1 = std.benchmark.run[bench_decode_tiled]()
-    var s_tiled_1 = r_tiled_1.mean("s")
-    print(
-        "  tiled :",
-        r_tiled_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_tiled_1),
-        "GFLOPS",
-    )
-
-    var r_simd_1 = std.benchmark.run[bench_decode_simd]()
-    var s_simd_1 = r_simd_1.mean("s")
-    print(
-        "  simd  :",
-        r_simd_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_simd_1),
-        "GFLOPS",
-    )
-
-    var r_par_1 = std.benchmark.run[bench_decode_parallel]()
-    var s_par_1 = r_par_1.mean("s")
-    print(
-        "  parallel:",
-        r_par_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_par_1),
-        "GFLOPS",
-    )
-
-    var r_regblk_1 = std.benchmark.run[bench_decode_regblk]()
-    var s_regblk_1 = r_regblk_1.mean("s")
-    print(
-        "  regblk :",
-        r_regblk_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_regblk_1),
-        "GFLOPS",
-    )
-
-    var r_packed_1 = std.benchmark.run[bench_decode_packed]()
-    var s_packed_1 = r_packed_1.mean("s")
-    print(
-        "  packed :",
-        r_packed_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_packed_1),
-        "GFLOPS",
-    )
-
-    var r_comptime_1 = std.benchmark.run[bench_decode_comptime]()
-    var s_comptime_1 = r_comptime_1.mean("s")
-    print(
-        "  comptime:",
-        r_comptime_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_comptime_1),
-        "GFLOPS",
-    )
-
-    print("  speedup (naive/tiled)      :", s_naive_1 / s_tiled_1, "x")
-    print("  speedup (naive/simd)       :", s_naive_1 / s_simd_1, "x")
-    print("  speedup (naive/parallel)   :", s_naive_1 / s_par_1, "x")
-    print("  speedup (naive/regblk)     :", s_naive_1 / s_regblk_1, "x")
-    print("  speedup (naive/packed)     :", s_naive_1 / s_packed_1, "x")
-    var r_goto_1 = std.benchmark.run[bench_decode_goto]()
-    var s_goto_1 = r_goto_1.mean("s")
-    print(
-        "  goto   :",
-        r_goto_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_goto_1),
-        "GFLOPS",
-    )
+    fn d_comptime():
+        matmul_comptime(c1, a1, b1)
 
     @parameter
-    fn bench_decode_decode():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_decode(c, a, b)
+    fn d_goto():
+        matmul_goto(c1, a1, b1)
 
     @parameter
-    fn bench_decode_dispatch():
-        var a = Matrix(M1, K1)
-        var b = Matrix(K1, N1)
-        var c = Matrix(M1, N1)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_dispatch(c, a, b)
+    fn d_prefill():
+        matmul_prefill(c1, a1, b1)
 
-    var r_decode_1 = std.benchmark.run[bench_decode_decode]()
-    var s_decode_1 = r_decode_1.mean("s")
-    print(
-        "  decode :",
-        r_decode_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_decode_1),
-        "GFLOPS",
-    )
+    @parameter
+    fn d_prefill_opt():
+        matmul_prefill_opt(c1, a1, b1)
 
-    var r_dispatch_1 = std.benchmark.run[bench_decode_dispatch]()
-    var s_dispatch_1 = r_dispatch_1.mean("s")
-    print(
-        "  dispatch:",
-        r_dispatch_1.mean("ms"),
-        "ms |",
-        gflops(M1, N1, K1, s_dispatch_1),
-        "GFLOPS",
-    )
+    @parameter
+    fn d_decode():
+        matmul_decode(c1, a1, b1)
 
-    print("  speedup (naive/comptime)   :", s_naive_1 / s_comptime_1, "x")
-    print("  speedup (naive/goto)       :", s_naive_1 / s_goto_1, "x")
-    print("  speedup (naive/decode)     :", s_naive_1 / s_decode_1, "x")
-    print("  speedup (naive/dispatch)   :", s_naive_1 / s_dispatch_1, "x")
-    print("  speedup (goto/decode)      :", s_goto_1 / s_decode_1, "x\n")
+    @parameter
+    fn d_dispatch():
+        matmul_dispatch(c1, a1, b1)
 
-    # ---- 96x11008x2048 (prefill batch) --------------------------------------
+    print("--- 1x11008x2048 (decode) ---\n")
+
+    var r = std.benchmark.run[d_naive]()
+    var s_naive_1 = r.mean("s")
+    print("  naive       :", r.mean("ms"), "ms |", gflops(M1, N1, K1, s_naive_1), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+
+    r = std.benchmark.run[d_tiled]()
+    print("  tiled       :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_tiled_1 = r.mean("s")
+
+    r = std.benchmark.run[d_simd]()
+    print("  simd        :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_simd_1 = r.mean("s")
+
+    r = std.benchmark.run[d_parallel]()
+    print("  parallel    :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_parallel_1 = r.mean("s")
+
+    r = std.benchmark.run[d_regblk]()
+    print("  regblk      :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_regblk_1 = r.mean("s")
+
+    r = std.benchmark.run[d_packed]()
+    print("  packed      :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_packed_1 = r.mean("s")
+
+    r = std.benchmark.run[d_comptime]()
+    print("  comptime    :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_comptime_1 = r.mean("s")
+
+    r = std.benchmark.run[d_goto]()
+    print("  goto        :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_goto_1 = r.mean("s")
+
+    r = std.benchmark.run[d_prefill]()
+    print("  prefill     :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_prefill_1 = r.mean("s")
+
+    r = std.benchmark.run[d_prefill_opt]()
+    print("  prefill_opt :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_prefill_opt_1 = r.mean("s")
+
+    r = std.benchmark.run[d_decode]()
+    print("  decode      :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_decode_1 = r.mean("s")
+
+    r = std.benchmark.run[d_dispatch]()
+    print("  dispatch    :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var s_dispatch_1 = r.mean("s")
+
+    print("\n  speedup vs naive:")
+    print("    tiled       :", s_naive_1 / s_tiled_1, "x")
+    print("    simd        :", s_naive_1 / s_simd_1, "x")
+    print("    parallel    :", s_naive_1 / s_parallel_1, "x")
+    print("    regblk      :", s_naive_1 / s_regblk_1, "x")
+    print("    packed      :", s_naive_1 / s_packed_1, "x")
+    print("    comptime    :", s_naive_1 / s_comptime_1, "x")
+    print("    goto        :", s_naive_1 / s_goto_1, "x")
+    print("    prefill     :", s_naive_1 / s_prefill_1, "x")
+    print("    prefill_opt :", s_naive_1 / s_prefill_opt_1, "x")
+    print("    decode      :", s_naive_1 / s_decode_1, "x")
+    print("    dispatch    :", s_naive_1 / s_dispatch_1, "x")
+    print("")
+
+    # ---- prefill: 96x11008x2048 ----------------------------------------------
 
     comptime M2 = 96
     comptime N2 = 11008
     comptime K2 = 2048
 
-    @parameter
-    fn bench_prefill_naive():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_naive(c, a, b)
+    var a2 = Matrix(M2, K2)
+    var b2 = Matrix(K2, N2)
+    var c2 = Matrix(M2, N2)
+    fill(a2, 17)
+    fill(b2, 13)
 
     @parameter
-    fn bench_prefill_tiled():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_tiled(c, a, b)
+    fn p_naive():
+        matmul_naive(c2, a2, b2)
 
     @parameter
-    fn bench_prefill_simd():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_simd(c, a, b)
+    fn p_tiled():
+        matmul_tiled(c2, a2, b2)
 
     @parameter
-    fn bench_prefill_parallel():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_parallel(c, a, b)
+    fn p_simd():
+        matmul_simd(c2, a2, b2)
 
     @parameter
-    fn bench_prefill_regblk():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_register_blocked(c, a, b)
+    fn p_parallel():
+        matmul_parallel(c2, a2, b2)
 
     @parameter
-    fn bench_prefill_packed():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_packed(c, a, b)
+    fn p_regblk():
+        matmul_register_blocked(c2, a2, b2)
 
     @parameter
-    fn bench_prefill_comptime():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_comptime(c, a, b)
+    fn p_packed():
+        matmul_packed(c2, a2, b2)
 
     @parameter
-    fn bench_prefill_goto():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_goto(c, a, b)
-
-    print("--- 96x11008x2048 (prefill) ---")
-
-    var r_naive_2 = std.benchmark.run[bench_prefill_naive]()
-    var s_naive_2 = r_naive_2.mean("s")
-    print(
-        "  naive :",
-        r_naive_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_naive_2),
-        "GFLOPS",
-    )
-
-    var r_tiled_2 = std.benchmark.run[bench_prefill_tiled]()
-    var s_tiled_2 = r_tiled_2.mean("s")
-    print(
-        "  tiled :",
-        r_tiled_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_tiled_2),
-        "GFLOPS",
-    )
-
-    var r_simd_2 = std.benchmark.run[bench_prefill_simd]()
-    var s_simd_2 = r_simd_2.mean("s")
-    print(
-        "  simd  :",
-        r_simd_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_simd_2),
-        "GFLOPS",
-    )
-
-    var r_par_2 = std.benchmark.run[bench_prefill_parallel]()
-    var s_par_2 = r_par_2.mean("s")
-    print(
-        "  parallel:",
-        r_par_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_par_2),
-        "GFLOPS",
-    )
-
-    var r_regblk_2 = std.benchmark.run[bench_prefill_regblk]()
-    var s_regblk_2 = r_regblk_2.mean("s")
-    print(
-        "  regblk :",
-        r_regblk_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_regblk_2),
-        "GFLOPS",
-    )
-
-    var r_packed_2 = std.benchmark.run[bench_prefill_packed]()
-    var s_packed_2 = r_packed_2.mean("s")
-    print(
-        "  packed :",
-        r_packed_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_packed_2),
-        "GFLOPS",
-    )
-
-    var r_comptime_2 = std.benchmark.run[bench_prefill_comptime]()
-    var s_comptime_2 = r_comptime_2.mean("s")
-    print(
-        "  comptime:",
-        r_comptime_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_comptime_2),
-        "GFLOPS",
-    )
-
-    print("  speedup (naive/tiled)      :", s_naive_2 / s_tiled_2, "x")
-    print("  speedup (naive/simd)       :", s_naive_2 / s_simd_2, "x")
-    print("  speedup (naive/parallel)   :", s_naive_2 / s_par_2, "x")
-    print("  speedup (naive/regblk)     :", s_naive_2 / s_regblk_2, "x")
-    print("  speedup (naive/packed)     :", s_naive_2 / s_packed_2, "x")
-    var r_goto_2 = std.benchmark.run[bench_prefill_goto]()
-    var s_goto_2 = r_goto_2.mean("s")
-    print(
-        "  goto   :",
-        r_goto_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_goto_2),
-        "GFLOPS",
-    )
+    fn p_comptime():
+        matmul_comptime(c2, a2, b2)
 
     @parameter
-    fn bench_prefill_dispatch():
-        var a = Matrix(M2, K2)
-        var b = Matrix(K2, N2)
-        var c = Matrix(M2, N2)
-        fill(a, 17)
-        fill(b, 13)
-        matmul_dispatch(c, a, b)
+    fn p_goto():
+        matmul_goto(c2, a2, b2)
 
-    var r_dispatch_2 = std.benchmark.run[bench_prefill_dispatch]()
-    var s_dispatch_2 = r_dispatch_2.mean("s")
-    print(
-        "  dispatch:",
-        r_dispatch_2.mean("ms"),
-        "ms |",
-        gflops(M2, N2, K2, s_dispatch_2),
-        "GFLOPS",
-    )
+    @parameter
+    fn p_prefill():
+        matmul_prefill(c2, a2, b2)
 
-    print("  speedup (naive/comptime)   :", s_naive_2 / s_comptime_2, "x")
-    print("  speedup (naive/goto)       :", s_naive_2 / s_goto_2, "x")
-    print("  speedup (naive/dispatch)   :", s_naive_2 / s_dispatch_2, "x\n")
+    @parameter
+    fn p_prefill_opt():
+        matmul_prefill_opt(c2, a2, b2)
 
-    # ---- full reports --------------------------------------------------------
+    @parameter
+    fn p_decode():
+        matmul_decode(c2, a2, b2)
 
-    print("--- full reports ---\n")
-    print("1x11008x2048 naive:")
-    r_naive_1.print()
-    print("\n1x11008x2048 tiled:")
-    r_tiled_1.print()
-    print("\n1x11008x2048 simd:")
-    r_simd_1.print()
-    print("\n96x11008x2048 naive:")
-    r_naive_2.print()
-    print("\n96x11008x2048 tiled:")
-    r_tiled_2.print()
-    print("\n96x11008x2048 simd:")
-    r_simd_2.print()
-    print("\n1x11008x2048 parallel:")
-    r_par_1.print()
-    print("\n96x11008x2048 parallel:")
-    r_par_2.print()
-    print("\n1x11008x2048 register-blocked:")
-    r_regblk_1.print()
-    print("\n96x11008x2048 register-blocked:")
-    r_regblk_2.print()
-    print("\n1x11008x2048 packed:")
-    r_packed_1.print()
-    print("\n96x11008x2048 packed:")
-    r_packed_2.print()
-    print("\n1x11008x2048 comptime:")
-    r_comptime_1.print()
-    print("\n96x11008x2048 comptime:")
-    r_comptime_2.print()
-    print("\n1x11008x2048 goto:")
-    r_goto_1.print()
-    print("\n96x11008x2048 goto:")
-    r_goto_2.print()
+    @parameter
+    fn p_dispatch():
+        matmul_dispatch(c2, a2, b2)
+
+    print("--- 96x11008x2048 (prefill) ---\n")
+
+    r = std.benchmark.run[p_naive]()
+    var s_naive_2 = r.mean("s")
+    print("  naive       :", r.mean("ms"), "ms |", gflops(M2, N2, K2, s_naive_2), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+
+    r = std.benchmark.run[p_tiled]()
+    print("  tiled       :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_tiled_2 = r.mean("s")
+
+    r = std.benchmark.run[p_simd]()
+    print("  simd        :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_simd_2 = r.mean("s")
+
+    r = std.benchmark.run[p_parallel]()
+    print("  parallel    :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_parallel_2 = r.mean("s")
+
+    r = std.benchmark.run[p_regblk]()
+    print("  regblk      :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_regblk_2 = r.mean("s")
+
+    r = std.benchmark.run[p_packed]()
+    print("  packed      :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_packed_2 = r.mean("s")
+
+    r = std.benchmark.run[p_comptime]()
+    print("  comptime    :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_comptime_2 = r.mean("s")
+
+    r = std.benchmark.run[p_goto]()
+    print("  goto        :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_goto_2 = r.mean("s")
+
+    r = std.benchmark.run[p_prefill]()
+    print("  prefill     :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_prefill_2 = r.mean("s")
+
+    r = std.benchmark.run[p_prefill_opt]()
+    print("  prefill_opt :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_prefill_opt_2 = r.mean("s")
+
+    r = std.benchmark.run[p_decode]()
+    print("  decode      :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_decode_2 = r.mean("s")
+
+    r = std.benchmark.run[p_dispatch]()
+    print("  dispatch    :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    var s_dispatch_2 = r.mean("s")
+
+    print("\n  speedup vs naive:")
+    print("    tiled       :", s_naive_2 / s_tiled_2, "x")
+    print("    simd        :", s_naive_2 / s_simd_2, "x")
+    print("    parallel    :", s_naive_2 / s_parallel_2, "x")
+    print("    regblk      :", s_naive_2 / s_regblk_2, "x")
+    print("    packed      :", s_naive_2 / s_packed_2, "x")
+    print("    comptime    :", s_naive_2 / s_comptime_2, "x")
+    print("    goto        :", s_naive_2 / s_goto_2, "x")
+    print("    prefill     :", s_naive_2 / s_prefill_2, "x")
+    print("    prefill_opt :", s_naive_2 / s_prefill_opt_2, "x")
+    print("    decode      :", s_naive_2 / s_decode_2, "x")
+    print("    dispatch    :", s_naive_2 / s_dispatch_2, "x")
 
     var t_end = perf_counter_ns()
     var elapsed_s = Float64(t_end - t_start) / 1e9
