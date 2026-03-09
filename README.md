@@ -13,19 +13,19 @@ Peak GFLOPS by hardware (higher is better):
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Granite Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | 144.6 | 79.0 | **538.1** |
-| NumPy (Accelerate/OpenBLAS) | 216.9 | 239.4 | 483.1 |
-| **Mojo (agentic matmul)** | **208.4** | 200.0 | **189.9** |
-| Mojo linalg (stdlib) | 182.4 | 112.1 | 104.9 |
+| SciPy dgemm | 144.6 | 171.9 | **538.1** |
+| NumPy (Accelerate/OpenBLAS) | 216.9 | 226.0 | 483.1 |
+| **Mojo (agentic matmul)** | 208.4 | **238.5** | 189.9 |
+| Mojo linalg (stdlib) | 182.4 | 127.2 | 104.9 |
 
 ### Decode (1 × 11008 × 2048)
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Granite Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | 5.5 | — | — |
-| NumPy (Accelerate/OpenBLAS) | 13.4 | 14.3 | **54.3** |
-| **Mojo (agentic matmul)** | **13.9** | 20.1 | **20.7** |
-| Mojo linalg (stdlib) | 5.9 | 4.1 | 4.8 |
+| SciPy dgemm | 5.5 | 7.6 | — |
+| NumPy (Accelerate/OpenBLAS) | 13.4 | 15.6 | **54.3** |
+| **Mojo (agentic matmul)** | **13.9** | 9.6 | **20.7** |
+| Mojo linalg (stdlib) | 5.9 | 4.0 | 4.8 |
 
 ## Kernel evolution
 
