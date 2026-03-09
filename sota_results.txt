@@ -4,7 +4,7 @@ SOTA MatMul Benchmark — Qwen 2.5 VL 3B shapes (float64)
 
 Platform: Linux-6.18.5-x86_64-with-glibc2.39
 CPU: x86_64
-NumPy version: 2.4.2
+NumPy version: 2.4.3
 NumPy BLAS info: scipy-openblas 0.3.31.dev
 Intel MKL available: False
 Dtype: float64 | Warmup: 5 | Iterations: 20
@@ -17,27 +17,27 @@ Theoretical peak (Intel Xeon @ 2.80 GHz, AVX-512, float64):
 Shape: decode  (1x11008x2048)   (M=1, N=11008, K=2048)
 FLOPs per matmul: 45,088,768
 ----------------------------------------------------------------------------------------------------
-  NumPy (OpenBLAS, multi-thread)  mean=   3.329 ms  median=   3.319 ms  min=   3.149 ms  max=   3.547 ms  std=   0.118 ms  GFLOPS(mean)=  13.55  GFLOPS(peak)=  14.32
-  NumPy (OpenBLAS, 1 thread)      mean=   2.081 ms  median=   2.059 ms  min=   1.997 ms  max=   2.293 ms  std=   0.079 ms  GFLOPS(mean)=  21.67  GFLOPS(peak)=  22.58
-  SciPy dgemm (OpenBLAS)          mean=   9.004 ms  median=   8.905 ms  min=   8.467 ms  max=  10.452 ms  std=   0.468 ms  GFLOPS(mean)=   5.01  GFLOPS(peak)=   5.33
+  NumPy (OpenBLAS, multi-thread)  mean=   3.666 ms  median=   3.644 ms  min=   3.523 ms  max=   3.880 ms  std=   0.085 ms  GFLOPS(mean)=  12.30  GFLOPS(peak)=  12.80
+  NumPy (OpenBLAS, 1 thread)      mean=   4.970 ms  median=   4.627 ms  min=   4.022 ms  max=   6.741 ms  std=   0.944 ms  GFLOPS(mean)=   9.07  GFLOPS(peak)=  11.21
+  SciPy dgemm (OpenBLAS)          mean=   6.789 ms  median=   6.705 ms  min=   6.392 ms  max=   7.595 ms  std=   0.340 ms  GFLOPS(mean)=   6.64  GFLOPS(peak)=   7.05
 
 ----------------------------------------------------------------------------------------------------
 Shape: prefill (96x11008x2048)   (M=96, N=11008, K=2048)
 FLOPs per matmul: 4,328,521,728
 ----------------------------------------------------------------------------------------------------
-  NumPy (OpenBLAS, multi-thread)  mean=  18.768 ms  median=  18.632 ms  min=  18.079 ms  max=  20.092 ms  std=   0.511 ms  GFLOPS(mean)= 230.63  GFLOPS(peak)= 239.43
-  NumPy (OpenBLAS, 1 thread)      mean=  20.360 ms  median=  19.599 ms  min=  18.088 ms  max=  24.740 ms  std=   2.186 ms  GFLOPS(mean)= 212.60  GFLOPS(peak)= 239.31
-  SciPy dgemm (OpenBLAS)          mean=  28.500 ms  median=  28.432 ms  min=  26.405 ms  max=  31.575 ms  std=   1.290 ms  GFLOPS(mean)= 151.88  GFLOPS(peak)= 163.93
+  NumPy (OpenBLAS, multi-thread)  mean=  21.791 ms  median=  21.701 ms  min=  20.991 ms  max=  24.231 ms  std=   0.720 ms  GFLOPS(mean)= 198.64  GFLOPS(peak)= 206.21
+  NumPy (OpenBLAS, 1 thread)      mean=  22.364 ms  median=  22.153 ms  min=  21.665 ms  max=  24.821 ms  std=   0.840 ms  GFLOPS(mean)= 193.55  GFLOPS(peak)= 199.79
+  SciPy dgemm (OpenBLAS)          mean=  30.095 ms  median=  29.372 ms  min=  28.884 ms  max=  34.962 ms  std=   1.588 ms  GFLOPS(mean)= 143.83  GFLOPS(peak)= 149.86
 
 ====================================================================================================
 SUMMARY TABLE
 ====================================================================================================
 Shape                          Library                          Mean(ms)    Min(ms)   GFLOPS(mean)   GFLOPS(peak)
 ----------------------------------------------------------------------------------------------------
-decode  (1x11008x2048)         NumPy OpenBLAS (multi)              3.329      3.149          13.55          14.32
-decode  (1x11008x2048)         NumPy OpenBLAS (1 thread)           2.081      1.997          21.67          22.58
-decode  (1x11008x2048)         SciPy dgemm                         9.004      8.467           5.01           5.33
-prefill (96x11008x2048)        NumPy OpenBLAS (multi)             18.768     18.079         230.63         239.43
-prefill (96x11008x2048)        NumPy OpenBLAS (1 thread)          20.360     18.088         212.60         239.31
-prefill (96x11008x2048)        SciPy dgemm                        28.500     26.405         151.88         163.93
+decode  (1x11008x2048)         NumPy OpenBLAS (multi)              3.666      3.523          12.30          12.80
+decode  (1x11008x2048)         NumPy OpenBLAS (1 thread)           4.970      4.022           9.07          11.21
+decode  (1x11008x2048)         SciPy dgemm                         6.789      6.392           6.64           7.05
+prefill (96x11008x2048)        NumPy OpenBLAS (multi)             21.791     20.991         198.64         206.21
+prefill (96x11008x2048)        NumPy OpenBLAS (1 thread)          22.364     21.665         193.55         199.79
+prefill (96x11008x2048)        SciPy dgemm                        30.095     28.884         143.83         149.86
 ====================================================================================================
