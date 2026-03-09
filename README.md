@@ -13,18 +13,19 @@ Peak GFLOPS by hardware (higher is better):
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Granite Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | — | — | **538.1** |
-| NumPy (Accelerate/OpenBLAS) | 196.0 | 239.4 | 483.1 |
-| **Mojo (agentic matmul)** | — | — | **189.9** |
-| Mojo linalg (stdlib) | — | — | 104.9 |
+| SciPy dgemm | 147.6 | 79.0 | **538.1** |
+| NumPy (Accelerate/OpenBLAS) | 216.0 | 239.4 | 483.1 |
+| **Mojo (agentic matmul)** | — | 200.0 | **189.9** |
+| Mojo linalg (stdlib) | — | 112.1 | 104.9 |
 
 ### Decode (1 × 11008 × 2048)
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Granite Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| NumPy (Accelerate/OpenBLAS) | 11.3 | 14.3 | **54.3** |
+| SciPy dgemm | 5.6 | — | — |
+| NumPy (Accelerate/OpenBLAS) | 14.9 | 14.3 | **54.3** |
 | **Mojo (agentic matmul)** | — | 20.1 | **20.7** |
-| Mojo linalg (stdlib) | — | — | 4.8 |
+| Mojo linalg (stdlib) | — | 4.1 | 4.8 |
 
 ## Kernel evolution
 
