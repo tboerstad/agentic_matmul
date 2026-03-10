@@ -1327,14 +1327,13 @@ fn matmul_prefill_opt[
 fn _decode_gemv[
     dtype: DType,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # K-parallel GEMV optimized for decode (small M, large K×N).
+    # J-parallel GEMV optimized for decode (small M, large K×N).
     #
-    # Flips goto_gemv's j-parallel (88KB B stride) to k-parallel
-    # (sequential B scan). Each worker streams a contiguous slice of
-    # B rows with p-outer/i-inner order so B is loaded once and reused
-    # across all M output rows. Final lightweight reduction sums partials.
+    # Each worker owns a disjoint column chunk of C and sweeps all K rows.
+    # Per-k working set ≈ (N/nw)*8 bytes of B + same for C, which fits L1
+    # (e.g. 2752×8 = 21 KB for N=11008, nw=4).  No reduction needed.
     comptime NELTS = simd_width_of[dtype]()
-    comptime KU = 8
+    comptime KU = 4
 
     var m = a.rows
     var n = c.cols
@@ -1344,46 +1343,44 @@ fn _decode_gemv[
     var b_ptr = b.data.unsafe_ptr()
     var nw = num_physical_cores()
 
-    var part_size = nw * m * n
-    var part = alloc[Scalar[dtype]](part_size)
-
+    # Zero C
     fn _zero[width: Int](idx: Int) unified {mut}:
-        part.store[width=width](offset=idx, val=SIMD[dtype, width](0))
+        c_ptr.store[width=width](offset=idx, val=SIMD[dtype, width](0))
 
-    vectorize[NELTS, unroll_factor=4](part_size, _zero)
+    vectorize[NELTS, unroll_factor=4](m * n, _zero)
 
     fn worker(wid: Int) capturing:
-        var rows_per = ceildiv(k, nw)
-        var k0 = wid * rows_per
-        var k1 = min(k0 + rows_per, k)
-        var my_c = part + wid * m * n
-        var p = k0
+        var cols_per = ceildiv(n, nw)
+        var j0 = wid * cols_per
+        var j1 = min(j0 + cols_per, n)
+        var chunk = j1 - j0
+        if chunk <= 0:
+            return
 
-        while p + KU <= k1:
-            var b_base = b_ptr + p * n
+        for i in range(m):
+            var ci = c_ptr + i * n + j0
+            var ai = a_ptr + i * k
+            var p = 0
 
-            for i in range(m):
-                var ci = my_c + i * n
-                var ai = a_ptr + i * k
-
+            while p + KU <= k:
                 fn do_fma[width: Int](j: Int) unified {mut}:
                     var acc = ci.load[width=width](offset=j)
                     comptime for ku in range(KU):
                         acc = fma(
                             SIMD[dtype, width](ai[p + ku]),
-                            (b_base + ku * n).load[width=width](offset=j),
+                            (b_ptr + (p + ku) * n + j0).load[width=width](
+                                offset=j
+                            ),
                             acc,
                         )
                     ci.store(offset=j, val=acc)
 
-                vectorize[NELTS, unroll_factor=4](n, do_fma)
-            p += KU
+                vectorize[NELTS, unroll_factor=4](chunk, do_fma)
+                p += KU
 
-        while p < k1:
-            var bp = b_ptr + p * n
-            for i in range(m):
-                var a_val = a_ptr[i * k + p]
-                var ci = my_c + i * n
+            while p < k:
+                var a_val = ai[p]
+                var bp = b_ptr + p * n + j0
 
                 fn do_fma_tail[width: Int](j: Int) unified {mut}:
                     ci.store(
@@ -1395,32 +1392,17 @@ fn _decode_gemv[
                         ),
                     )
 
-                vectorize[NELTS](n, do_fma_tail)
-            p += 1
+                vectorize[NELTS](chunk, do_fma_tail)
+                p += 1
 
     parallelize[worker](nw, nw)
-
-    # Reduce partials into C
-    for i in range(m):
-        var ci_off = i * n
-
-        fn reduce[width: Int](j: Int) unified {mut}:
-            var s = SIMD[dtype, width](0)
-            for w in range(nw):
-                s += (part + w * m * n + ci_off).load[width=width](offset=j)
-            (c_ptr + ci_off).store(offset=j, val=s)
-
-        vectorize[NELTS](n, reduce)
-
-    part.free()
 
 
 fn matmul_decode[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  optimized for decode shapes (small M).
-    # Uses k-parallel GEMV with sequential B streaming for maximum
-    # memory bandwidth utilization.
+    # Uses j-parallel GEMV: each worker owns a column chunk that fits L1.
     _decode_gemv[dtype](c, a, b)
 
 
@@ -1428,8 +1410,8 @@ fn matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  dispatches to the fastest kernel.
-    #   - M < 8 (decode): k-parallel GEMV with sequential B streaming
-    #   - M >= 8 (prefill): optimized 8×16 GEMM with v2 microkernel
+    #   - M < 8 (decode): j-parallel GEMV with L1-resident column chunks
+    #   - M >= 8 (prefill): optimized 8×24 GEMM with v2 microkernel
     comptime NELTS = simd_width_of[dtype]()
     comptime MR = 8
 
