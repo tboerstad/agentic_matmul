@@ -18,9 +18,9 @@ fn _decode_gemv[
     var m = a.rows
     var n = c.cols
     var k = a.cols
-    var c_ptr = c.data.unsafe_ptr()
-    var a_ptr = a.data.unsafe_ptr()
-    var b_ptr = b.data.unsafe_ptr()
+    var c_ptr = c.data.unsafe_ptr().as_noalias_ptr()
+    var a_ptr = a.data.unsafe_ptr().as_noalias_ptr()
+    var b_ptr = b.data.unsafe_ptr().as_noalias_ptr()
     var nw = num_physical_cores()
 
     memset_zero(c_ptr, m * n)
