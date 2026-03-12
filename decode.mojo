@@ -6,7 +6,7 @@ from std.sys import num_physical_cores, simd_width_of
 
 
 fn _decode_gemv[
-    dtype: DType,
+    dtype: DType, KU: Int = 4,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # J-parallel GEMV optimized for decode (small M, large K×N).
     #
@@ -14,7 +14,6 @@ fn _decode_gemv[
     # Per-k working set ≈ (N/nw)*8 bytes of B + same for C, which fits L1
     # (e.g. 2752×8 = 21 KB for N=11008, nw=4).  No reduction needed.
     comptime NELTS = simd_width_of[dtype]()
-    comptime KU = 4
 
     var m = a.rows
     var n = c.cols
