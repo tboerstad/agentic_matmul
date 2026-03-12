@@ -34,12 +34,13 @@ fn _decode_gemv[
         if chunk <= 0:
             return
 
+        var b_col = b_ptr + j0  # base pointer into worker's column chunk
+        var k_main = (k // KU) * KU
+
         for i in range(m):
             var ci = c_ptr + i * n + j0
             var ai = a_ptr + i * k
             var p = 0
-
-            var k_main = (k // KU) * KU
 
             while p < k_main:
                 fn do_fma[width: Int](j: Int) unified {mut}:
@@ -47,9 +48,7 @@ fn _decode_gemv[
                     comptime for ku in range(KU):
                         acc = fma(
                             SIMD[dtype, width](ai[p + ku]),
-                            (b_ptr + (p + ku) * n + j0).load[width=width](
-                                offset=j
-                            ),
+                            (b_col + (p + ku) * n).load[width=width](offset=j),
                             acc,
                         )
                     ci.store(offset=j, val=acc)
@@ -63,7 +62,7 @@ fn _decode_gemv[
                         offset=j,
                         val=fma(
                             SIMD[dtype, width](ai[p]),
-                            (b_ptr + p * n + j0).load[width=width](offset=j),
+                            (b_col + p * n).load[width=width](offset=j),
                             ci.load[width=width](offset=j),
                         ),
                     )
