@@ -42,7 +42,9 @@ fn _decode_gemv[
             var ai = a_ptr + i * k
             var p = 0
 
-            while p + KU <= k:
+            var k_main = (k // KU) * KU
+
+            while p < k_main:
                 fn do_fma[width: Int](j: Int) unified {mut}:
                     var acc = ci.load[width=width](offset=j)
                     comptime for ku in range(KU):
@@ -59,20 +61,17 @@ fn _decode_gemv[
                 p += KU
 
             while p < k:
-                var a_val = ai[p]
-                var bp = b_ptr + p * n + j0
-
-                fn do_fma_tail[width: Int](j: Int) unified {mut}:
+                fn do_fma1[width: Int](j: Int) unified {mut}:
                     ci.store(
                         offset=j,
                         val=fma(
-                            SIMD[dtype, width](a_val),
-                            bp.load[width=width](offset=j),
+                            SIMD[dtype, width](ai[p]),
+                            (b_ptr + p * n + j0).load[width=width](offset=j),
                             ci.load[width=width](offset=j),
                         ),
                     )
 
-                vectorize[NELTS](chunk, do_fma_tail)
+                vectorize[NELTS, unroll_factor=4](chunk, do_fma1)
                 p += 1
 
     parallelize[worker](nw, nw)
