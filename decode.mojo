@@ -1,6 +1,6 @@
 from matrix import Matrix
 from std.algorithm.functional import parallelize, vectorize
-from std.math import ceildiv, fma
+from std.math import ceildiv
 from std.memory import memset_zero
 from std.sys import num_physical_cores, simd_width_of
 
@@ -45,11 +45,9 @@ fn _decode_gemv[
                 fn do_fma[width: Int](j: Int) unified {mut}:
                     var acc = ci.load[width=width](offset=j)
                     comptime for ku in range(KU):
-                        acc = fma(
-                            SIMD[dtype, width](ai[p + ku]),
-                            (b_col + (p + ku) * n).load[width=width](offset=j),
-                            acc,
-                        )
+                        var a_broadcast = SIMD[dtype, width](ai[p + ku])
+                        var b_vec = (b_col + (p + ku) * n).load[width=width](offset=j)
+                        acc = a_broadcast.fma(b_vec, acc)
                     ci.store(offset=j, val=acc)
 
                 vectorize[NELTS, unroll_factor=4](chunk, do_fma)
@@ -57,14 +55,9 @@ fn _decode_gemv[
 
             while p < k:
                 fn do_fma1[width: Int](j: Int) unified {mut}:
-                    ci.store(
-                        offset=j,
-                        val=fma(
-                            SIMD[dtype, width](ai[p]),
-                            (b_col + p * n).load[width=width](offset=j),
-                            ci.load[width=width](offset=j),
-                        ),
-                    )
+                    var a_broadcast = SIMD[dtype, width](ai[p])
+                    var b_vec = (b_col + p * n).load[width=width](offset=j)
+                    ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
 
                 vectorize[NELTS, unroll_factor=4](chunk, do_fma1)
                 p += 1
