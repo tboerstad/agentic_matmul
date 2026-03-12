@@ -1,6 +1,7 @@
 from matrix import Matrix
 from std.algorithm.functional import parallelize, vectorize
 from std.math import ceildiv, fma
+from std.memory import memset_zero
 from std.sys import num_physical_cores, simd_width_of
 
 
@@ -23,11 +24,7 @@ fn _decode_gemv[
     var b_ptr = b.data.unsafe_ptr()
     var nw = num_physical_cores()
 
-    # Zero C
-    fn _zero[width: Int](idx: Int) unified {mut}:
-        c_ptr.store[width=width](offset=idx, val=SIMD[dtype, width](0))
-
-    vectorize[NELTS, unroll_factor=4](m * n, _zero)
+    memset_zero(c_ptr, m * n)
 
     fn worker(wid: Int) capturing:
         var cols_per = ceildiv(n, nw)
