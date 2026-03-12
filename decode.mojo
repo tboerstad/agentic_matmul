@@ -46,7 +46,7 @@ fn _decode_gemv[
                     var acc = ci.load[width=width](offset=j)
                     comptime for ku in range(KU):
                         var a_broadcast = SIMD[dtype, width](ai[p + ku])
-                        var b_vec = (b_col + (p + ku) * n).load[width=width](offset=j)
+                        var b_vec = (b_col + (p + ku) * n).load[width=width, invariant=True](offset=j)
                         acc = a_broadcast.fma(b_vec, acc)
                     ci.store(offset=j, val=acc)
 
@@ -56,7 +56,7 @@ fn _decode_gemv[
             while p < k:
                 fn do_fma1[width: Int](j: Int) unified {mut}:
                     var a_broadcast = SIMD[dtype, width](ai[p])
-                    var b_vec = (b_col + p * n).load[width=width](offset=j)
+                    var b_vec = (b_col + p * n).load[width=width, invariant=True](offset=j)
                     ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
 
                 vectorize[NELTS, unroll_factor=4](chunk, do_fma1)
