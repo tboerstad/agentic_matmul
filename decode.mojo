@@ -6,13 +6,15 @@ from std.sys import num_physical_cores, simd_width_of
 
 
 fn _decode_gemv[
-    dtype: DType, KU: Int = 4,
+    dtype: DType, //, KU: Int = 4,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # J-parallel GEMV optimized for decode (small M, large K×N).
     #
     # Each worker owns a disjoint column chunk of C and sweeps all K rows.
     # Per-k working set ≈ (N/nw)*8 bytes of B + same for C, which fits L1
     # (e.g. 2752×8 = 21 KB for N=11008, nw=4).  No reduction needed.
+    comptime assert KU > 0, "KU must be positive"
+    comptime assert dtype.is_floating_point(), "GEMV requires floating-point dtype"
     comptime NELTS = simd_width_of[dtype]()
 
     var m = a.rows
@@ -65,9 +67,7 @@ fn _decode_gemv[
     parallelize[worker](nw, nw)
 
 
-fn matmul_decode[
-    dtype: DType = DType.float64
-](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+fn matmul_decode[dtype: DType, //](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  optimized for decode shapes (small M).
     # Uses j-parallel GEMV: each worker owns a column chunk that fits L1.
-    _decode_gemv[dtype](c, a, b)
+    _decode_gemv(c, a, b)

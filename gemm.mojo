@@ -1336,7 +1336,7 @@ fn matmul_dispatch[
     comptime MR = 8
 
     if a.rows < MR:
-        _decode_gemv[dtype](c, a, b)
+        _decode_gemv(c, a, b)
     else:
         comptime NR = 3 * NELTS   # 24: AVX-512 has 32 regs, no pressure
         comptime KC = 256
