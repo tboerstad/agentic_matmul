@@ -5,7 +5,7 @@ from std.memory import memset_zero
 from std.sys import num_physical_cores, simd_width_of
 
 
-fn _decode_gemv[
+fn matmul_decode[
     dtype: DType, //, KU: Int = 4,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # J-parallel GEMV optimized for decode (small M, large K×N).
@@ -65,9 +65,3 @@ fn _decode_gemv[
                 p += 1
 
     parallelize[worker](nw, nw)
-
-
-fn matmul_decode[dtype: DType, //](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # Computes C = A * B  —  optimized for decode shapes (small M).
-    # Uses j-parallel GEMV: each worker owns a column chunk that fits L1.
-    _decode_gemv(c, a, b)
