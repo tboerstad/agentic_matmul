@@ -1377,12 +1377,12 @@ fn _decode_gemv[
                 p += KU
 
             while p < k:
-                fn do_fma1[width: Int](j: Int) unified {mut}:
+                fn do_fma_tail[width: Int](j: Int) unified {mut}:
                     var a_broadcast = SIMD[dtype, width](ai[p])
                     var b_vec = (b_col + p * n).load[width=width, invariant=True](offset=j)
                     ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
 
-                vectorize[NELTS, unroll_factor=4](chunk, do_fma1)
+                vectorize[NELTS, unroll_factor=4](chunk, do_fma_tail)
                 p += 1
 
     parallelize[worker](nw, nw)
