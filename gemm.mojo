@@ -2,7 +2,6 @@ from matrix import Matrix
 from std.algorithm.functional import parallelize, vectorize
 from std.collections import InlineArray
 from std.math import ceildiv, fma
-from std.memory import memset_zero
 from std.memory.unsafe_pointer import alloc
 from std.sys import num_physical_cores, simd_width_of
 from std.sys.intrinsics import prefetch, PrefetchOptions
@@ -1152,11 +1151,17 @@ fn _prefill_gemm_v2[
                     for jp in range(num_panels):
                         var jr = jp * NR
                         var bp_panel = bp_worker + jp * kc * NR
+                        var jj_limit = min(NR, tile_n - jr)
 
-                        if jr + NR > tile_n:
-                            var jj_limit = tile_n - jr
-                            i = 0
-                            while i + MR <= m:
+                        var i = 0
+                        var ip = 0
+
+                        # Consolidated full and remainder row loops
+                        while i + MR <= m:
+                            var ap_panel = ap_worker + ip * MR * kc
+
+                            if jj_limit < NR:
+                                # Remainder columns: scalar fallback per row
                                 for ii in range(i, i + MR):
                                     var c_row = c_ptr + ii * n + j0 + jr
                                     var a_row = a_ptr + ii * k + pc
@@ -1174,55 +1179,42 @@ fn _prefill_gemm_v2[
                                         c_row.store(offset=jj, val=acc)
 
                                     vectorize[NELTS](jj_limit, fma_remainder)
-                                i += MR
-                            while i < m:
-                                var c_row = c_ptr + i * n + j0 + jr
-
-                                fn fma_tail_rem[width: Int](jj: Int) unified {mut}:
-                                    var acc = c_row.load[width=width](offset=jj)
-                                    if is_first_k:
-                                        acc = SIMD[dtype, width](0)
-                                    for ppk in range(kc):
-                                        acc = fma(
-                                            SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
-                                            (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                            acc,
-                                        )
-                                    c_row.store(offset=jj, val=acc)
-
-                                vectorize[NELTS](jj_limit, fma_tail_rem)
-                                i += 1
-                            continue
-
-                        # ---- Full NR-panel: optimized microkernel ----
-                        i = 0
-                        ip = 0
-                        while i + MR <= m:
-                            var ap_panel = ap_worker + ip * MR * kc
-
-                            comptime for mr in range(MR):
-                                prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
-                                    c_ptr + (i + mr) * n + j0 + jr
-                                )
-
-                            var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
-                                fill=SIMD[dtype, NELTS](0)
-                            )
-                            if not is_first_k:
+                            else:
+                                # Fast path: Full MR×NR microkernel
                                 comptime for mr in range(MR):
-                                    comptime for nr in range(NR_VECS):
-                                        acc[mr * NR_VECS + nr] = (
-                                            c_ptr + (i + mr) * n + j0 + jr
-                                        ).load[width=NELTS](offset=nr * NELTS)
+                                    prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
+                                        c_ptr + (i + mr) * n + j0 + jr
+                                    )
 
-                            # K-loop: direct A access, mr-outer for broadcast reuse
-                            var pk = 0
-                            var pk_end = kc - (kc % KU)
-                            while pk < pk_end:
-                                comptime for ku in range(KU):
-                                    var bp_k = bp_panel + (pk + ku) * NR
-                                    var ap_k = ap_panel + (pk + ku) * MR
-                                    # mr-outer: broadcast A[mr] once, use for all B vectors
+                                var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
+                                    fill=SIMD[dtype, NELTS](0)
+                                )
+                                if not is_first_k:
+                                    comptime for mr in range(MR):
+                                        comptime for nr in range(NR_VECS):
+                                            acc[mr * NR_VECS + nr] = (
+                                                c_ptr + (i + mr) * n + j0 + jr
+                                            ).load[width=NELTS](offset=nr * NELTS)
+
+                                var pk = 0
+                                var pk_end = kc - (kc % KU)
+                                while pk < pk_end:
+                                    comptime for ku in range(KU):
+                                        var bp_k = bp_panel + (pk + ku) * NR
+                                        var ap_k = ap_panel + (pk + ku) * MR
+                                        comptime for mr in range(MR):
+                                            var a_bc = SIMD[dtype, NELTS](ap_k[mr])
+                                            comptime for nr in range(NR_VECS):
+                                                acc[mr * NR_VECS + nr] = fma(
+                                                    a_bc, bp_k.load[width=NELTS](
+                                                        offset=nr * NELTS
+                                                    ), acc[mr * NR_VECS + nr]
+                                                )
+                                    pk += KU
+
+                                while pk < kc:
+                                    var bp_k = bp_panel + pk * NR
+                                    var ap_k = ap_panel + pk * MR
                                     comptime for mr in range(MR):
                                         var a_bc = SIMD[dtype, NELTS](ap_k[mr])
                                         comptime for nr in range(NR_VECS):
@@ -1231,32 +1223,19 @@ fn _prefill_gemm_v2[
                                                     offset=nr * NELTS
                                                 ), acc[mr * NR_VECS + nr]
                                             )
-                                pk += KU
+                                    pk += 1
 
-                            while pk < kc:
-                                var bp_k = bp_panel + pk * NR
-                                var ap_k = ap_panel + pk * MR
                                 comptime for mr in range(MR):
-                                    var a_bc = SIMD[dtype, NELTS](ap_k[mr])
                                     comptime for nr in range(NR_VECS):
-                                        acc[mr * NR_VECS + nr] = fma(
-                                            a_bc, bp_k.load[width=NELTS](
-                                                offset=nr * NELTS
-                                            ), acc[mr * NR_VECS + nr]
+                                        (c_ptr + (i + mr) * n + j0 + jr).store(
+                                            offset=nr * NELTS, val=acc[mr * NR_VECS + nr],
                                         )
-                                pk += 1
-
-                            comptime for mr in range(MR):
-                                comptime for nr in range(NR_VECS):
-                                    (c_ptr + (i + mr) * n + j0 + jr).store(
-                                        offset=nr * NELTS, val=acc[mr * NR_VECS + nr],
-                                    )
 
                             i += MR
                             ip += 1
 
+                        # Shared tail for remaining rows (< MR)
                         while i < m:
-                            var jj_limit = min(NR, tile_n - jr)
                             var c_row = c_ptr + i * n + j0 + jr
 
                             fn fma_tail[width: Int](jj: Int) unified {mut}:
@@ -1332,8 +1311,8 @@ fn _decode_gemv[
     # J-parallel GEMV optimized for decode (small M, large K×N).
     #
     # Each worker owns a disjoint column chunk of C and sweeps all K rows.
-    # Per-k working set ≈ (N/nw)*8 bytes of B + same for C, which fits L1
-    # (e.g. 2752×8 = 21 KB for N=11008, nw=4).  No reduction needed.
+    # K-loop is inside the vectorize closure: accumulator stays in registers
+    # for the entire dot-product, storing to C just once (no memset_zero needed).
     comptime assert KU > 0, "KU must be positive"
     comptime assert dtype.is_floating_point(), "GEMV requires floating-point dtype"
     comptime NELTS = simd_width_of[dtype]()
@@ -1346,8 +1325,6 @@ fn _decode_gemv[
     var b_ptr = b.data.unsafe_ptr().as_noalias_ptr()
     var nw = num_physical_cores()
 
-    memset_zero(c_ptr, m * n)
-
     fn worker(wid: Int) capturing:
         var cols_per = ceildiv(n, nw)
         var j0 = wid * cols_per
@@ -1356,34 +1333,33 @@ fn _decode_gemv[
         if chunk <= 0:
             return
 
-        var b_col = b_ptr + j0  # base pointer into worker's column chunk
+        var b_col = b_ptr + j0
         var k_main = (k // KU) * KU
 
         for i in range(m):
             var ci = c_ptr + i * n + j0
             var ai = a_ptr + i * k
-            var p = 0
 
-            while p < k_main:
-                fn do_fma[width: Int](j: Int) unified {mut}:
-                    var acc = ci.load[width=width](offset=j)
+            fn do_fma[width: Int](j: Int) unified {mut}:
+                var acc = SIMD[dtype, width](0)
+                var p = 0
+
+                while p < k_main:
                     comptime for ku in range(KU):
                         var a_broadcast = SIMD[dtype, width](ai[p + ku])
                         var b_vec = (b_col + (p + ku) * n).load[width=width, invariant=True](offset=j)
                         acc = a_broadcast.fma(b_vec, acc)
-                    ci.store(offset=j, val=acc)
+                    p += KU
 
-                vectorize[NELTS, unroll_factor=4](chunk, do_fma)
-                p += KU
-
-            while p < k:
-                fn do_fma_tail[width: Int](j: Int) unified {mut}:
+                while p < k:
                     var a_broadcast = SIMD[dtype, width](ai[p])
                     var b_vec = (b_col + p * n).load[width=width, invariant=True](offset=j)
-                    ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
+                    acc = a_broadcast.fma(b_vec, acc)
+                    p += 1
 
-                vectorize[NELTS, unroll_factor=4](chunk, do_fma_tail)
-                p += 1
+                ci.store(offset=j, val=acc)
+
+            vectorize[NELTS, unroll_factor=4](chunk, do_fma)
 
     parallelize[worker](nw, nw)
 
