@@ -2,6 +2,7 @@ from matrix import Matrix
 from std.algorithm.functional import parallelize, vectorize
 from std.collections import InlineArray
 from std.math import ceildiv, fma
+from std.memory import memset_zero
 from std.memory.unsafe_pointer import alloc
 from std.sys import num_physical_cores, simd_width_of
 from std.sys.intrinsics import prefetch, PrefetchOptions
@@ -1311,8 +1312,8 @@ fn _decode_gemv[
     # J-parallel GEMV optimized for decode (small M, large K×N).
     #
     # Each worker owns a disjoint column chunk of C and sweeps all K rows.
-    # K-loop is inside the vectorize closure: accumulator stays in registers
-    # for the entire dot-product, storing to C just once (no memset_zero needed).
+    # Per-k working set ≈ (N/nw)*8 bytes of B + same for C, which fits L1
+    # (e.g. 2752×8 = 21 KB for N=11008, nw=4).  No reduction needed.
     comptime assert KU > 0, "KU must be positive"
     comptime assert dtype.is_floating_point(), "GEMV requires floating-point dtype"
     comptime NELTS = simd_width_of[dtype]()
@@ -1325,6 +1326,8 @@ fn _decode_gemv[
     var b_ptr = b.data.unsafe_ptr().as_noalias_ptr()
     var nw = num_physical_cores()
 
+    memset_zero(c_ptr, m * n)
+
     fn worker(wid: Int) capturing:
         var cols_per = ceildiv(n, nw)
         var j0 = wid * cols_per
@@ -1333,33 +1336,34 @@ fn _decode_gemv[
         if chunk <= 0:
             return
 
-        var b_col = b_ptr + j0
+        var b_col = b_ptr + j0  # base pointer into worker's column chunk
         var k_main = (k // KU) * KU
 
         for i in range(m):
             var ci = c_ptr + i * n + j0
             var ai = a_ptr + i * k
+            var p = 0
 
-            fn do_fma[width: Int](j: Int) unified {mut}:
-                var acc = SIMD[dtype, width](0)
-                var p = 0
-
-                while p < k_main:
+            while p < k_main:
+                fn do_fma[width: Int](j: Int) unified {mut}:
+                    var acc = ci.load[width=width](offset=j)
                     comptime for ku in range(KU):
                         var a_broadcast = SIMD[dtype, width](ai[p + ku])
                         var b_vec = (b_col + (p + ku) * n).load[width=width, invariant=True](offset=j)
                         acc = a_broadcast.fma(b_vec, acc)
-                    p += KU
+                    ci.store(offset=j, val=acc)
 
-                while p < k:
+                vectorize[NELTS, unroll_factor=4](chunk, do_fma)
+                p += KU
+
+            while p < k:
+                fn do_fma_tail[width: Int](j: Int) unified {mut}:
                     var a_broadcast = SIMD[dtype, width](ai[p])
                     var b_vec = (b_col + p * n).load[width=width, invariant=True](offset=j)
-                    acc = a_broadcast.fma(b_vec, acc)
-                    p += 1
+                    ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
 
-                ci.store(offset=j, val=acc)
-
-            vectorize[NELTS, unroll_factor=4](chunk, do_fma)
+                vectorize[NELTS, unroll_factor=4](chunk, do_fma_tail)
+                p += 1
 
     parallelize[worker](nw, nw)
 
