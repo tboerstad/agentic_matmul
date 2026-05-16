@@ -27,6 +27,20 @@ Peak GFLOPS by hardware (higher is better):
 | **Mojo (agentic matmul)** | 13.9 | **33.8** | 20.7 |
 | Mojo linalg (stdlib) | 5.9 | **12.6** | 4.8 |
 
+### Tuning history on Skylake AVX-512 (cloud VM, 4 cores)
+
+Recent retune of the prefill register tile from 8×24 (KU=4) to 6×32 (KU=2) on
+the cloud Skylake VM:
+
+| Kernel | Prefill peak GFLOPS | Decode peak GFLOPS |
+|---|---|---|
+| NumPy OpenBLAS                                   | 170.9 | 11.3 |
+| dispatch (pre-tune, MR=8 NR=24 KU=4)             | 163.7 | 10.0 |
+| **dispatch (this VM SOTA, MR=6 NR=32 KU=2)**     | **175.7** | **10.0** |
+
+(Prefill peaks above 170 GFLOPS beat the OpenBLAS reference for this shape on
+this hardware; decode is DRAM-bandwidth bound near ~30 GB/s aggregate.)
+
 ## Kernel evolution
 
 1. **naive** — Triple-nested loop baseline
@@ -38,9 +52,9 @@ Peak GFLOPS by hardware (higher is better):
 7. **comptime** — Compile-time parameter specialization
 8. **goto** — GOTO-style GEMM: B-panel packing, GEMV/GEMM dispatch
 9. **prefill** — Worker-based parallelism, A-panel packing, 8×24 microkernel
-10. **prefill_opt** — Optimized v2 microkernel with improved tiling
+10. **prefill_opt** — v3 microkernel (hoisted B-load + noalias) with 6×32 register tile, KU=2, KC=256, TILE_N=128 — tuned by empirical scan
 11. **decode** — j-parallel GEMV with L1-resident column chunks for decode shapes
-12. **dispatch** — Auto-selects decode (M < 8) or prefill_opt based on shape
+12. **dispatch** — Auto-selects decode (M < 6) or prefill_opt based on shape
 
 ## Setup
 
