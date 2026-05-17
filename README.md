@@ -13,19 +13,19 @@ Peak GFLOPS by hardware (higher is better):
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Emerald Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | 144.6 | 197.9 | **538.1** |
-| NumPy (Accelerate/OpenBLAS) | 216.9 | 252.0 | **483.1** |
-| **Mojo (agentic matmul)** | 208.4 | **253.0** | 189.9 |
-| Mojo linalg (stdlib) | 182.4 | **244.7** | 104.9 |
+| SciPy dgemm | 144.6 | 200.8 | **538.1** |
+| NumPy (Accelerate/OpenBLAS) | 216.9 | 235.6 | **483.1** |
+| **Mojo (agentic matmul)** | 208.4 | **256.6** | 189.9 |
+| Mojo linalg (stdlib) | 182.4 | **247.5** | 104.9 |
 
 ### Decode (1 × 11008 × 2048)
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Emerald Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | **5.5** | 8.6 | — |
-| NumPy (Accelerate/OpenBLAS) | 13.4 | 25.1 | **54.3** |
-| **Mojo (agentic matmul)** | 13.9 | **33.8** | 20.7 |
-| Mojo linalg (stdlib) | 5.9 | **12.6** | 4.8 |
+| SciPy dgemm | **5.5** | 8.4 | — |
+| NumPy (Accelerate/OpenBLAS) | 13.4 | **25.0** | **54.3** |
+| **Mojo (agentic matmul)** | 13.9 | 13.3 | 20.7 |
+| Mojo linalg (stdlib) | 5.9 | 12.8 | 4.8 |
 
 ### Tuning history on Skylake AVX-512 (cloud VM, 4 cores)
 
@@ -40,25 +40,6 @@ the cloud Skylake VM:
 
 (Prefill peaks above 170 GFLOPS beat the OpenBLAS reference for this shape on
 this hardware; decode is DRAM-bandwidth bound near ~30 GB/s aggregate.)
-
-### After Mojo 1.0.0b2 migration (Xeon @ 2.10 GHz, AVX-512, 4 cores, cloud VM)
-
-The codebase has been migrated from the older `fn`/`unified {mut}`/`@parameter`
-syntax to current Mojo (`def`, explicit `{mut/read ...}` capture lists,
-`parallelize(func, n, w)`, `TileTensor`, `comptime` for compile-time bindings).
-Re-measured peaks on the migration VM:
-
-| Kernel              | Prefill peak GFLOPS | Decode peak GFLOPS |
-|---|---|---|
-| Mojo `prefill_opt`  | **256.6**           | 10.9               |
-| Mojo `prefill`      | 245.7               | 11.2               |
-| Mojo `dispatch`     | 242.1               | **13.3**           |
-| Mojo linalg stdlib  | 247.5               | 12.8               |
-| NumPy OpenBLAS      | 235.6               | 25.0               |
-| SciPy dgemm         | 200.8               | 8.4                |
-
-Mojo wins on the compute-bound prefill shape; NumPy still wins on the
-bandwidth-bound decode shape.
 
 ## Kernel evolution
 
