@@ -1466,7 +1466,7 @@ def _decode_fma_chunk_tail[
 
 
 def _decode_gemv[
-    dtype: DType, //, KU: Int = 4,
+    dtype: DType, //, KU: Int = 8,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # J-parallel GEMV optimized for decode (small M, large K×N).
     #
