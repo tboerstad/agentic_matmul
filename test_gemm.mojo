@@ -1,7 +1,8 @@
 from std.testing import assert_almost_equal, TestSuite
+from std.collections import List
 
 
-fn matmul(
+def matmul(
     mut c: List[Float64],
     a: List[Float64],
     b: List[Float64],

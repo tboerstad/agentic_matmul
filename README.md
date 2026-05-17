@@ -41,6 +41,25 @@ the cloud Skylake VM:
 (Prefill peaks above 170 GFLOPS beat the OpenBLAS reference for this shape on
 this hardware; decode is DRAM-bandwidth bound near ~30 GB/s aggregate.)
 
+### After Mojo 1.0.0b2 migration (Xeon @ 2.10 GHz, AVX-512, 4 cores, cloud VM)
+
+The codebase has been migrated from the older `fn`/`unified {mut}`/`@parameter`
+syntax to current Mojo (`def`, explicit `{mut/read ...}` capture lists,
+`parallelize(func, n, w)`, `TileTensor`, `comptime` for compile-time bindings).
+Re-measured peaks on the migration VM:
+
+| Kernel              | Prefill peak GFLOPS | Decode peak GFLOPS |
+|---|---|---|
+| Mojo `prefill_opt`  | **256.6**           | 10.9               |
+| Mojo `prefill`      | 245.7               | 11.2               |
+| Mojo `dispatch`     | 242.1               | **13.3**           |
+| Mojo linalg stdlib  | 247.5               | 12.8               |
+| NumPy OpenBLAS      | 235.6               | 25.0               |
+| SciPy dgemm         | 200.8               | 8.4                |
+
+Mojo wins on the compute-bound prefill shape; NumPy still wins on the
+bandwidth-bound decode shape.
+
 ## Kernel evolution
 
 1. **naive** — Triple-nested loop baseline

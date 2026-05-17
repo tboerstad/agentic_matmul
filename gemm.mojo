@@ -8,7 +8,7 @@ from std.sys import num_physical_cores, simd_width_of
 from std.sys.intrinsics import prefetch, PrefetchOptions
 
 
-fn matmul_naive[dtype: DType = DType.float64](
+def matmul_naive[dtype: DType = DType.float64](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
     # Computes C = A * B  —  simple triple-nested loop (ijk order).
@@ -25,7 +25,7 @@ fn matmul_naive[dtype: DType = DType.float64](
             c[i, j] = dot
 
 
-fn matmul_tiled[dtype: DType = DType.float64](
+def matmul_tiled[dtype: DType = DType.float64](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
     # Computes C = A * B  —  tiled / cache-blocked version.
@@ -66,7 +66,7 @@ fn matmul_tiled[dtype: DType = DType.float64](
                             c[i, j] = c[i, j] + a_val * b[p, j]
 
 
-fn matmul_simd[dtype: DType = DType.float64](
+def matmul_simd[dtype: DType = DType.float64](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
     # Computes C = A * B  —  tiled + SIMD vectorized version.
@@ -107,7 +107,7 @@ fn matmul_simd[dtype: DType = DType.float64](
                         var c_row = c_ptr + i * n + j0
                         var b_row = b_ptr + p * n + j0
 
-                        fn fma[width: Int](j: Int) unified {mut}:
+                        def fma[width: Int](j: Int) {mut c_row, read b_row, read a_val}:
                             var c_vec = c_row.load[width=width](offset=j)
                             var b_vec = b_row.load[width=width](offset=j)
                             c_row.store(offset=j, val=c_vec + a_val * b_vec)
@@ -115,7 +115,7 @@ fn matmul_simd[dtype: DType = DType.float64](
                         vectorize[NELTS](tile_n, fma)
 
 
-fn matmul_parallel[dtype: DType = DType.float64](
+def matmul_parallel[dtype: DType = DType.float64](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
     # Computes C = A * B  —  tiled + SIMD + multi-threaded version.
@@ -139,11 +139,16 @@ fn matmul_parallel[dtype: DType = DType.float64](
     # Number of row tiles
     var num_i_tiles = ceildiv(m, TILE)
 
-    fn process_i_tile(tile_idx: Int) capturing:
+    def process_i_tile(tile_idx: Int) {mut c_ptr, mut b_ptr, mut a_ptr, read m, read n, read k}:
         var i0 = tile_idx * TILE
         var i_end = i0 + TILE
         if i_end > m:
             i_end = m
+
+        # Hoisted captures for inner closure (rule #5)
+        var a_val = Scalar[dtype](0)
+        var c_row = c_ptr
+        var b_row = b_ptr
 
         for p0 in range(0, k, TILE):
             var p_end = p0 + TILE
@@ -158,21 +163,21 @@ fn matmul_parallel[dtype: DType = DType.float64](
                 # Micro-kernel with SIMD vectorization on j dimension
                 for i in range(i0, i_end):
                     for p in range(p0, p_end):
-                        var a_val = a_ptr[i * k + p]
-                        var c_row = c_ptr + i * n + j0
-                        var b_row = b_ptr + p * n + j0
+                        a_val = a_ptr[i * k + p]
+                        c_row = c_ptr + i * n + j0
+                        b_row = b_ptr + p * n + j0
 
-                        fn fma[width: Int](j: Int) unified {mut}:
+                        def fma[width: Int](j: Int) {mut c_row, read b_row, read a_val}:
                             var c_vec = c_row.load[width=width](offset=j)
                             var b_vec = b_row.load[width=width](offset=j)
                             c_row.store(offset=j, val=c_vec + a_val * b_vec)
 
                         vectorize[NELTS](tile_n, fma)
 
-    parallelize[process_i_tile](num_i_tiles, num_physical_cores())
+    parallelize(process_i_tile, num_i_tiles, num_physical_cores())
 
 
-fn matmul_register_blocked[
+def matmul_register_blocked[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  tiled + SIMD + parallel + register-blocked.
@@ -198,11 +203,19 @@ fn matmul_register_blocked[
 
     var num_i_tiles = ceildiv(m, TILE)
 
-    fn process_i_tile(tile_idx: Int) capturing:
+    def process_i_tile(tile_idx: Int) {mut c_ptr, mut b_ptr, mut a_ptr, read m, read n, read k}:
         var i0 = tile_idx * TILE
         var i_end = i0 + TILE
         if i_end > m:
             i_end = m
+
+        # Hoisted captures for inner closures (rule #5)
+        var a_vals = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
+        var b_row = b_ptr
+        var c_row = c_ptr
+        var a_val = Scalar[dtype](0)
+        var i = i0
+        var j0_h = 0
 
         for p0 in range(0, k, TILE):
             var p_end = p0 + TILE
@@ -213,25 +226,23 @@ fn matmul_register_blocked[
                 if j_end > n:
                     j_end = n
                 var tile_n = j_end - j0
+                j0_h = j0
 
                 # Register-blocked: process MR rows at a time
-                var i = i0
+                i = i0
                 while i + MR <= i_end:
                     for p in range(p0, p_end):
-                        var a_vals = InlineArray[Scalar[dtype], MR](
-                            fill=Scalar[dtype](0)
-                        )
                         comptime for mr in range(MR):
                             a_vals[mr] = a_ptr[(i + mr) * k + p]
-                        var b_row = b_ptr + p * n + j0
+                        b_row = b_ptr + p * n + j0
 
-                        fn fma_mr[width: Int](j: Int) unified {mut}:
+                        def fma_mr[width: Int](j: Int) {mut c_ptr, read b_row, read a_vals, read i, read n, read j0_h}:
                             var b_vec = b_row.load[width=width](offset=j)
                             comptime for mr in range(MR):
-                                var c_row = c_ptr + (i + mr) * n + j0
-                                c_row.store(
+                                var c_row_inner = c_ptr + (i + mr) * n + j0_h
+                                c_row_inner.store(
                                     offset=j,
-                                    val=c_row.load[width=width](offset=j)
+                                    val=c_row_inner.load[width=width](offset=j)
                                     + a_vals[mr] * b_vec,
                                 )
 
@@ -241,11 +252,11 @@ fn matmul_register_blocked[
                 # Handle remaining rows (< MR) with single-row SIMD
                 while i < i_end:
                     for p in range(p0, p_end):
-                        var a_val = a_ptr[i * k + p]
-                        var c_row = c_ptr + i * n + j0
-                        var b_row = b_ptr + p * n + j0
+                        a_val = a_ptr[i * k + p]
+                        c_row = c_ptr + i * n + j0
+                        b_row = b_ptr + p * n + j0
 
-                        fn fma[width: Int](j: Int) unified {mut}:
+                        def fma[width: Int](j: Int) {mut c_row, read b_row, read a_val}:
                             var c_vec = c_row.load[width=width](offset=j)
                             var b_vec = b_row.load[width=width](offset=j)
                             c_row.store(
@@ -255,10 +266,10 @@ fn matmul_register_blocked[
                         vectorize[NELTS](tile_n, fma)
                     i += 1
 
-    parallelize[process_i_tile](num_i_tiles, num_physical_cores())
+    parallelize(process_i_tile, num_i_tiles, num_physical_cores())
 
 
-fn matmul_packed[
+def matmul_packed[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  tiled + SIMD + parallel + register-blocked
@@ -287,43 +298,53 @@ fn matmul_packed[
 
     var num_i_tiles = ceildiv(m, TILE)
 
-    fn process_i_tile(tile_idx: Int) capturing:
+    def process_i_tile(tile_idx: Int) {mut c_ptr, mut b_ptr, mut a_ptr, read m, read n, read k}:
         var i0 = tile_idx * TILE
         var i_end = i0 + TILE
         if i_end > m:
             i_end = m
+
+        # Hoisted captures for inner closures (rule #5)
+        var i = i0
+        var j0_h = 0
+        var p0_h = 0
+        var tile_k_h = 0
+        var c_row = c_ptr
 
         for p0 in range(0, k, TILE):
             var p_end = p0 + TILE
             if p_end > k:
                 p_end = k
             var tile_k = p_end - p0
+            p0_h = p0
+            tile_k_h = tile_k
             for j0 in range(0, n, TILE):
                 var j_end = j0 + TILE
                 if j_end > n:
                     j_end = n
                 var tile_n = j_end - j0
+                j0_h = j0
 
                 # Register-accumulation micro-kernel: j→p loop order
                 # For each j-block, load C into registers, accumulate
                 # across all k-values, then store back once.
-                var i = i0
+                i = i0
                 while i + MR <= i_end:
-                    fn process_cols[width: Int](j: Int) unified {mut}:
+                    def process_cols[width: Int](j: Int) {mut c_ptr, mut b_ptr, mut a_ptr, read i, read j0_h, read p0_h, read tile_k_h, read n, read k}:
                         var acc = InlineArray[SIMD[dtype, width], MR](
                             fill=SIMD[dtype, width](0)
                         )
                         comptime for mr in range(MR):
-                            acc[mr] = (c_ptr + (i + mr) * n + j0).load[
+                            acc[mr] = (c_ptr + (i + mr) * n + j0_h).load[
                                 width=width
                             ](offset=j)
-                        for pk in range(tile_k):
-                            var p = p0 + pk
-                            var b_vec = (b_ptr + p * n + j0).load[width=width](offset=j)
+                        for pk in range(tile_k_h):
+                            var p = p0_h + pk
+                            var b_vec = (b_ptr + p * n + j0_h).load[width=width](offset=j)
                             comptime for mr in range(MR):
                                 acc[mr] += a_ptr[(i + mr) * k + p] * b_vec
                         comptime for mr in range(MR):
-                            (c_ptr + (i + mr) * n + j0).store(
+                            (c_ptr + (i + mr) * n + j0_h).store(
                                 offset=j, val=acc[mr]
                             )
 
@@ -332,33 +353,33 @@ fn matmul_packed[
 
                 # Handle remaining rows (< MR) with single-row accumulation
                 while i < i_end:
-                    var c_row = c_ptr + i * n + j0
+                    c_row = c_ptr + i * n + j0
 
-                    fn process_tail_col[width: Int](j: Int) unified {mut}:
+                    def process_tail_col[width: Int](j: Int) {mut c_row, mut b_ptr, mut a_ptr, read i, read j0_h, read p0_h, read tile_k_h, read n, read k}:
                         var acc = c_row.load[width=width](offset=j)
-                        for pk in range(tile_k):
-                            var p = p0 + pk
-                            acc += a_ptr[i * k + p] * (b_ptr + p * n + j0).load[width=width](offset=j)
+                        for pk in range(tile_k_h):
+                            var p = p0_h + pk
+                            acc += a_ptr[i * k + p] * (b_ptr + p * n + j0_h).load[width=width](offset=j)
                         c_row.store(offset=j, val=acc)
 
                     vectorize[NELTS](tile_n, process_tail_col)
                     i += 1
 
-    parallelize[process_i_tile](num_i_tiles, num_physical_cores())
+    parallelize(process_i_tile, num_i_tiles, num_physical_cores())
 
 
 @always_inline
-fn _zero_fill[dtype: DType](mut c: Matrix[dtype]):
+def _zero_fill[dtype: DType](mut c: Matrix[dtype]):
     """Vectorized zero-fill using SIMD stores."""
     comptime NELTS = simd_width_of[dtype]()
     var ptr = c.data.unsafe_ptr()
     var count = c.rows * c.cols
-    fn _zero[width: Int](idx: Int) unified {mut}:
+    def _zero[width: Int](idx: Int) {mut ptr}:
         ptr.store[width=width](offset=idx, val=SIMD[dtype, width](0))
     vectorize[NELTS](count, _zero)
 
 
-fn matmul_comptime[
+def matmul_comptime[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  compile-time optimized GOTO-style GEMM.
@@ -396,12 +417,20 @@ fn matmul_comptime[
 
     var num_j_tiles = ceildiv(n, TILE_N)
 
-    fn process_j_tile(j_tile_idx: Int) capturing:
+    def process_j_tile(j_tile_idx: Int) {mut c_ptr, mut b_ptr, mut a_ptr, read m, read n, read k}:
         var j0 = j_tile_idx * TILE_N
         var j_end = j0 + TILE_N
         if j_end > n:
             j_end = n
         var tile_n = j_end - j0
+
+        # Hoisted captures for inner closures (rule #5)
+        var i = 0
+        var rem_base = 0
+        var p0_h = 0
+        var tile_k_h = 0
+        var j0_h = j0
+        var c_row = c_ptr
 
         # j→k→i order: C panel stays in L1 across all k-tiles
         for p0 in range(0, k, TILE_K):
@@ -409,9 +438,11 @@ fn matmul_comptime[
             if p_end > k:
                 p_end = k
             var tile_k = p_end - p0
+            p0_h = p0
+            tile_k_h = tile_k
 
             # ---- MR-blocked rows with comptime micro-kernel ----
-            var i = 0
+            i = 0
             while i + MR <= m:
                 # Process MICRO_N columns at a time
                 var j = 0
@@ -481,9 +512,9 @@ fn matmul_comptime[
 
                 # Remainder columns: vectorize handles SIMD + scalar
                 var rem_n = tile_n - j
-                var rem_base = j0 + j
+                rem_base = j0 + j
 
-                fn process_rem[width: Int](j_off: Int) unified {mut}:
+                def process_rem[width: Int](j_off: Int) {mut c_ptr, mut b_ptr, mut a_ptr, read i, read rem_base, read p0_h, read tile_k_h, read n, read k}:
                     var jj = rem_base + j_off
                     var acc_r = InlineArray[SIMD[dtype, width], MR](
                         fill=SIMD[dtype, width](0)
@@ -492,8 +523,8 @@ fn matmul_comptime[
                         acc_r[mr] = (c_ptr + (i + mr) * n + jj).load[
                             width=width
                         ]()
-                    for pk in range(tile_k):
-                        var p = p0 + pk
+                    for pk in range(tile_k_h):
+                        var p = p0_h + pk
                         var bv = (b_ptr + p * n + jj).load[width=width]()
                         comptime for mr in range(MR):
                             acc_r[mr] += a_ptr[(i + mr) * k + p] * bv
@@ -506,23 +537,24 @@ fn matmul_comptime[
                 i += MR
 
             # Handle remaining rows (< MR) with single-row SIMD
+            j0_h = j0
             while i < m:
-                var c_row = c_ptr + i * n + j0
+                c_row = c_ptr + i * n + j0
 
-                fn process_tail[width: Int](j: Int) unified {mut}:
+                def process_tail[width: Int](j: Int) {mut c_row, mut b_ptr, mut a_ptr, read i, read j0_h, read p0_h, read tile_k_h, read n, read k}:
                     var acc = c_row.load[width=width](offset=j)
-                    for pk in range(tile_k):
-                        var p = p0 + pk
-                        acc += a_ptr[i * k + p] * (b_ptr + p * n + j0).load[width=width](offset=j)
+                    for pk in range(tile_k_h):
+                        var p = p0_h + pk
+                        acc += a_ptr[i * k + p] * (b_ptr + p * n + j0_h).load[width=width](offset=j)
                     c_row.store(offset=j, val=acc)
 
                 vectorize[NELTS](tile_n, process_tail)
                 i += 1
 
-    parallelize[process_j_tile](num_j_tiles, num_physical_cores())
+    parallelize(process_j_tile, num_j_tiles, num_physical_cores())
 
 
-fn _goto_gemv[
+def _goto_gemv[
     dtype: DType,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # GEMV path for small M (esp. M=1 decode).
@@ -540,17 +572,22 @@ fn _goto_gemv[
 
     var num_j_tiles = ceildiv(n, TILE_J)
 
-    fn process_gemv_tile(tile_idx: Int) capturing:
+    def process_gemv_tile(tile_idx: Int) {mut c_ptr, mut a_ptr, mut b_ptr, read m, read n, read k}:
         var j0 = tile_idx * TILE_J
         var tile_n = min(TILE_J, n - j0)
 
-        for i in range(m):
-            var c_row = c_ptr + i * n + j0
-            for p in range(k):
-                var a_val = a_ptr[i * k + p]
-                var b_row = b_ptr + p * n + j0
+        # Hoisted captures for inner closure (rule #5)
+        var c_row = c_ptr
+        var b_row = b_ptr
+        var a_val = Scalar[dtype](0)
 
-                fn fma_gemv[width: Int](j: Int) unified {mut}:
+        for i in range(m):
+            c_row = c_ptr + i * n + j0
+            for p in range(k):
+                a_val = a_ptr[i * k + p]
+                b_row = b_ptr + p * n + j0
+
+                def fma_gemv[width: Int](j: Int) {mut c_row, read b_row, read a_val}:
                     c_row.store(
                         offset=j,
                         val=c_row.load[width=width](offset=j)
@@ -559,10 +596,10 @@ fn _goto_gemv[
 
                 vectorize[NELTS](tile_n, fma_gemv)
 
-    parallelize[process_gemv_tile](num_j_tiles, num_physical_cores())
+    parallelize(process_gemv_tile, num_j_tiles, num_physical_cores())
 
 
-fn _goto_gemm[
+def _goto_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # j-parallel GOTO GEMM with per-tile B-panel packing.
@@ -588,16 +625,27 @@ fn _goto_gemm[
     var bp_total = num_j_tiles * bp_per_tile
     var bp_buf = alloc[Scalar[dtype]](bp_total)
 
-    fn process_j_tile(j_tile_idx: Int) capturing:
+    def process_j_tile(j_tile_idx: Int) {mut c_ptr, mut a_ptr, mut b_ptr, mut bp_buf, read m, read n, read k, read bp_per_tile}:
         var j0 = j_tile_idx * TILE_N
         var tile_n = min(TILE_N, n - j0)
         var num_panels = ceildiv(tile_n, NR)
 
         var bp_tile = bp_buf + j_tile_idx * bp_per_tile
 
+        # Hoisted captures for inner closures (rule #5)
+        var c_row = c_ptr
+        var a_row = a_ptr
+        var bp_panel = bp_tile
+        var first_k = False
+        var kc_h = 0
+        var pc_h = 0
+        var i_h = 0
+
         for pc in range(0, k, KC):
             var kc = min(KC, k - pc)
-            var first_k = (pc == 0)
+            first_k = (pc == 0)
+            kc_h = kc
+            pc_h = pc
 
             # Pack B[pc:pc+kc, j0:j0+tile_n] into NR-panels
             for jp in range(num_panels):
@@ -627,19 +675,19 @@ fn _goto_gemm[
             while i + MR <= m:
                 for jp in range(num_panels):
                     var jr = jp * NR
-                    var bp_panel = bp_tile + jp * kc * NR
+                    bp_panel = bp_tile + jp * kc * NR
                     if jr + NR > tile_n:
                         # Opt 2: vectorize handles SIMD + scalar remainder
                         var jj_limit = tile_n - jr
                         for ii in range(i, i + MR):
-                            var c_row = c_ptr + ii * n + j0 + jr
-                            var a_row = a_ptr + ii * k + pc
+                            c_row = c_ptr + ii * n + j0 + jr
+                            a_row = a_ptr + ii * k + pc
 
-                            fn fma_remainder[width: Int](jj: Int) unified {mut}:
+                            def fma_remainder[width: Int](jj: Int) {mut c_row, read a_row, read bp_panel, read first_k, read kc_h}:
                                 var acc = c_row.load[width=width](offset=jj)
                                 if first_k:
                                     acc = SIMD[dtype, width](0)
-                                for ppk in range(kc):
+                                for ppk in range(kc_h):
                                     acc = fma(
                                         SIMD[dtype, width](a_row[ppk]),
                                         (bp_panel + ppk * NR).load[width=width](offset=jj),
@@ -722,19 +770,20 @@ fn _goto_gemm[
 
             # Handle remaining rows (< MR) — vectorize replaces manual loops
             while i < m:
+                i_h = i
                 for jp in range(num_panels):
                     var jr = jp * NR
-                    var bp_panel = bp_tile + jp * kc * NR
+                    bp_panel = bp_tile + jp * kc * NR
                     var jj_limit = min(NR, tile_n - jr)
-                    var c_row = c_ptr + i * n + j0 + jr
+                    c_row = c_ptr + i * n + j0 + jr
 
-                    fn fma_tail[width: Int](jj: Int) unified {mut}:
+                    def fma_tail[width: Int](jj: Int) {mut c_row, mut a_ptr, read bp_panel, read first_k, read kc_h, read pc_h, read i_h, read k}:
                         var acc = c_row.load[width=width](offset=jj)
                         if first_k:
                             acc = SIMD[dtype, width](0)
-                        for ppk in range(kc):
+                        for ppk in range(kc_h):
                             acc = fma(
-                                SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                SIMD[dtype, width](a_ptr[i_h * k + pc_h + ppk]),
                                 (bp_panel + ppk * NR).load[width=width](offset=jj),
                                 acc,
                             )
@@ -743,11 +792,11 @@ fn _goto_gemm[
                     vectorize[NELTS](jj_limit, fma_tail)
                 i += 1
 
-    parallelize[process_j_tile](num_j_tiles, num_physical_cores())
+    parallelize(process_j_tile, num_j_tiles, num_physical_cores())
     bp_buf.free()
 
 
-fn matmul_goto[
+def matmul_goto[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  GOTO-style GEMM with B-panel packing.
@@ -766,7 +815,7 @@ fn matmul_goto[
         _goto_gemm[dtype, MR, NR, KC, KU, TILE_N](c, a, b)
 
 
-fn _prefill_gemm[
+def _prefill_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
     NC_TILES: Int,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -813,7 +862,7 @@ fn _prefill_gemm[
     var ap_total = num_workers * ap_per_worker
     var ap_buf = alloc[Scalar[dtype]](ap_total)
 
-    fn process_worker(worker_id: Int) capturing:
+    def process_worker(worker_id: Int) {mut c_ptr, mut a_ptr, mut b_ptr, mut bp_buf, mut ap_buf, read m, read n, read k, read num_j_tiles, read num_workers, read bp_per_worker, read ap_per_worker}:
         var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
         var j_tile_start = worker_id * tiles_per_worker
         var j_tile_end = min(j_tile_start + tiles_per_worker, num_j_tiles)
@@ -823,6 +872,15 @@ fn _prefill_gemm[
         var bp_worker = bp_buf + worker_id * bp_per_worker
         var ap_worker = ap_buf + worker_id * ap_per_worker
 
+        # Hoisted captures for inner closures (rule #5)
+        var c_row = c_ptr
+        var a_row = a_ptr
+        var bp_panel = bp_worker
+        var is_first_k = False
+        var kc_h = 0
+        var pc_h = 0
+        var i_h = 0
+
         # Process j-tiles in batches of NC_TILES to keep C in L2
         var jt = j_tile_start
         while jt < j_tile_end:
@@ -830,7 +888,9 @@ fn _prefill_gemm[
 
             for pc in range(0, k, KC):
                 var kc = min(KC, k - pc)
-                var is_first_k = (pc == 0)
+                is_first_k = (pc == 0)
+                kc_h = kc
+                pc_h = pc
 
                 # ---- Pack A once for this k-tile (shared across all j-tiles in batch) ----
                 var i = 0
@@ -896,7 +956,7 @@ fn _prefill_gemm[
                     # reducing L2→L1 traffic by ~2.7× vs the i-outer order.
                     for jp in range(num_panels):
                         var jr = jp * NR
-                        var bp_panel = bp_worker + jp * kc * NR
+                        bp_panel = bp_worker + jp * kc * NR
 
                         if jr + NR > tile_n:
                             # Remainder columns: process all i-panels
@@ -904,14 +964,14 @@ fn _prefill_gemm[
                             i = 0
                             while i + MR <= m:
                                 for ii in range(i, i + MR):
-                                    var c_row = c_ptr + ii * n + j0 + jr
-                                    var a_row = a_ptr + ii * k + pc
+                                    c_row = c_ptr + ii * n + j0 + jr
+                                    a_row = a_ptr + ii * k + pc
 
-                                    fn fma_remainder[width: Int](jj: Int) unified {mut}:
+                                    def pf_fma_remainder[width: Int](jj: Int) {mut c_row, read a_row, read bp_panel, read is_first_k, read kc_h}:
                                         var acc = c_row.load[width=width](offset=jj)
                                         if is_first_k:
                                             acc = SIMD[dtype, width](0)
-                                        for ppk in range(kc):
+                                        for ppk in range(kc_h):
                                             acc = fma(
                                                 SIMD[dtype, width](a_row[ppk]),
                                                 (bp_panel + ppk * NR).load[width=width](offset=jj),
@@ -919,25 +979,26 @@ fn _prefill_gemm[
                                             )
                                         c_row.store(offset=jj, val=acc)
 
-                                    vectorize[NELTS](jj_limit, fma_remainder)
+                                    vectorize[NELTS](jj_limit, pf_fma_remainder)
                                 i += MR
                             # Remaining rows for remainder columns
                             while i < m:
-                                var c_row = c_ptr + i * n + j0 + jr
+                                i_h = i
+                                c_row = c_ptr + i * n + j0 + jr
 
-                                fn fma_tail_rem[width: Int](jj: Int) unified {mut}:
+                                def pf_fma_tail_rem[width: Int](jj: Int) {mut c_row, mut a_ptr, read bp_panel, read is_first_k, read kc_h, read pc_h, read i_h, read k}:
                                     var acc = c_row.load[width=width](offset=jj)
                                     if is_first_k:
                                         acc = SIMD[dtype, width](0)
-                                    for ppk in range(kc):
+                                    for ppk in range(kc_h):
                                         acc = fma(
-                                            SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                            SIMD[dtype, width](a_ptr[i_h * k + pc_h + ppk]),
                                             (bp_panel + ppk * NR).load[width=width](offset=jj),
                                             acc,
                                         )
                                     c_row.store(offset=jj, val=acc)
 
-                                vectorize[NELTS](jj_limit, fma_tail_rem)
+                                vectorize[NELTS](jj_limit, pf_fma_tail_rem)
                                 i += 1
                             continue
 
@@ -1024,32 +1085,33 @@ fn _prefill_gemm[
 
                         # Handle remaining rows (< MR)
                         while i < m:
+                            i_h = i
                             var jj_limit = min(NR, tile_n - jr)
-                            var c_row = c_ptr + i * n + j0 + jr
+                            c_row = c_ptr + i * n + j0 + jr
 
-                            fn fma_tail[width: Int](jj: Int) unified {mut}:
+                            def pf_fma_tail[width: Int](jj: Int) {mut c_row, mut a_ptr, read bp_panel, read is_first_k, read kc_h, read pc_h, read i_h, read k}:
                                 var acc = c_row.load[width=width](offset=jj)
                                 if is_first_k:
                                     acc = SIMD[dtype, width](0)
-                                for ppk in range(kc):
+                                for ppk in range(kc_h):
                                     acc = fma(
-                                        SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                        SIMD[dtype, width](a_ptr[i_h * k + pc_h + ppk]),
                                         (bp_panel + ppk * NR).load[width=width](offset=jj),
                                         acc,
                                     )
                                 c_row.store(offset=jj, val=acc)
 
-                            vectorize[NELTS](jj_limit, fma_tail)
+                            vectorize[NELTS](jj_limit, pf_fma_tail)
                             i += 1
 
             jt += NC_TILES
 
-    parallelize[process_worker](num_workers, num_workers)
+    parallelize(process_worker, num_workers, num_workers)
     bp_buf.free()
     ap_buf.free()
 
 
-fn _prefill_gemm_v3[
+def _prefill_gemm_v3[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
     NC_TILES: Int,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1083,7 +1145,7 @@ fn _prefill_gemm_v3[
     var ap_total = num_workers * ap_per_worker
     var ap_buf = alloc[Scalar[dtype]](ap_total)
 
-    fn process_worker(worker_id: Int) capturing:
+    def process_worker(worker_id: Int) {mut c_ptr, mut a_ptr, mut b_ptr, mut bp_buf, mut ap_buf, read m, read n, read k, read num_j_tiles, read num_workers, read bp_per_worker, read ap_per_worker}:
         var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
         var j_tile_start = worker_id * tiles_per_worker
         var j_tile_end = min(j_tile_start + tiles_per_worker, num_j_tiles)
@@ -1093,13 +1155,24 @@ fn _prefill_gemm_v3[
         var bp_worker = bp_buf + worker_id * bp_per_worker
         var ap_worker = ap_buf + worker_id * ap_per_worker
 
+        # Hoisted captures for inner closures (rule #5)
+        var c_row = c_ptr
+        var a_row = a_ptr
+        var bp_panel = bp_worker
+        var is_first_k = False
+        var kc_h = 0
+        var pc_h = 0
+        var i_h = 0
+
         var jt = j_tile_start
         while jt < j_tile_end:
             var jt_batch_end = min(jt + NC_TILES, j_tile_end)
 
             for pc in range(0, k, KC):
                 var kc = min(KC, k - pc)
-                var is_first_k = (pc == 0)
+                is_first_k = (pc == 0)
+                kc_h = kc
+                pc_h = pc
 
                 # Pack A: KC outer, MR inner so each pk gives MR contiguous doubles
                 var i = 0
@@ -1153,21 +1226,21 @@ fn _prefill_gemm_v3[
 
                     for jp in range(num_panels):
                         var jr = jp * NR
-                        var bp_panel = bp_worker + jp * kc * NR
+                        bp_panel = bp_worker + jp * kc * NR
 
                         if jr + NR > tile_n:
                             var jj_limit = tile_n - jr
                             i = 0
                             while i + MR <= m:
                                 for ii in range(i, i + MR):
-                                    var c_row = c_ptr + ii * n + j0 + jr
-                                    var a_row = a_ptr + ii * k + pc
+                                    c_row = c_ptr + ii * n + j0 + jr
+                                    a_row = a_ptr + ii * k + pc
 
-                                    fn fma_remainder[width: Int](jj: Int) unified {mut}:
+                                    def v3_fma_remainder[width: Int](jj: Int) {mut c_row, read a_row, read bp_panel, read is_first_k, read kc_h}:
                                         var acc = c_row.load[width=width](offset=jj)
                                         if is_first_k:
                                             acc = SIMD[dtype, width](0)
-                                        for ppk in range(kc):
+                                        for ppk in range(kc_h):
                                             acc = fma(
                                                 SIMD[dtype, width](a_row[ppk]),
                                                 (bp_panel + ppk * NR).load[width=width](offset=jj),
@@ -1175,24 +1248,25 @@ fn _prefill_gemm_v3[
                                             )
                                         c_row.store(offset=jj, val=acc)
 
-                                    vectorize[NELTS](jj_limit, fma_remainder)
+                                    vectorize[NELTS](jj_limit, v3_fma_remainder)
                                 i += MR
                             while i < m:
-                                var c_row = c_ptr + i * n + j0 + jr
+                                i_h = i
+                                c_row = c_ptr + i * n + j0 + jr
 
-                                fn fma_tail_rem[width: Int](jj: Int) unified {mut}:
+                                def v3_fma_tail_rem[width: Int](jj: Int) {mut c_row, mut a_ptr, read bp_panel, read is_first_k, read kc_h, read pc_h, read i_h, read k}:
                                     var acc = c_row.load[width=width](offset=jj)
                                     if is_first_k:
                                         acc = SIMD[dtype, width](0)
-                                    for ppk in range(kc):
+                                    for ppk in range(kc_h):
                                         acc = fma(
-                                            SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                            SIMD[dtype, width](a_ptr[i_h * k + pc_h + ppk]),
                                             (bp_panel + ppk * NR).load[width=width](offset=jj),
                                             acc,
                                         )
                                     c_row.store(offset=jj, val=acc)
 
-                                vectorize[NELTS](jj_limit, fma_tail_rem)
+                                vectorize[NELTS](jj_limit, v3_fma_tail_rem)
                                 i += 1
                             continue
 
@@ -1268,32 +1342,33 @@ fn _prefill_gemm_v3[
                             ip += 1
 
                         while i < m:
+                            i_h = i
                             var jj_limit = min(NR, tile_n - jr)
-                            var c_row = c_ptr + i * n + j0 + jr
+                            c_row = c_ptr + i * n + j0 + jr
 
-                            fn fma_tail[width: Int](jj: Int) unified {mut}:
+                            def v3_fma_tail[width: Int](jj: Int) {mut c_row, mut a_ptr, read bp_panel, read is_first_k, read kc_h, read pc_h, read i_h, read k}:
                                 var acc = c_row.load[width=width](offset=jj)
                                 if is_first_k:
                                     acc = SIMD[dtype, width](0)
-                                for ppk in range(kc):
+                                for ppk in range(kc_h):
                                     acc = fma(
-                                        SIMD[dtype, width](a_ptr[i * k + pc + ppk]),
+                                        SIMD[dtype, width](a_ptr[i_h * k + pc_h + ppk]),
                                         (bp_panel + ppk * NR).load[width=width](offset=jj),
                                         acc,
                                     )
                                 c_row.store(offset=jj, val=acc)
 
-                            vectorize[NELTS](jj_limit, fma_tail)
+                            vectorize[NELTS](jj_limit, v3_fma_tail)
                             i += 1
 
             jt += NC_TILES
 
-    parallelize[process_worker](num_workers, num_workers)
+    parallelize(process_worker, num_workers, num_workers)
     bp_buf.free()
     ap_buf.free()
 
 
-fn matmul_prefill[
+def matmul_prefill[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  optimized for prefill shapes (M >= MR).
@@ -1315,7 +1390,7 @@ fn matmul_prefill[
         _prefill_gemm[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
 
 
-fn matmul_prefill_opt[
+def matmul_prefill_opt[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Optimized prefill kernel using v3 microkernel.
@@ -1342,7 +1417,7 @@ fn matmul_prefill_opt[
         _prefill_gemm_v3[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
 
 
-fn _decode_gemv[
+def _decode_gemv[
     dtype: DType, //, KU: Int = 4,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # J-parallel GEMV optimized for decode (small M, large K×N).
@@ -1364,7 +1439,7 @@ fn _decode_gemv[
 
     memset_zero(c_ptr, m * n)
 
-    fn worker(wid: Int) capturing:
+    def worker(wid: Int) {mut c_ptr, mut a_ptr, mut b_ptr, read m, read n, read k, read nw}:
         var cols_per = ceildiv(n, nw)
         var j0 = wid * cols_per
         var j1 = min(j0 + cols_per, n)
@@ -1375,17 +1450,23 @@ fn _decode_gemv[
         var b_col = b_ptr + j0  # base pointer into worker's column chunk
         var k_main = (k // KU) * KU
 
+        # Hoisted captures for inner closures (rule #5)
+        var ci = c_ptr
+        var ai = a_ptr
+        var p_h = 0
+
         for i in range(m):
-            var ci = c_ptr + i * n + j0
-            var ai = a_ptr + i * k
+            ci = c_ptr + i * n + j0
+            ai = a_ptr + i * k
             var p = 0
 
             while p < k_main:
-                fn do_fma[width: Int](j: Int) unified {mut}:
+                p_h = p
+                def do_fma[width: Int](j: Int) {mut ci, read ai, read b_col, read p_h, read n}:
                     var acc = ci.load[width=width](offset=j)
                     comptime for ku in range(KU):
-                        var a_broadcast = SIMD[dtype, width](ai[p + ku])
-                        var b_vec = (b_col + (p + ku) * n).load[width=width, invariant=True](offset=j)
+                        var a_broadcast = SIMD[dtype, width](ai[p_h + ku])
+                        var b_vec = (b_col + (p_h + ku) * n).load[width=width, invariant=True](offset=j)
                         acc = a_broadcast.fma(b_vec, acc)
                     ci.store(offset=j, val=acc)
 
@@ -1393,18 +1474,19 @@ fn _decode_gemv[
                 p += KU
 
             while p < k:
-                fn do_fma_tail[width: Int](j: Int) unified {mut}:
-                    var a_broadcast = SIMD[dtype, width](ai[p])
-                    var b_vec = (b_col + p * n).load[width=width, invariant=True](offset=j)
+                p_h = p
+                def do_fma_tail[width: Int](j: Int) {mut ci, read ai, read b_col, read p_h, read n}:
+                    var a_broadcast = SIMD[dtype, width](ai[p_h])
+                    var b_vec = (b_col + p_h * n).load[width=width, invariant=True](offset=j)
                     ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
 
                 vectorize[NELTS, unroll_factor=4](chunk, do_fma_tail)
                 p += 1
 
-    parallelize[worker](nw, nw)
+    parallelize(worker, nw, nw)
 
 
-fn matmul_decode[
+def matmul_decode[
     dtype: DType, //,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  optimized for decode shapes (small M).
@@ -1412,7 +1494,7 @@ fn matmul_decode[
     _decode_gemv(c, a, b)
 
 
-fn matmul_dispatch[
+def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  dispatches to the fastest kernel.
@@ -1433,7 +1515,7 @@ fn matmul_dispatch[
 
 
 # Default matmul points to the tiled version
-fn matmul[dtype: DType = DType.float64](
+def matmul[dtype: DType = DType.float64](
     mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]
 ):
     matmul_tiled[dtype](c, a, b)
