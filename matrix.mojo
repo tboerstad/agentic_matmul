@@ -1,3 +1,6 @@
+from std.collections import List
+
+
 struct Matrix[dtype: DType = DType.float64]:
     """A simple 2D CPU matrix backed by a flat row-major buffer.
 
@@ -14,7 +17,7 @@ struct Matrix[dtype: DType = DType.float64]:
 
     # --- constructors -----------------------------------------------------------
 
-    fn __init__(out self, rows: Int, cols: Int):
+    def __init__(out self, rows: Int, cols: Int):
         """Allocate a zero-filled rows x cols matrix."""
         self.rows = rows
         self.cols = cols
@@ -24,28 +27,28 @@ struct Matrix[dtype: DType = DType.float64]:
 
     # --- element access ---------------------------------------------------------
 
-    fn __getitem__(self, row: Int, col: Int) -> Scalar[Self.dtype]:
+    def __getitem__(self, row: Int, col: Int) -> Scalar[Self.dtype]:
         return self.data[row * self.cols + col]
 
-    fn __setitem__(mut self, row: Int, col: Int, val: Scalar[Self.dtype]):
+    def __setitem__(mut self, row: Int, col: Int, val: Scalar[Self.dtype]):
         self.data[row * self.cols + col] = val
 
     # --- flat buffer access (for matmul kernels) --------------------------------
 
-    fn load(self, idx: Int) -> Scalar[Self.dtype]:
+    def load(self, idx: Int) -> Scalar[Self.dtype]:
         return self.data[idx]
 
-    fn store(mut self, idx: Int, val: Scalar[Self.dtype]):
+    def store(mut self, idx: Int, val: Scalar[Self.dtype]):
         self.data[idx] = val
 
     # --- properties -------------------------------------------------------------
 
-    fn numel(self) -> Int:
+    def numel(self) -> Int:
         return self.rows * self.cols
 
     # --- display ----------------------------------------------------------------
 
-    fn print(self):
+    def print(self):
         for i in range(self.rows):
             var line = String("[")
             for j in range(self.cols):
@@ -56,7 +59,7 @@ struct Matrix[dtype: DType = DType.float64]:
             print(line)
 
 
-fn main():
+def main():
     # float64 (default)
     var m = Matrix(2, 3)
     m[0, 0] = 1.0

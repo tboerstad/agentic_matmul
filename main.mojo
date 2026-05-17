@@ -1,4 +1,7 @@
-fn matmul(
+from std.collections import List
+
+
+def matmul(
     mut c: List[Float64],
     a: List[Float64],
     b: List[Float64],
@@ -19,7 +22,7 @@ fn matmul(
             c[i * n + j] = dot
 
 
-fn main():
+def main():
     print("Hello from Mojo!")
 
     # matmul demo

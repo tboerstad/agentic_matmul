@@ -13,21 +13,32 @@ from gemm import (
     matmul_dispatch,
 )
 from matrix import Matrix
-import std.benchmark
 from std.time import perf_counter_ns
 
 
-fn gflops(m: Int, n: Int, k: Int, secs: Float64) -> Float64:
+def gflops(m: Int, n: Int, k: Int, secs: Float64) -> Float64:
     return (2.0 * Float64(m) * Float64(n) * Float64(k)) / (secs * 1e9)
 
 
-fn fill(mut m: Matrix, seed: Int):
+def fill(mut m: Matrix, seed: Int):
     for i in range(m.rows):
         for j in range(m.cols):
             m[i, j] = Scalar[m.dtype]((i * m.cols + j) % seed) * 0.1
 
 
-fn main() raises:
+def report(label: String, m: Int, n: Int, k: Int, sum_ns: Float64, min_ns: Float64, n_runs: Int) -> Float64:
+    var mean_s = sum_ns / Float64(n_runs) / 1e9
+    var min_s = min_ns / 1e9
+    print(
+        "  ", label, ":",
+        mean_s * 1e3, "ms |",
+        gflops(m, n, k, mean_s), "GFLOPS (mean) |",
+        gflops(m, n, k, min_s), "GFLOPS (peak)",
+    )
+    return mean_s
+
+
+def main() raises:
     var t_start = perf_counter_ns()
     print("=== matmul benchmark: all kernels (Qwen 2.5 VL 3B shapes) ===\n")
 
@@ -43,103 +54,129 @@ fn main() raises:
     fill(a1, 17)
     fill(b1, 13)
 
-    @parameter
-    fn d_naive():
-        matmul_naive(c1, a1, b1)
-
-    @parameter
-    fn d_tiled():
-        matmul_tiled(c1, a1, b1)
-
-    @parameter
-    fn d_simd():
-        matmul_simd(c1, a1, b1)
-
-    @parameter
-    fn d_parallel():
-        matmul_parallel(c1, a1, b1)
-
-    @parameter
-    fn d_regblk():
-        matmul_register_blocked(c1, a1, b1)
-
-    @parameter
-    fn d_packed():
-        matmul_packed(c1, a1, b1)
-
-    @parameter
-    fn d_comptime():
-        matmul_comptime(c1, a1, b1)
-
-    @parameter
-    fn d_goto():
-        matmul_goto(c1, a1, b1)
-
-    @parameter
-    fn d_prefill():
-        matmul_prefill(c1, a1, b1)
-
-    @parameter
-    fn d_prefill_opt():
-        matmul_prefill_opt(c1, a1, b1)
-
-    @parameter
-    fn d_decode():
-        matmul_decode(c1, a1, b1)
-
-    @parameter
-    fn d_dispatch():
-        matmul_dispatch(c1, a1, b1)
-
     print("--- 1x11008x2048 (decode) ---\n")
 
-    var r = std.benchmark.run[d_naive]()
-    var s_naive_1 = r.mean("s")
-    print("  naive       :", r.mean("ms"), "ms |", gflops(M1, N1, K1, s_naive_1), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
+    var t0: UInt = 0
+    var t1: UInt = 0
+    var dt: Float64 = 0.0
+    var min_ns: Float64 = 0.0
+    var sum_ns: Float64 = 0.0
 
-    r = std.benchmark.run[d_tiled]()
-    print("  tiled       :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_tiled_1 = r.mean("s")
+    # naive — one run (very slow)
+    t0 = perf_counter_ns()
+    matmul_naive(c1, a1, b1)
+    t1 = perf_counter_ns()
+    sum_ns = Float64(t1 - t0)
+    min_ns = sum_ns
+    var s_naive_1 = report("naive       ", M1, N1, K1, sum_ns, min_ns, 1)
 
-    r = std.benchmark.run[d_simd]()
-    print("  simd        :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_simd_1 = r.mean("s")
+    # tiled — 3 runs
+    matmul_tiled(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_tiled(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_tiled_1 = report("tiled       ", M1, N1, K1, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[d_parallel]()
-    print("  parallel    :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_parallel_1 = r.mean("s")
+    # simd — 3 runs
+    matmul_simd(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_simd(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_simd_1 = report("simd        ", M1, N1, K1, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[d_regblk]()
-    print("  regblk      :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_regblk_1 = r.mean("s")
+    # parallel — 5 runs
+    matmul_parallel(c1, a1, b1)
+    matmul_parallel(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_parallel(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_parallel_1 = report("parallel    ", M1, N1, K1, sum_ns, min_ns, 5)
 
-    r = std.benchmark.run[d_packed]()
-    print("  packed      :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_packed_1 = r.mean("s")
+    # register_blocked — 5 runs
+    matmul_register_blocked(c1, a1, b1)
+    matmul_register_blocked(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_register_blocked(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_regblk_1 = report("regblk      ", M1, N1, K1, sum_ns, min_ns, 5)
 
-    r = std.benchmark.run[d_comptime]()
-    print("  comptime    :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_comptime_1 = r.mean("s")
+    # packed — 5 runs
+    matmul_packed(c1, a1, b1)
+    matmul_packed(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_packed(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_packed_1 = report("packed      ", M1, N1, K1, sum_ns, min_ns, 5)
 
-    r = std.benchmark.run[d_goto]()
-    print("  goto        :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_goto_1 = r.mean("s")
+    # comptime — 5 runs
+    matmul_comptime(c1, a1, b1)
+    matmul_comptime(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_comptime(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_comptime_1 = report("comptime    ", M1, N1, K1, sum_ns, min_ns, 5)
 
-    r = std.benchmark.run[d_prefill]()
-    print("  prefill     :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_prefill_1 = r.mean("s")
+    # goto — 5 runs
+    matmul_goto(c1, a1, b1)
+    matmul_goto(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_goto(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_goto_1 = report("goto        ", M1, N1, K1, sum_ns, min_ns, 5)
 
-    r = std.benchmark.run[d_prefill_opt]()
-    print("  prefill_opt :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_prefill_opt_1 = r.mean("s")
+    # prefill — 5 runs
+    matmul_prefill(c1, a1, b1)
+    matmul_prefill(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_prefill(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_prefill_1 = report("prefill     ", M1, N1, K1, sum_ns, min_ns, 5)
 
-    r = std.benchmark.run[d_decode]()
-    print("  decode      :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_decode_1 = r.mean("s")
+    # prefill_opt — 5 runs
+    matmul_prefill_opt(c1, a1, b1)
+    matmul_prefill_opt(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_prefill_opt(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_prefill_opt_1 = report("prefill_opt ", M1, N1, K1, sum_ns, min_ns, 5)
 
-    r = std.benchmark.run[d_dispatch]()
-    print("  dispatch    :", r.mean("ms"), "ms |", gflops(M1, N1, K1, r.mean("s")), "GFLOPS (mean) |", gflops(M1, N1, K1, r.min("s")), "GFLOPS (peak)")
-    var s_dispatch_1 = r.mean("s")
+    # decode — 5 runs
+    matmul_decode(c1, a1, b1)
+    matmul_decode(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_decode(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_decode_1 = report("decode      ", M1, N1, K1, sum_ns, min_ns, 5)
+
+    # dispatch — 5 runs
+    matmul_dispatch(c1, a1, b1)
+    matmul_dispatch(c1, a1, b1)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(5):
+        t0 = perf_counter_ns(); matmul_dispatch(c1, a1, b1); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_dispatch_1 = report("dispatch    ", M1, N1, K1, sum_ns, min_ns, 5)
 
     print("\n  speedup vs naive:")
     print("    tiled       :", s_naive_1 / s_tiled_1, "x")
@@ -167,103 +204,103 @@ fn main() raises:
     fill(a2, 17)
     fill(b2, 13)
 
-    @parameter
-    fn p_naive():
-        matmul_naive(c2, a2, b2)
-
-    @parameter
-    fn p_tiled():
-        matmul_tiled(c2, a2, b2)
-
-    @parameter
-    fn p_simd():
-        matmul_simd(c2, a2, b2)
-
-    @parameter
-    fn p_parallel():
-        matmul_parallel(c2, a2, b2)
-
-    @parameter
-    fn p_regblk():
-        matmul_register_blocked(c2, a2, b2)
-
-    @parameter
-    fn p_packed():
-        matmul_packed(c2, a2, b2)
-
-    @parameter
-    fn p_comptime():
-        matmul_comptime(c2, a2, b2)
-
-    @parameter
-    fn p_goto():
-        matmul_goto(c2, a2, b2)
-
-    @parameter
-    fn p_prefill():
-        matmul_prefill(c2, a2, b2)
-
-    @parameter
-    fn p_prefill_opt():
-        matmul_prefill_opt(c2, a2, b2)
-
-    @parameter
-    fn p_decode():
-        matmul_decode(c2, a2, b2)
-
-    @parameter
-    fn p_dispatch():
-        matmul_dispatch(c2, a2, b2)
-
     print("--- 96x11008x2048 (prefill) ---\n")
 
-    r = std.benchmark.run[p_naive]()
-    var s_naive_2 = r.mean("s")
-    print("  naive       :", r.mean("ms"), "ms |", gflops(M2, N2, K2, s_naive_2), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
+    # naive — one run (very slow)
+    t0 = perf_counter_ns(); matmul_naive(c2, a2, b2); t1 = perf_counter_ns()
+    sum_ns = Float64(t1 - t0); min_ns = sum_ns
+    var s_naive_2 = report("naive       ", M2, N2, K2, sum_ns, min_ns, 1)
 
-    r = std.benchmark.run[p_tiled]()
-    print("  tiled       :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_tiled_2 = r.mean("s")
+    # tiled — 1 run
+    t0 = perf_counter_ns(); matmul_tiled(c2, a2, b2); t1 = perf_counter_ns()
+    sum_ns = Float64(t1 - t0); min_ns = sum_ns
+    var s_tiled_2 = report("tiled       ", M2, N2, K2, sum_ns, min_ns, 1)
 
-    r = std.benchmark.run[p_simd]()
-    print("  simd        :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_simd_2 = r.mean("s")
+    # simd — 1 run
+    t0 = perf_counter_ns(); matmul_simd(c2, a2, b2); t1 = perf_counter_ns()
+    sum_ns = Float64(t1 - t0); min_ns = sum_ns
+    var s_simd_2 = report("simd        ", M2, N2, K2, sum_ns, min_ns, 1)
 
-    r = std.benchmark.run[p_parallel]()
-    print("  parallel    :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_parallel_2 = r.mean("s")
+    # parallel — 3 runs
+    matmul_parallel(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_parallel(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_parallel_2 = report("parallel    ", M2, N2, K2, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[p_regblk]()
-    print("  regblk      :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_regblk_2 = r.mean("s")
+    # register_blocked — 3 runs
+    matmul_register_blocked(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_register_blocked(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_regblk_2 = report("regblk      ", M2, N2, K2, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[p_packed]()
-    print("  packed      :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_packed_2 = r.mean("s")
+    # packed — 3 runs
+    matmul_packed(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_packed(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_packed_2 = report("packed      ", M2, N2, K2, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[p_comptime]()
-    print("  comptime    :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_comptime_2 = r.mean("s")
+    # comptime — 3 runs
+    matmul_comptime(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_comptime(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_comptime_2 = report("comptime    ", M2, N2, K2, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[p_goto]()
-    print("  goto        :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_goto_2 = r.mean("s")
+    # goto — 3 runs
+    matmul_goto(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_goto(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_goto_2 = report("goto        ", M2, N2, K2, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[p_prefill]()
-    print("  prefill     :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_prefill_2 = r.mean("s")
+    # prefill — 3 runs
+    matmul_prefill(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_prefill(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_prefill_2 = report("prefill     ", M2, N2, K2, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[p_prefill_opt]()
-    print("  prefill_opt :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_prefill_opt_2 = r.mean("s")
+    # prefill_opt — 3 runs
+    matmul_prefill_opt(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_prefill_opt(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_prefill_opt_2 = report("prefill_opt ", M2, N2, K2, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[p_decode]()
-    print("  decode      :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_decode_2 = r.mean("s")
+    # decode — 3 runs
+    matmul_decode(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_decode(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_decode_2 = report("decode      ", M2, N2, K2, sum_ns, min_ns, 3)
 
-    r = std.benchmark.run[p_dispatch]()
-    print("  dispatch    :", r.mean("ms"), "ms |", gflops(M2, N2, K2, r.mean("s")), "GFLOPS (mean) |", gflops(M2, N2, K2, r.min("s")), "GFLOPS (peak)")
-    var s_dispatch_2 = r.mean("s")
+    # dispatch — 3 runs
+    matmul_dispatch(c2, a2, b2)
+    min_ns = 1e30; sum_ns = 0.0
+    for _ in range(3):
+        t0 = perf_counter_ns(); matmul_dispatch(c2, a2, b2); t1 = perf_counter_ns()
+        dt = Float64(t1 - t0); sum_ns += dt
+        if dt < min_ns: min_ns = dt
+    var s_dispatch_2 = report("dispatch    ", M2, N2, K2, sum_ns, min_ns, 3)
 
     print("\n  speedup vs naive:")
     print("    tiled       :", s_naive_2 / s_tiled_2, "x")
