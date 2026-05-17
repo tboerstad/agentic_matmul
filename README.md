@@ -41,6 +41,23 @@ the cloud Skylake VM:
 (Prefill peaks above 170 GFLOPS beat the OpenBLAS reference for this shape on
 this hardware; decode is DRAM-bandwidth bound near ~30 GB/s aggregate.)
 
+### Mojo 1.0.0b2 migration cost on Emerald Rapids 2.10 GHz (cloud VM, 4 cores)
+
+Same VM, same shapes, `std.benchmark.run` peak across 4 invocations. The
+pre-migration row builds with the March 13 2026 Mojo nightly
+(`26.3.0.dev2026031305`); the post-migration row uses Mojo 1.0.0b2
+(`1.0.0b2.dev2026051606`):
+
+| Kernel | Prefill peak GFLOPS | Decode peak GFLOPS |
+|---|---|---|
+| pre-migration code + Mojo dev2026031305          | **269.0** | **32.0** |
+| post-migration code + Mojo 1.0.0b2               | 256.6 | 28.5 |
+
+The migration costs ~5% on prefill and ~11% on decode. About half of the
+decode delta is Mojo 1.0.0b2 codegen drift (the unchanged `linalg.matmul`
+stdlib kernel regresses ~10% across the same compiler bump); the rest is
+residual capture-list / hoisted-binding overhead from the syntax migration.
+
 ## Kernel evolution
 
 1. **naive** — Triple-nested loop baseline
