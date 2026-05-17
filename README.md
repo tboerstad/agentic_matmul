@@ -24,7 +24,7 @@ Peak GFLOPS by hardware (higher is better):
 |---|---|---|---|
 | SciPy dgemm | **5.5** | 8.4 | — |
 | NumPy (Accelerate/OpenBLAS) | 13.4 | 25.0 | **54.3** |
-| **Mojo (agentic matmul)** | 13.9 | **26.6** | 20.7 |
+| **Mojo (agentic matmul)** | 13.9 | **28.5** | 20.7 |
 | Mojo linalg (stdlib) | 5.9 | 11.4 | 4.8 |
 
 ### Tuning history on Skylake AVX-512 (cloud VM, 4 cores)

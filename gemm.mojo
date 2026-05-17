@@ -1417,6 +1417,54 @@ def matmul_prefill_opt[
         _prefill_gemm_v3[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
 
 
+@always_inline
+def _decode_fma_chunk_unrolled[
+    dtype: DType, KU: Int, NELTS: Int,
+    c_origin: MutOrigin, a_origin: ImmutOrigin, b_origin: ImmutOrigin,
+](
+    ci: UnsafePointer[Scalar[dtype], c_origin],
+    ai: UnsafePointer[Scalar[dtype], a_origin],
+    b_col: UnsafePointer[Scalar[dtype], b_origin],
+    p: Int,
+    n: Int,
+    chunk: Int,
+):
+    """KU-unrolled FMA chunk for the GEMV main loop.
+
+    Extracted to a top-level def so the inner closure can capture `p` and the
+    pointers directly as function-scope bindings (a closure nested inside
+    another closure cannot capture for/while-loop-body variables in current
+    Mojo)."""
+    def do_fma[width: Int](j: Int) {read ci, read ai, read b_col, read p, read n}:
+        var acc = ci.load[width=width](offset=j)
+        comptime for ku in range(KU):
+            var a_broadcast = SIMD[dtype, width](ai[p + ku])
+            var b_vec = (b_col + (p + ku) * n).load[width=width, invariant=True](offset=j)
+            acc = a_broadcast.fma(b_vec, acc)
+        ci.store(offset=j, val=acc)
+    vectorize[NELTS, unroll_factor=4](chunk, do_fma)
+
+
+@always_inline
+def _decode_fma_chunk_tail[
+    dtype: DType, NELTS: Int,
+    c_origin: MutOrigin, a_origin: ImmutOrigin, b_origin: ImmutOrigin,
+](
+    ci: UnsafePointer[Scalar[dtype], c_origin],
+    ai: UnsafePointer[Scalar[dtype], a_origin],
+    b_col: UnsafePointer[Scalar[dtype], b_origin],
+    p: Int,
+    n: Int,
+    chunk: Int,
+):
+    """Single-step FMA chunk for the GEMV tail loop."""
+    def do_fma_tail[width: Int](j: Int) {read ci, read ai, read b_col, read p, read n}:
+        var a_broadcast = SIMD[dtype, width](ai[p])
+        var b_vec = (b_col + p * n).load[width=width, invariant=True](offset=j)
+        ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
+    vectorize[NELTS, unroll_factor=4](chunk, do_fma_tail)
+
+
 def _decode_gemv[
     dtype: DType, //, KU: Int = 4,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1450,37 +1498,17 @@ def _decode_gemv[
         var b_col = b_ptr + j0  # base pointer into worker's column chunk
         var k_main = (k // KU) * KU
 
-        # Hoisted captures for inner closures (rule #5)
-        var ci = c_ptr
-        var ai = a_ptr
-        var p_h = 0
-
         for i in range(m):
-            ci = c_ptr + i * n + j0
-            ai = a_ptr + i * k
+            var ci = c_ptr + i * n + j0
+            var ai = a_ptr + i * k
             var p = 0
 
             while p < k_main:
-                p_h = p
-                def do_fma[width: Int](j: Int) {mut ci, read ai, read b_col, read p_h, read n}:
-                    var acc = ci.load[width=width](offset=j)
-                    comptime for ku in range(KU):
-                        var a_broadcast = SIMD[dtype, width](ai[p_h + ku])
-                        var b_vec = (b_col + (p_h + ku) * n).load[width=width, invariant=True](offset=j)
-                        acc = a_broadcast.fma(b_vec, acc)
-                    ci.store(offset=j, val=acc)
-
-                vectorize[NELTS, unroll_factor=4](chunk, do_fma)
+                _decode_fma_chunk_unrolled[dtype=dtype, KU=KU, NELTS=NELTS](ci, ai, b_col, p, n, chunk)
                 p += KU
 
             while p < k:
-                p_h = p
-                def do_fma_tail[width: Int](j: Int) {mut ci, read ai, read b_col, read p_h, read n}:
-                    var a_broadcast = SIMD[dtype, width](ai[p_h])
-                    var b_vec = (b_col + p_h * n).load[width=width, invariant=True](offset=j)
-                    ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
-
-                vectorize[NELTS, unroll_factor=4](chunk, do_fma_tail)
+                _decode_fma_chunk_tail[dtype=dtype, NELTS=NELTS](ci, ai, b_col, p, n, chunk)
                 p += 1
 
     parallelize(worker, nw, nw)
