@@ -28,16 +28,16 @@ fn bench_decode() raises:
     fill(a, 17)
     fill(b, 13)
 
-    var a_buf = NDBuffer[DType.float64, 2, _, DimList(M, K)](
+    var a_buf = NDBuffer[rank=2, dtype=DType.float64, shape=DimList[M, K]()](
         a.data.unsafe_ptr().bitcast[Float64]()
     )
-    var b_buf = NDBuffer[DType.float64, 2, _, DimList(K, N)](
+    var b_buf = NDBuffer[rank=2, dtype=DType.float64, shape=DimList[K, N]()](
         b.data.unsafe_ptr().bitcast[Float64]()
     )
     var c_data = List[Float64](capacity=M * N)
     for _ in range(M * N):
         c_data.append(0.0)
-    var c_buf = NDBuffer[DType.float64, 2, _, DimList(M, N)](
+    var c_buf = NDBuffer[rank=2, dtype=DType.float64, shape=DimList[M, N]()](
         c_data.unsafe_ptr().bitcast[Float64]()
     )
 
@@ -74,16 +74,16 @@ fn bench_prefill() raises:
     fill(a, 17)
     fill(b, 13)
 
-    var a_buf = NDBuffer[DType.float64, 2, _, DimList(M, K)](
+    var a_buf = NDBuffer[rank=2, dtype=DType.float64, shape=DimList[M, K]()](
         a.data.unsafe_ptr().bitcast[Float64]()
     )
-    var b_buf = NDBuffer[DType.float64, 2, _, DimList(K, N)](
+    var b_buf = NDBuffer[rank=2, dtype=DType.float64, shape=DimList[K, N]()](
         b.data.unsafe_ptr().bitcast[Float64]()
     )
     var c_data = List[Float64](capacity=M * N)
     for _ in range(M * N):
         c_data.append(0.0)
-    var c_buf = NDBuffer[DType.float64, 2, _, DimList(M, N)](
+    var c_buf = NDBuffer[rank=2, dtype=DType.float64, shape=DimList[M, N]()](
         c_data.unsafe_ptr().bitcast[Float64]()
     )
 
