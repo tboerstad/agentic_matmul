@@ -1400,14 +1400,16 @@ def matmul_prefill_opt[
     #   KU=2 keeps the unrolled FMA body small (fits L1i) while still letting
     #     LLVM schedule cross-iteration. KU=4 and KU=8 are 5-8% slower.
     #   KC=256 picks the standard BLIS L2-resident B panel.
-    #   TILE_N=128 ⇒ 86 j-tiles divides cleanly across 4 workers.
+    #   TILE_N=64 ⇒ 172 j-tiles = exactly 43 per worker on 4 cores. The old
+    #     TILE_N=128 gave 86 tiles split 22/22/22/20, idling one core ~9%
+    #     of the time; the even split is worth ~2% peak GFLOPS.
     # Wins ~6% peak GFLOPS vs the old MR=8 NR=24 config on Skylake AVX-512.
     comptime NELTS = simd_width_of[dtype]()
     comptime MR = 6
     comptime NR = 4 * NELTS
     comptime KC = 256
     comptime KU = 2
-    comptime TILE_N = 128
+    comptime TILE_N = 64
     comptime NC_TILES = 64
 
     if a.rows < MR:
@@ -1438,6 +1440,13 @@ def _decode_fma_chunk_unrolled[
     def do_fma[width: Int](j: Int) {read ci, read ai, read b_col, read p, read n}:
         var acc = ci.load[width=width](offset=j)
         comptime for ku in range(KU):
+            # Prefetch the same columns of the next KU-block of B rows: the
+            # KU streams are n*8 bytes apart, too far for the hardware
+            # prefetcher to follow. May reach past the end of B on the last
+            # block — prefetch is architecturally non-faulting, so that's safe.
+            prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
+                b_col + (p + ku + KU) * n + j
+            )
             var a_broadcast = SIMD[dtype, width](ai[p + ku])
             var b_vec = (b_col + (p + ku) * n).load[width=width, invariant=True](offset=j)
             acc = a_broadcast.fma(b_vec, acc)
@@ -1537,7 +1546,7 @@ def matmul_dispatch[
         comptime NR = 4 * NELTS   # 32: 24 accs + 4 B-vecs + 6 A-broadcasts ≤ 32 regs
         comptime KC = 256
         comptime KU = 2
-        comptime TILE_N = 128
+        comptime TILE_N = 64      # 172 j-tiles = exactly 43 per worker on 4 cores
         comptime NC_TILES = 64
         _prefill_gemm_v3[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
 
