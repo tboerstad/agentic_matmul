@@ -41,6 +41,24 @@ the cloud Skylake VM:
 (Prefill peaks above 170 GFLOPS beat the OpenBLAS reference for this shape on
 this hardware; decode is DRAM-bandwidth bound near ~30 GB/s aggregate.)
 
+### Decode GEMV prefetch + even j-split on Skylake AVX-512 (cloud VM, 4 cores)
+
+Measured on a Skylake-class cloud VM (Xeon @ 2.80 GHz, 4 cores, AVX-512 KVM —
+faster than the VM in the table above), peak across ≥10 `matmul_dispatch`
+invocations:
+
+| Kernel | Prefill peak GFLOPS | Decode peak GFLOPS |
+|---|---|---|
+| dispatch (before)                                | 223.2 | 14.9 |
+| **dispatch (this VM SOTA, GEMV prefetch + TILE_N=64)** | **229.8** | **16.8** |
+
+Two changes: (1) the decode GEMV now software-prefetches the next KU-block of
+B rows — the 8 read streams sit `n*8` bytes apart, too far for the hardware
+prefetcher to track, so explicit prefetch is worth +13% peak / +30% mean on
+decode; (2) prefill `TILE_N` drops from 128 to 64, giving 172 j-tiles that
+split exactly 43 per worker on 4 cores (128 gave 86 tiles split 22/22/22/20,
+idling one core ~9% of the time).
+
 ### Mojo 1.0.0b2 migration cost on Emerald Rapids 2.10 GHz (cloud VM, 4 cores)
 
 Same VM, same shapes, `std.benchmark.run` peak across 4 invocations. The
@@ -69,8 +87,8 @@ residual capture-list / hoisted-binding overhead from the syntax migration.
 7. **comptime** — Compile-time parameter specialization
 8. **goto** — GOTO-style GEMM: B-panel packing, GEMV/GEMM dispatch
 9. **prefill** — Worker-based parallelism, A-panel packing, 8×24 microkernel
-10. **prefill_opt** — v3 microkernel (hoisted B-load + noalias) with 6×32 register tile, KU=2, KC=256, TILE_N=128 — tuned by empirical scan
-11. **decode** — j-parallel GEMV with L1-resident column chunks for decode shapes
+10. **prefill_opt** — v3 microkernel (hoisted B-load + noalias) with 6×32 register tile, KU=2, KC=256, TILE_N=64 — tuned by empirical scan
+11. **decode** — j-parallel GEMV with L1-resident column chunks and software prefetch of the next KU-block of B rows
 12. **dispatch** — Auto-selects decode (M < 6) or prefill_opt based on shape
 
 ## Setup
