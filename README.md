@@ -87,40 +87,110 @@ on the Qwen MLP sweep (M = 1..512, both projection orientations) on a Skylake
 AVX-512 cloud VM (4 cores, float64), measured fairly (our kernels and the
 contestant interleaved per shape so both see the same turbo/thermal state):
 
-- Beats stdlib `linalg.matmul` on ~14/22 shapes — decisively on every
-  decode/small-batch shape (≈2.3× at M=1, ≈1.25–1.5× at M=2–8) and across the
-  up-projection through M≈128.
+- Beats stdlib `linalg.matmul` on 17/22 shapes — decisively on every
+  decode/small-batch shape (≈1.9–2.4× at M=1, ≈1.2–1.3× at M=2–8), across the
+  up-projection through M≈128, and on the full down-projection through M=96
+  (after the load-balance fix below).
 - Beats NumPy (OpenBLAS) and SciPy dgemm on all 22 shapes.
-- Still trails `linalg` ~7–11% on the heaviest GEMMs (down-proj at large M,
-  up-proj M ≥ 256). That gap is micro-kernel maturity, not memory layout:
+- Still trails `linalg` ~4–11% on the 5 heaviest GEMMs (down-proj M ≥ 128,
+  up-proj M ≥ 256). That residual is micro-kernel maturity, not memory layout:
   `_prefill_gemm_v3`'s N-parallel scheme already reads the (dominant) B matrix
   from DRAM exactly once into private L2. An M-parallel rewrite was built and
   measured — it was 2–3× *slower* (shared B falls to L3 + per-K-panel launch
   overhead), confirming N-parallel is the right structure here.
 
-### Note: where we still lose, and what does *not* close it (Jun 2026 re-audit)
+### Note: down-proj mid-M was a load-balance bug, not micro-kernel maturity (Jun 2026)
 
-Re-measured on the Xeon @ 2.10 GHz cloud VM (4 cores, AVX-512, float64) with
-`bench_sweep.mojo`, which interleaves `matmul_dispatch` against `linalg.matmul`
-per shape. **Both headline shapes win** (decode 1×11008×2048 ≈ 2.0×, prefill
-96×11008×2048 ≈ 1.07×). The remaining losses are confined to:
+An assembly-level re-audit on the Skylake @ 2.80 GHz cloud VM (4 cores, AVX-512,
+float64) found that `_prefill_gemm_v3` and `linalg.matmul` **compile to the same
+micro-kernel** — a 6×32 (or 8×24) register tile with 24 `zmm` accumulators that
+never spill, B-loads hoisted, A broadcast, running `vfmadd231pd` at the
+theoretical 2 FMA/cycle peak. The compute core is not where we lose.
+
+The real losses were in everything *around* the micro-kernel, and the biggest
+one was a pure scheduling artifact. The down-proj `M ≤ 64` branch used
+`TILE_N = 9*NELTS = 72`, which splits N=2048 into **29 j-tiles → 8/8/8/5 across
+4 workers**, idling one core ~10% of the time. That cost 7–8% at M=32..64 and
+showed up as a sharp cliff (down-proj M=8..64 ratios ~0.81–0.83, while the
+already-balanced M≥96 path sat near 0.99). Switching that branch to
+`TILE_N = 6*NELTS = 48` (43 j-tiles ≈ 11/11/11/10, a clean split) flips all of
+M=8..64 from LOSE to **WIN** (≈1.02–1.15× vs linalg) with no micro-kernel change.
+This is the same even-split lesson `matmul_prefill_opt` already applied to the
+prefill shape — it just hadn't been carried over to the tall-K branch.
+
+After the fix, the remaining losses are confined to the largest GEMMs:
 
 | Shape | ratio (dispatch / linalg) |
 |---|---|
-| down-proj M=64..512 | 0.89 – 0.92 |
-| up-proj M=256 / 512  | 0.97 / 0.93 |
+| down-proj M=128 / 256 / 512 | 0.96 / 0.89 / 0.90 |
+| up-proj   M=256 / 512       | 0.96 / 0.90 |
 
-The README previously blamed the down-proj gap on `_prefill_gemm_v3` re-packing
-all of A per N-worker, and suggested an M-parallel / shared-A packing scheme as
-the fix. **That diagnosis turned out to be wrong on this hardware.** A shared
-single-pack-of-A variant (`SHARED_A`) was implemented and measured head-to-head:
-it is a *wash* (+1% at M=128, −0.4% at M=512, noise elsewhere). The reason is
-that A fits comfortably in the 260 MB L3, so the "redundant" re-reads are L3
-traffic, not DRAM — and at these sizes the kernel is **compute-bound**, not
-A-packing-bound. An exhaustive sweep of the micro-kernel tile (MR×NR), KC, KU,
-and NC_TILES likewise found the current configs already optimal. The residual
-gap is genuine micro-kernel maturity vs linalg's hand-tuned AVX-512 kernel.
-(Shared A-packing could still pay off on hardware where A exceeds L3.)
+The assembly suggested two things `linalg` does that we don't: masked AVX-512
+load/store on remainder tiles (vs our scalar `vectorize` tail) and a packed-B
+prefetch inside the micro-kernel. **Both were implemented and A/B-tested
+head-to-head on these shapes, and neither closes the gap on this hardware:**
+
+- *In-kernel packed-B prefetch* — gated behind a comptime flag and measured
+  on/off, interleaved: ratio 0.98–1.01 (neutral, slightly *harmful* at M=512).
+  The L2→L1 latency is already hidden by the 28-accumulator ILP and the hardware
+  prefetcher, so the explicit prefetch only adds port pressure.
+- *Edge handling* — if the scalar M-remainder were the bottleneck, a zero-edge
+  tile would win. It loses: `4×32` (which divides M=128/256/512 evenly, no
+  remainder) ran **slower than the current `6×32`** at every M, because the
+  lower compute intensity and extra C-traffic cost more than the remainder saves.
+  So the remainder is not where the time goes.
+- *KC sweep* — `6×32` at KC ∈ {192,256,384,512}: KC=512 is already
+  monotonically best for M ≥ 192; smaller KC helps only marginally at M=96–128
+  (within the run-to-run noise floor, which is ±5–10% at these sizes).
+
+So the residual ~9–12% at M ≥ 256 is **not** any of the cheap micro-kernel
+tweaks — it is full BLIS-style 2-D cache blocking (an `MC × KC` loop that keeps
+the packed-A panel resident in L2 as M grows; we currently pack all of M per
+worker). That is a substantial rewrite, deferred until the headline shapes need
+it. (An earlier theory blamed `_prefill_gemm_v3` re-packing A per N-worker; a
+`SHARED_A` variant was measured and came out a wash — A fits in L3, so the
+re-reads are L3 traffic, not DRAM.)
+
+> Methodology note: ratios from a *single* `bench_sweep` run swing ±5–10% at
+> M ≥ 128 from turbo/thermal state on this shared VM. Judge micro-kernel changes
+> with an interleaved A/B of the two variants (peak GFLOPS over ~15–20 runs),
+> never by comparing absolute numbers across runs.
+
+## Future work: how to close the remaining large-M gap
+
+Current losses (all the *largest*, non-headline shapes): down-proj M=128/256/512
+≈ 0.94/0.89/0.91 and up-proj M=256/512 ≈ 0.93/0.91 vs `linalg`. Decode (M=1) and
+prefill (M=96) already win, so this is strictly the high-batch tail.
+
+Pursue these in order — each is independently shippable and A/B-testable:
+
+1. **2-D `MC × KC` cache blocking (highest expected payoff).** The losses scale
+   with M, the classic signature of an A-panel that outgrows L2. We currently
+   pack *all* of M per worker (`ap_per_worker = num_i_panels * MR * KC`); at
+   M=512/KC=512 that panel is ≈2 MB, past the 1 MB L2. Add an outer `MC` loop
+   (BLIS 5-loop: `jc[NC] → pc[KC] → ic[MC] → jr → ir`) so the packed-A block
+   stays L2-resident, streamed against the L1-resident packed-B micro-panel.
+   Start with `MC ≈ 128–256` rows and sweep. This is a real rewrite of
+   `_prefill_gemm_v3`'s worker loop, not a tweak.
+2. **M-parallelism for very large M.** Today workers split only the N (j-tile)
+   dimension. At large M and modest N (down-proj N=2048 → 32 j-tiles / 4 workers)
+   a 2-D `(M, N)` work split can improve locality and balance. Cheap to try once
+   MC blocking exists (parallelize the `ic` loop).
+3. **Per-M KC/tile dispatch refinement (marginal, ≤2%).** `6×32`/KC=512 is
+   already near-optimal for M ≥ 192; KC=384 is ~2% better at M=96 but inside the
+   noise floor. Only worth wiring up if step 1 lands and exposes a clean signal.
+
+**Dead ends — already measured, do not re-attempt without new evidence:**
+- In-kernel packed-B prefetch (linalg does it): A/B neutral-to-harmful here
+  (0.98–1.01); ILP + HW prefetcher already hide the latency.
+- Masked-SIMD / zero-edge tiles: a zero-edge `4×32` lost at every M, so the
+  scalar M-remainder is *not* the bottleneck.
+- `SHARED_A` (pack A once, share across N-workers): a wash — A fits in L3.
+
+**How to validate any of the above:** interleaved A/B of the two kernel variants,
+peak GFLOPS over ~15–20 runs (see the methodology note above). The throwaway
+`exp_*.mojo` harnesses used for the TILE_N and KC sweeps are the template;
+gate the new path behind a comptime flag so on/off can be measured in one binary.
 
 ## Setup
 
