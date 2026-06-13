@@ -157,6 +157,47 @@ re-reads are L3 traffic, not DRAM.)
 > with an interleaved A/B of the two variants (peak GFLOPS over ~15–20 runs),
 > never by comparing absolute numbers across runs.
 
+### Remeasurement (Jun 13 2026): down-proj mid-M now sits on the noise floor
+
+Re-ran `bench_sweep.mojo` on the Skylake @ 2.80 GHz cloud VM (4 cores, AVX-512,
+float64, Mojo 1.0.0b3 `dev2026061206`). The first sweep was discarded as a cold
+start (absolute GFLOPS ~20% below warm state); the table below is the **median
+ratio across 3 warm runs** (`dispatch / linalg`, peak GFLOPS per shape):
+
+| M | up-proj (N=11008 K=2048) | down-proj (N=2048 K=11008) |
+|---|---|---|
+| 1   | 2.63 WIN | 2.44 WIN |
+| 2   | 1.21 WIN | 1.13 WIN |
+| 4   | 1.18 WIN | 1.10 WIN |
+| 8   | 1.18 WIN | 0.99 ~tie |
+| 16  | 1.18 WIN | 0.97 LOSE |
+| 32  | 1.20 WIN | 0.99 ~tie |
+| 64  | 1.09 WIN | 0.96 LOSE |
+| 96  | 1.07 WIN | 1.02 WIN |
+| 128 | 1.03 WIN | 0.95 LOSE |
+| 256 | 0.93 LOSE | 0.88 LOSE |
+| 512 | 0.91 LOSE | 0.90 LOSE |
+
+Two things changed versus the post-load-balance-fix snapshot documented above:
+
+- **Up-proj improved at the top of the winning band.** Dispatch now wins cleanly
+  through M=128 (1.03–1.07×, previously a slight LOSE at M=96/128). M=256/512 are
+  unchanged losses (~0.91–0.93×).
+- **Down-proj mid-M (M=8..64) regressed from "decisive WIN" back to the noise
+  floor.** The `TILE_N=48` even-split fix claimed ≈1.02–1.15× here; the
+  remeasured median is ~0.96–0.99× — a marginal tie that flips WIN/LOSE between
+  runs (e.g. M=8: 1.03 / 0.99 / 0.96 across the three warm runs). The even-split
+  scheduling win is real but no longer dominates: at these mid-M sizes the gap to
+  `linalg` is back inside the ±5–10% run-to-run swing, so this band should be
+  read as a tie, not a win. The headline shapes are unaffected — decode (M=1)
+  still wins ~2.4–2.6× and prefill (M=96) wins on both orientations (1.07× /
+  1.02×).
+
+Net warm-state tally: dispatch clearly beats `linalg` on the full decode/small-M
+column and the entire up-proj band through M=128 (13/22 shapes by strict median,
+~16/22 counting the down-proj mid-M ties), and trails only on the heaviest GEMMs
+(down-proj M≥128, up-proj M≥256) — the same residual large-M gap documented below.
+
 ## Future work: how to close the remaining large-M gap
 
 Current losses (all the *largest*, non-headline shapes): down-proj M=128/256/512
