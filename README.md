@@ -97,6 +97,13 @@ residual capture-list / hoisted-binding overhead from the syntax migration.
 bash setup.sh
 ```
 
+`setup.sh` installs the latest Mojo nightly from the nightly wheel index
+(`https://whl.modular.com/nightly/simple/`) — currently MAX 26.5
+(Mojo 1.0.0b3, validated against `26.5.0.dev2026061206`). All sources build
+warning-free under it. To pin the last stable release instead, install
+`modular==26.3` from the stable index (`https://whl.modular.com/simple/`),
+which ships Mojo 1.0.0b1.
+
 ## Run
 
 ```bash
