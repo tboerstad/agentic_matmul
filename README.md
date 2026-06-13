@@ -196,7 +196,48 @@ Two things changed versus the post-load-balance-fix snapshot documented above:
 Net warm-state tally: dispatch clearly beats `linalg` on the full decode/small-M
 column and the entire up-proj band through M=128 (13/22 shapes by strict median,
 ~16/22 counting the down-proj mid-M ties), and trails only on the heaviest GEMMs
-(down-proj M≥128, up-proj M≥256) — the same residual large-M gap documented below.
+(down-proj M≥128, up-proj M≥256) — the same residual large-M gap addressed next.
+
+### Large-M retune (Jun 13 2026): unify on the 8×24 tile, drop the KC=1024 pick
+
+Questioning the "residual is unfixable micro-kernel maturity" conclusion above:
+an interleaved A/B (peak over 20–25 runs, the blessed methodology) of *several*
+tile shapes — not just the 6×32 ⇄ 8×24 pair the earlier note tried — found the
+large-M tile selection was simply mistuned, and that the tuning had drifted
+across compiler bumps. Two concrete fixes, both validated head-to-head:
+
+- **Up-proj (wide-N) M>192 → 8×24, KC=512** (was 4×48 KC=512 at M=256 and 6×32
+  KC=1024 at M>256). The 8×24 tile wins ~+4% at M=256 (0.92 → ~0.96) and ~+3%
+  at M=512 (0.91 → ~0.93). MR=8 also divides M=256/512 with no scalar
+  remainder. The old KC=1024 "halve the wide-C re-traffic" pick has since
+  *regressed* — at current codegen KC=512 beats KC=1024 even for the 6×32 tile —
+  so the special case was removed and both orientations now share KC=512.
+- **Down-proj (tall-K) M≥128 → 8×24, KC=512** (was 6×32 KC=512). MR=8 divides
+  M=128/256/512 evenly; the old MR=6 left a 4-row scalar-`vectorize` tail at
+  M=256, which was the single worst-tuned shape (0.85 in isolation). 8×24 wins
+  ~+4% at M=256 in controlled A/B, neutral at M=128/512. The `64 < M < 128`
+  band keeps 6×32 KC=512 — it wins the M≈96 down-proj prefill batch (~1.01×)
+  where 8×24 loses ~5% (both MR divide 96 evenly, but NR=32's wider per-row
+  SIMD pays off before the i-panel count grows). So down-proj now crosses tiles
+  twice across M; the dispatch comment documents all three bands.
+
+This collapses the old per-M tile zoo (8×24 / 4×48 / 6×32 / KC=1024) down to
+"8×24 everywhere, with a single 6×32 band for the down-proj M≈96 batch", and
+narrows the up-proj large-M gap to near-parity (M=256 ~0.96, M=512 ~0.93).
+
+**Dead ends re-confirmed on this hardware during the retune (do not re-attempt
+without a smaller-L3 machine):**
+- *Larger KC to cut down-proj C re-traffic* — K=11008=256×43, so KC∈{688,1376,
+  2752} give clean 16/8/4 k-panels (vs 22 uneven at KC=512). All lost: KC=2752
+  ran 0.70–0.76. The bigger packed A/B panels spilling cache cost far more than
+  the C-traffic saved. KC=512 stays.
+- *High-MR / narrow-NR tiles* (10×16, 12×16 — higher FLOP/byte of L1 traffic):
+  measured *worse* (~0.78–0.82), so down-proj large-M is not L1-load-bound.
+
+Residual after the retune: up-proj M=256/512 are near-parity (~0.93–0.96) and
+down-proj M≥128 still trails ~0.88–0.95. That tail is now genuinely either
+micro-kernel parity vs `linalg`'s hand-tuned AVX-512 kernel or the untested 2-D
+(M,N) worker split (see below) — every cheap *tile/KC* lever has been measured.
 
 ## Future work: how to close the remaining large-M gap
 

@@ -1545,27 +1545,27 @@ def matmul_dispatch[
     #     MR = M, so the packed B panel is streamed once and reused across all
     #     M rows. The old path sent these to the GEMV, which re-streamed all of
     #     B once *per row* — ~2x slower at M=4. MR=M removes the remainder loop.
-    #   - M >= 6 (prefill GEMM): pick the micro-kernel by aspect ratio and M.
-    #       * wide-N (N >= K, e.g. gate/up proj):
-    #           - M <= 192: 8x24 register tile, KC=256. Beats linalg M=6..128.
-    #           - 192 < M <= 256: 4x48 tile, KC=512.
-    #           - M >  256: 6x32 tile, KC=1024 — 3-5% over 4x48 from M=288 up,
-    #             plus ~1.5-2% from KC=1024 vs 512 (wide-C C-traffic; see below).
-    #             (interleaved 30-run A/B on Skylake AVX-512).
-    #       * tall-K (N < K, e.g. down proj):
-    #           - M <= 64:  8x24 tile, KC=256, KU=4.
-    #           - M >  64:  6x32 tile, KC=512.
-    #     NB: the tall-K (down-proj) GEMM still trails linalg ~7-11% at large M
-    #     (M >= 64). This was previously blamed on _prefill_gemm_v3's N-parallel
-    #     scheme re-packing all of A per worker, but that diagnosis is wrong on
-    #     this class of hardware: a shared single-pack-of-A variant was built and
-    #     measured (run `bench_sweep.mojo` / the config harness) and came out a
-    #     wash — A fits in L3, so the "redundant" re-reads are cheap, and these
-    #     large-M shapes are compute-bound, not A-packing-bound. An exhaustive
-    #     sweep of the tile (MR x NR), KC, KU, and NC_TILES found the configs
-    #     below already optimal; the residual gap is micro-kernel maturity vs
-    #     linalg's hand-tuned AVX-512 kernel, not memory layout. (Shared A-packing
-    #     may still help on hardware where A exceeds L3 — worth revisiting there.)
+    #   - M >= 6 (prefill GEMM): one 8x24 register tile per aspect ratio, with
+    #     KC stepping 256 (small M) -> 512 (large M). Re-tuned Jun 2026 by
+    #     interleaved A/B vs linalg (peak over 20 runs) on this Skylake AVX-512
+    #     VM, which collapsed the old per-M tile zoo (4x48 / 6x32 / KC=1024)
+    #     into a single tile shape per orientation:
+    #       * wide-N (N >= K, e.g. gate/up proj): 8x24, KU=2, TILE_N=9*NELTS.
+    #           - M <= 192: KC=256.   - M >  192: KC=512.
+    #         8x24 KC=512 beat the old 4x48 (M=256, ~+4%) and 6x32-KC1024
+    #         (M=512, ~+3%); MR=8 leaves no scalar M-remainder at M=256/512.
+    #       * tall-K (N < K, e.g. down proj): 8x24 KU=4 TILE_N=6*NELTS=48 at
+    #         the ends, 6x32 KC=512 in the middle band:
+    #           - M <= 64: 8x24 KC=256.  - 64 < M < 128: 6x32 KC=512 (wins the
+    #           M≈96 down-proj prefill batch).  - M >= 128: 8x24 KC=512 (~+4%
+    #           over the old 6x32 at M=256, the worst shape).
+    #     NB: the large-M GEMMs (up-proj M>=256, down-proj M>=128) still trail
+    #     linalg a few % — see README. Memory-layout levers (2-D MC*KC blocking,
+    #     shared single-pack-of-A) were measured and came out a wash-to-loss on
+    #     this 33 MB-L3 part: A fits in L3, so the "redundant" per-worker A
+    #     re-packs are cheap L3 traffic and these shapes are compute-bound. The
+    #     residual is micro-kernel maturity vs linalg's hand-tuned AVX-512
+    #     kernel. (Shared A-packing may still help where A exceeds L3.)
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
@@ -1582,35 +1582,38 @@ def matmul_dispatch[
     elif m == 5:
         _prefill_gemm_v3[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
     elif n >= k:
-        # wide-N (up-proj-like).
+        # wide-N (up-proj-like): one 8x24 tile (KU=2, TILE_N = 3*NR = 9*NELTS)
+        # at every M, KC=256 for small M and 512 for large M.
+        # Re-measured Jun 2026 (interleaved A/B vs linalg, peak over 20 runs on
+        # this Skylake AVX-512 VM): 8x24 KC=512 beats the old large-M tiles —
+        # ~+4% over 4x48 at M=256 (0.92 -> ~0.96-0.99) and ~+3% over 6x32-KC1024
+        # at M=512 (0.88 -> ~0.94). MR=8 also leaves no scalar M-remainder at
+        # M=256/512. The earlier KC=1024 "halve-C-traffic" pick has since
+        # regressed (KC=512 now beats KC=1024 even for the old 6x32 tile), so
+        # the wide-N and tall-K large-M paths now share KC=512.
         if m <= 192:
-            # 8x24 tile, TILE_N = 3*NR = 9*NELTS. Wins M=6..128 here.
             _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
-        elif m <= 256:
-            # 4x48 tile (24 accs + 6 B-vecs ≤ 32 regs), KC=512. Best at M=256.
-            _prefill_gemm_v3[dtype, 4, 6 * NELTS, 512, 4, 12 * NELTS, 64](c, a, b)
         else:
-            # Very large M (> 256): 6x32 tile, KC=1024, TILE_N = 2*NR = 8*NELTS.
-            # Interleaved A/B (30 runs) on Skylake AVX-512 shows 6x32 beats the
-            # 4x48 tile by 3-5% from M=288 up (M=288/320/384/512 ratios
-            # 1.045/1.035/1.047/1.030), while 4x48 still wins at M=256 (0.98).
-            # KC=1024 (vs 512) wins another ~1.5-2% at M=512 here: up-proj has a
-            # wide C (N=11008), and C is loaded+stored once per k-panel, so K=2048
-            # split into 2 even panels (KC=1024) instead of 4 (KC=512) halves the
-            # 45 MB C re-traffic. (Down-proj has tiny C and long K, so it keeps
-            # KC=512 — larger KC there only spills the B/A panels.)
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64](c, a, b)
+            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 512, 2, 9 * NELTS, 64](c, a, b)
     else:
-        # tall-K (down-proj-like).
+        # tall-K (down-proj-like). Re-measured Jun 2026 (interleaved A/B vs
+        # linalg, peak/25) — the tile crosses over twice across M:
+        #   - M <= 64:    8x24 KC=256, KU=4, TILE_N=6*NELTS=48. (TILE_N=48
+        #     splits N=2048 into 43 j-tiles ≈ 11/11/11/10 across 4 workers;
+        #     the old 9*NELTS=72 gave 29 tiles → 8/8/8/5, idling a core ~10%.)
+        #   - 64 < M < 128: 6x32 KC=512. Wins the M≈96 band (the down-proj
+        #     prefill batch) at ~1.01x; 8x24 loses ~5% here even though both
+        #     MR divide M=96 evenly — NR=32's higher per-row SIMD width pays
+        #     off before the i-panel count grows.
+        #   - M >= 128:   8x24 KC=512. MR=8 divides M=128/256/512 with no
+        #     scalar remainder (MR=6 left a 4-row tail at M=256, the worst
+        #     shape); ~+4% over the old 6x32 at M=256, neutral at M=128/512.
         if m <= 64:
-            # 8x24 tile, KU=4 — far better than 6x32 for narrow-N mid-M.
-            # TILE_N = 2*NR = 6*NELTS (48): N=2048 → 43 j-tiles ≈ 11/11/11/10
-            # across 4 workers. The old 9*NELTS (72) gave 29 tiles → 8/8/8/5,
-            # idling one core ~10% of the time and costing 7-8% at M=32..64.
             _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 4, 6 * NELTS, 64](c, a, b)
-        else:
-            # Large M: 6x32 tile, KC=512, TILE_N = 2*NR = 8*NELTS.
+        elif m < 128:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
+        else:
+            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 512, 4, 6 * NELTS, 64](c, a, b)
 
 
 # Default matmul points to the tiled version
