@@ -125,14 +125,36 @@ After the fix, the remaining losses are confined to the largest GEMMs:
 | down-proj M=128 / 256 / 512 | 0.96 / 0.89 / 0.90 |
 | up-proj   M=256 / 512       | 0.96 / 0.90 |
 
-These are the genuine micro-kernel-maturity gap visible in the assembly:
-`linalg` handles M/N remainder tiles with **masked AVX-512 load/store** (staying
-full-width SIMD) where ours drops to a scalar `vectorize` tail, and it
-**prefetches the packed B inside the micro-kernel** where ours only prefetches
-during the packing pass. (An earlier theory blamed `_prefill_gemm_v3` re-packing
-A per N-worker; a `SHARED_A` variant was measured and came out a wash — A fits in
-L3, so the re-reads are L3 traffic, not DRAM. Shared A-packing could still pay
-off on hardware where A exceeds L3.)
+The assembly suggested two things `linalg` does that we don't: masked AVX-512
+load/store on remainder tiles (vs our scalar `vectorize` tail) and a packed-B
+prefetch inside the micro-kernel. **Both were implemented and A/B-tested
+head-to-head on these shapes, and neither closes the gap on this hardware:**
+
+- *In-kernel packed-B prefetch* — gated behind a comptime flag and measured
+  on/off, interleaved: ratio 0.98–1.01 (neutral, slightly *harmful* at M=512).
+  The L2→L1 latency is already hidden by the 28-accumulator ILP and the hardware
+  prefetcher, so the explicit prefetch only adds port pressure.
+- *Edge handling* — if the scalar M-remainder were the bottleneck, a zero-edge
+  tile would win. It loses: `4×32` (which divides M=128/256/512 evenly, no
+  remainder) ran **slower than the current `6×32`** at every M, because the
+  lower compute intensity and extra C-traffic cost more than the remainder saves.
+  So the remainder is not where the time goes.
+- *KC sweep* — `6×32` at KC ∈ {192,256,384,512}: KC=512 is already
+  monotonically best for M ≥ 192; smaller KC helps only marginally at M=96–128
+  (within the run-to-run noise floor, which is ±5–10% at these sizes).
+
+So the residual ~9–12% at M ≥ 256 is **not** any of the cheap micro-kernel
+tweaks — it is full BLIS-style 2-D cache blocking (an `MC × KC` loop that keeps
+the packed-A panel resident in L2 as M grows; we currently pack all of M per
+worker). That is a substantial rewrite, deferred until the headline shapes need
+it. (An earlier theory blamed `_prefill_gemm_v3` re-packing A per N-worker; a
+`SHARED_A` variant was measured and came out a wash — A fits in L3, so the
+re-reads are L3 traffic, not DRAM.)
+
+> Methodology note: ratios from a *single* `bench_sweep` run swing ±5–10% at
+> M ≥ 128 from turbo/thermal state on this shared VM. Judge micro-kernel changes
+> with an interleaved A/B of the two variants (peak GFLOPS over ~15–20 runs),
+> never by comparing absolute numbers across runs.
 
 ## Setup
 
