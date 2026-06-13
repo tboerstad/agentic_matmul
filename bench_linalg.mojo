@@ -66,9 +66,15 @@ def main() raises:
     print("=" * 50)
     print("")
 
-    print("--- 1x11008x2048 (decode) ---\n")
-    bench_one("linalg", 1, 11008, 2048)
+    # Same shape grid as bench_matmul.mojo / bench_sota.py: sweep the token
+    # dimension M across both Qwen 2.5 VL 3B MLP projection orientations.
+    var m_sweep = [1, 2, 4, 8, 16, 32, 64, 96, 128, 256, 512]
+
+    print("--- up-proj sweep  (M x 11008 x 2048) ---\n")
+    for ref m in m_sweep:
+        bench_one("up   M=" + String(m), m, 11008, 2048)
     print("")
 
-    print("--- 96x11008x2048 (prefill) ---\n")
-    bench_one("linalg", 96, 11008, 2048)
+    print("--- down-proj sweep (M x 2048 x 11008) ---\n")
+    for ref m in m_sweep:
+        bench_one("down M=" + String(m), m, 2048, 11008)
