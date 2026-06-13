@@ -307,11 +307,51 @@ validated by interleaved A/B vs `linalg` (peak over 20 runs):
 
 This is the **opposite** of the Skylake finding ("KC=512 beats KC=1024 even for
 6×32") — a direct consequence of the larger L2, and a reminder that every KC/
-tile pick in this file is hardware-specific. Warm sweep after the retune: **21
-of 22 shapes WIN**, the lone exception being down-proj M=512 at ~0.99 (parity,
-flips WIN/LOSE between runs). The four clear large-M losses are gone with no
-micro-kernel rewrite — they were a stale tile/KC table carried over from a
-smaller-cache machine.
+tile pick in this file is hardware-specific.
+
+**Turbo-state caveat — read the retune as a NEW-vs-OLD delta, not a vs-`linalg`
+verdict.** The per-shape arrows above are vs-`linalg` ratios from a *cooler*
+state of this shared VM, where dispatch matched or beat `linalg` (a single warm
+sweep there showed 21/22 WIN, down-proj M=512 at ~0.99). A later remeasurement
+caught the VM in a *hotter* turbo state (absolutes ~280–290 vs ~245 GFLOPS), and
+there `linalg` — which scales better with the extra clock at large M — leads by
+3–7% on the same four shapes. So the **vs-`linalg` win/loss at large M flickers
+with the shared-VM turbo state** (the ±5–10% swing flagged in the methodology
+note). What does *not* flicker is the retune itself: an interleaved same-state
+A/B of the OLD picks vs the NEW picks (peak/25, both kernels in the same loop)
+shows the retune is a robust improvement in *both* states —
+
+| shape | NEW / OLD (interleaved, same state) |
+|---|---|
+| up-proj M=256 (8×24→6×32) | **1.06×** |
+| up-proj M=512 (KC512→2048) | 1.00–1.04× |
+| down-proj M=512 (KC512→2048) | **1.02–1.03×** |
+
+So the change is a genuine 2–6% lift over the stale Skylake-tuned table on this
+machine, with no micro-kernel rewrite; whether that lands as a WIN or a small
+LOSE vs `linalg` on any given run is the VM's turbo state, not the kernel.
+
+### Making the large-M pick adaptive (comptime, uarch-keyed)
+
+The KC/tile split above is now selected **at compile time from the host
+microarchitecture**, so the same source gives Skylake its KC=512 / 8×24 table
+and ≥2 MB-L2 parts the KC=2048 / 6×32 retune — no runtime branch, no cache
+probe. `matmul_dispatch` reads `CompilationTarget._arch()` (comptime — the same
+target-introspection that makes `simd_width_of` return 8 on AVX-512) via two
+helpers: `_host_is_small_l2()` (True only for `skylake-avx512`; everything else
+defaults to the big-L2 profile) and `_large_m_kc()` (512 vs 2048). Both fold to
+constants baked into the kernel instantiation.
+
+Mojo exposes **no comptime cache-*size* API** — only the uarch *name* and
+feature flags (`has_avx512f()`), so this is a name→profile map with a default,
+not a derived `KC = f(L2_bytes)`. It is correct because this repo compiles on
+the machine it runs on (`mojo bench_*.mojo`); an AOT binary built on one box and
+shipped to a different one would bake in the *build* host's uarch and would
+instead need a runtime probe (`getconf LEVEL2_CACHE_SIZE` / sysfs
+`/sys/devices/system/cpu/cpu0/cache/index2/size`). A one-time runtime autotune
+(sweep the candidate tiles on first use, cache the winner per orientation/M-band)
+is the most robust option and would retire the manual tuning entirely — deferred
+unless cross-machine prebuilt binaries become a requirement.
 
 ## Future work: how to close the remaining large-M gap
 

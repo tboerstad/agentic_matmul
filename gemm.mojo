@@ -5,6 +5,7 @@ from std.math import ceildiv, fma
 from std.memory import memset_zero
 from std.memory.unsafe_pointer import alloc
 from std.sys import num_physical_cores, simd_width_of
+from std.sys.info import CompilationTarget
 from std.sys.intrinsics import prefetch, PrefetchOptions
 
 
@@ -1556,6 +1557,46 @@ def matmul_decode[
     _decode_gemv(c, a, b)
 
 
+def _host_is_small_l2() -> Bool:
+    # True for host microarchitectures with a small (~1 MB) per-core L2, where
+    # the heavy-GEMM (large-M) bands want smaller packed panels.
+    #
+    # Resolved at COMPILE TIME: `CompilationTarget._arch()` is the target uarch
+    # the compiler is generating code for — the same mechanism that makes
+    # `simd_width_of` return 8 on AVX-512 — so this folds to a constant with
+    # zero runtime cost (no cache probe, no runtime branch). There is no
+    # comptime cache-SIZE API, only the uarch name, so we enumerate the known
+    # small-L2 part(s) and default everything else to the big-L2 profile (most
+    # modern server parts have >=2 MB L2/core).
+    #
+    # This is correct precisely because this repo compiles on the machine it
+    # runs on (`mojo bench_*.mojo`). An AOT binary built on one box and shipped
+    # to a different one would bake in the BUILD host's uarch and would instead
+    # need a runtime L2 probe (getconf LEVEL2_CACHE_SIZE / sysfs).
+    comptime arch = CompilationTarget._arch()
+    comptime if arch == "skylake-avx512":
+        return True
+    else:
+        return False
+
+
+def _large_m_kc() -> Int:
+    # KC for the heavy-GEMM (large-M) bands, uarch-keyed at comptime via the L2
+    # size. The optimum is L2-dependent and flips between machines:
+    #   * Skylake-AVX512 (1 MB L2/core): KC=512. Bigger packed panels spill the
+    #     1 MB L2, so the per-panel C-traffic a larger KC saves is outweighed
+    #     (measured: KC=512 beat KC=1024 even for the 6x32 tile there).
+    #   * Emerald/Granite/Sapphire Rapids, Zen, etc. (>=2 MB L2/core): KC=2048.
+    #     The bigger L2 holds the packed B panel, so fewer k-panels (less B
+    #     re-pack/re-read + less C re-traffic) wins — e.g. on the 2.10 GHz
+    #     Emerald Rapids VM this flipped up/down-proj M=256/512 from LOSE to
+    #     WIN/parity (see README "Large-M retune on the 2.10 GHz Xeon").
+    comptime if _host_is_small_l2():
+        return 512
+    else:
+        return 2048
+
+
 def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1593,6 +1634,13 @@ def matmul_dispatch[
     #     (up-proj M>=256, down-proj M=256) are micro-kernel maturity vs linalg's
     #     hand-tuned AVX-512 kernel. (Memory levers may help where A exceeds L3.)
     comptime NELTS = simd_width_of[dtype]()
+    # Heavy-GEMM (large-M) tuning, chosen at COMPILE TIME from the host uarch's
+    # L2 size (see _host_is_small_l2 / _large_m_kc). Both fold to constants —
+    # no runtime branch, no cache probe. On the small-L2 Skylake VM these
+    # restore that machine's documented tuning (8x24 wide-N tile, KC=512); on
+    # >=2 MB-L2 parts they select the 6x32 / KC=2048 large-M retune.
+    comptime SMALL_L2 = _host_is_small_l2()
+    comptime KC_BIG = _large_m_kc()
     var m = a.rows
     var n = c.cols
     var k = a.cols
@@ -1608,31 +1656,37 @@ def matmul_dispatch[
     elif m == 5:
         _prefill_gemm_v3[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
     elif n >= k:
-        # wide-N (up-proj-like). The small-M band keeps the 8x24 tile (KU=2,
-        # TILE_N = 3*NR = 9*NELTS) that wins decisively at M<=192; the large-M
-        # band uses the N-balanced 6x32 tile (TILE_N = 2*NR = 8*NELTS = 64).
+        # wide-N (up-proj-like). The small-M band (M<=192) keeps the 8x24 tile
+        # (KU=2, TILE_N = 3*NR = 9*NELTS) that wins decisively everywhere. The
+        # large-M band is uarch-keyed at comptime (SMALL_L2):
         #
-        # Large-M retune Jun 13 2026 on the 2.10 GHz Xeon (4c, AVX-512, L2 2MB/
-        # core, L3 260MB) — a DIFFERENT machine from the Skylake 2.80 GHz VM the
-        # old 8x24/KC512 picks were tuned on, with 2x the L2. Interleaved A/B vs
-        # linalg, peak over 20 runs:
-        #   * 6x32 beats 8x24 by a wide margin for every M>192 here (e.g. M=256
-        #     8x24-KC512 0.93 -> 6x32-KC512 1.02; the higher MR of 8x24 no longer
-        #     pays once N=11008's per-row SIMD width matters more than i-panel
-        #     count). So the whole large-M band is now 6x32, flipping M=256 from
-        #     LOSE to WIN.
-        #   * KC: with the bigger L2 the C-traffic win from fewer k-panels now
-        #     dominates. KC=512 is best up to M~288 (M=256 1.02, M=288 1.045);
-        #     above that a single k-panel (KC=2048=K, no K split -> C written
-        #     once) wins (M=384 0.999->1.046, M=512 0.953->1.038), flipping both
-        #     of the old large-M losses to WINs. (On the small-L2 Skylake VM the
-        #     opposite held — KC=512 beat KC=1024 there; this pick is HW-specific.)
+        #   * big-L2 parts (>=2 MB/core, e.g. the 2.10 GHz Emerald Rapids VM):
+        #     6x32 (TILE_N = 2*NR = 8*NELTS = 64) throughout M>192. Re-measured
+        #     Jun 13 2026, interleaved A/B vs linalg, peak/20: 6x32 beats 8x24 by
+        #     a wide margin at every M>192 here (M=256: 8x24-KC512 0.93 ->
+        #     6x32-KC512 1.02 — N=11008's wide per-row SIMD outweighs 8x24's
+        #     higher i-panel count), flipping M=256 from LOSE to WIN. With the
+        #     bigger L2 the C-traffic win from fewer k-panels dominates: KC=512
+        #     is best to M~288 (M=256 1.02, M=288 1.045), then KC_BIG=2048 (one
+        #     k-panel over K=2048, C written once) wins (M=384 0.999->1.046,
+        #     M=512 0.953->1.038).
+        #   * small-L2 Skylake-AVX512 (1 MB/core): its documented tuning — 8x24
+        #     KC=512 for 192<M<=256 (8x24 won there on that box), 6x32 for
+        #     M>256 with KC_BIG=512 (the bigger panels spill its 1 MB L2, so
+        #     KC=512 beat KC=1024 even for 6x32). Crossover stays at 256.
         if m <= 192:
             _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
-        elif m <= 288:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
         else:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
+            comptime if SMALL_L2:
+                if m <= 256:
+                    _prefill_gemm_v3[dtype, 8, 3 * NELTS, 512, 2, 9 * NELTS, 64](c, a, b)
+                else:
+                    _prefill_gemm_v3[dtype, 6, 4 * NELTS, KC_BIG, 4, 8 * NELTS, 64](c, a, b)
+            else:
+                if m <= 288:
+                    _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
+                else:
+                    _prefill_gemm_v3[dtype, 6, 4 * NELTS, KC_BIG, 4, 8 * NELTS, 64](c, a, b)
     else:
         # tall-K (down-proj-like): uniform 6x32 tile, TILE_N = 2*NR = 8*NELTS =
         # 64, KC=256 (M<=64) / 512 (M>64). TILE_N=64 splits N=2048 into 32 even
@@ -1652,13 +1706,15 @@ def matmul_dispatch[
         # 0.936->0.988. Pushing KC further over-grows the packed panels and
         # collapses (KC=5504 0.75, full-K 0.45), and M<=256 keeps KC512 (M=128
         # needs it: KC512 1.10 vs KC1024 1.06; M=256 is a wash). KC256 stays for
-        # the M<=64 band where the smaller packed panels help.
+        # the M<=64 band where the smaller packed panels help. The M>256 KC is
+        # KC_BIG (comptime, uarch-keyed): 2048 on this 2 MB-L2 part, 512 on the
+        # 1 MB-L2 Skylake VM where the bigger panels spill.
         if m <= 64:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 256, 4, 8 * NELTS, 64](c, a, b)
         elif m <= 256:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
         else:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, KC_BIG, 4, 8 * NELTS, 64](c, a, b)
 
 
 # Default matmul points to the tiled version
