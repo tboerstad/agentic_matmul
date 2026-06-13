@@ -16,7 +16,7 @@ fi
 # Create venv and install the latest Mojo nightly (MAX 26.5 → Mojo 1.0.0b3)
 uv venv
 source .venv/bin/activate
-uv pip install --upgrade modular --index https://whl.modular.com/nightly/simple/ --prerelease allow
+uv pip install modular --index https://whl.modular.com/nightly/simple/ --prerelease allow
 
 echo ""
 echo "Setup complete! To get started:"
