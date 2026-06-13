@@ -91,12 +91,36 @@ contestant interleaved per shape so both see the same turbo/thermal state):
   decode/small-batch shape (≈2.3× at M=1, ≈1.25–1.5× at M=2–8) and across the
   up-projection through M≈128.
 - Beats NumPy (OpenBLAS) and SciPy dgemm on all 22 shapes.
-- Still trails `linalg` ~10% on the heaviest GEMMs (down-proj at large M,
-  up-proj M=512). That gap is micro-kernel maturity, not memory layout:
+- Still trails `linalg` ~7–11% on the heaviest GEMMs (down-proj at large M,
+  up-proj M ≥ 256). That gap is micro-kernel maturity, not memory layout:
   `_prefill_gemm_v3`'s N-parallel scheme already reads the (dominant) B matrix
   from DRAM exactly once into private L2. An M-parallel rewrite was built and
   measured — it was 2–3× *slower* (shared B falls to L3 + per-K-panel launch
   overhead), confirming N-parallel is the right structure here.
+
+### Note: where we still lose, and what does *not* close it (Jun 2026 re-audit)
+
+Re-measured on the Xeon @ 2.10 GHz cloud VM (4 cores, AVX-512, float64) with
+`bench_sweep.mojo`, which interleaves `matmul_dispatch` against `linalg.matmul`
+per shape. **Both headline shapes win** (decode 1×11008×2048 ≈ 2.0×, prefill
+96×11008×2048 ≈ 1.07×). The remaining losses are confined to:
+
+| Shape | ratio (dispatch / linalg) |
+|---|---|
+| down-proj M=64..512 | 0.89 – 0.92 |
+| up-proj M=256 / 512  | 0.97 / 0.93 |
+
+The README previously blamed the down-proj gap on `_prefill_gemm_v3` re-packing
+all of A per N-worker, and suggested an M-parallel / shared-A packing scheme as
+the fix. **That diagnosis turned out to be wrong on this hardware.** A shared
+single-pack-of-A variant (`SHARED_A`) was implemented and measured head-to-head:
+it is a *wash* (+1% at M=128, −0.4% at M=512, noise elsewhere). The reason is
+that A fits comfortably in the 260 MB L3, so the "redundant" re-reads are L3
+traffic, not DRAM — and at these sizes the kernel is **compute-bound**, not
+A-packing-bound. An exhaustive sweep of the micro-kernel tile (MR×NR), KC, KU,
+and NC_TILES likewise found the current configs already optimal. The residual
+gap is genuine micro-kernel maturity vs linalg's hand-tuned AVX-512 kernel.
+(Shared A-packing could still pay off on hardware where A exceeds L3.)
 
 ## Setup
 
@@ -110,6 +134,8 @@ bash setup.sh
 source .venv/bin/activate
 mojo bench_matmul.mojo        # All 12 kernels on both shapes
 mojo bench_linalg.mojo        # Mojo stdlib linalg.matmul baseline
+mojo bench_sweep.mojo         # dispatch vs linalg, per-M, both orientations (finds losing dims)
 python bench_sota.py           # NumPy/SciPy/MKL benchmarks
 mojo test_gemm.mojo           # Correctness tests
+mojo verify_dispatch.mojo     # dispatch correctness vs naive (all branches + edge cases)
 ```
