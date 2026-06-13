@@ -97,10 +97,12 @@ residual capture-list / hoisted-binding overhead from the syntax migration.
 bash setup.sh
 ```
 
-The toolchain is pinned to the MAX 26.3 stable release (Mojo 1.0.0b1). All
-sources build warning-free under it. `setup.sh` installs it from the stable
-wheel index (`https://whl.modular.com/simple/`); to track the bleeding edge
-instead, swap in the nightly index (`https://whl.modular.com/nightly/simple/`).
+`setup.sh` installs the latest Mojo nightly from the nightly wheel index
+(`https://whl.modular.com/nightly/simple/`) — currently MAX 26.5
+(Mojo 1.0.0b3, validated against `26.5.0.dev2026061206`). All sources build
+warning-free under it. To pin the last stable release instead, install
+`modular==26.3` from the stable index (`https://whl.modular.com/simple/`),
+which ships Mojo 1.0.0b1.
 
 ## Run
 
