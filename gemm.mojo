@@ -1548,7 +1548,10 @@ def matmul_dispatch[
     #   - M >= 6 (prefill GEMM): pick the micro-kernel by aspect ratio and M.
     #       * wide-N (N >= K, e.g. gate/up proj):
     #           - M <= 192: 8x24 register tile, KC=256. Beats linalg M=6..128.
-    #           - M >  192: 4x48 tile, KC=512 — better at very large M.
+    #           - 192 < M <= 256: 4x48 tile, KC=512.
+    #           - M >  256: 6x32 tile, KC=1024 — 3-5% over 4x48 from M=288 up,
+    #             plus ~1.5-2% from KC=1024 vs 512 (wide-C C-traffic; see below).
+    #             (interleaved 30-run A/B on Skylake AVX-512).
     #       * tall-K (N < K, e.g. down proj):
     #           - M <= 64:  8x24 tile, KC=256, KU=4.
     #           - M >  64:  6x32 tile, KC=512.
@@ -1583,9 +1586,20 @@ def matmul_dispatch[
         if m <= 192:
             # 8x24 tile, TILE_N = 3*NR = 9*NELTS. Wins M=6..128 here.
             _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
-        else:
-            # Large M: 4x48 tile (24 accs + 6 B-vecs ≤ 32 regs), KC=512.
+        elif m <= 256:
+            # 4x48 tile (24 accs + 6 B-vecs ≤ 32 regs), KC=512. Best at M=256.
             _prefill_gemm_v3[dtype, 4, 6 * NELTS, 512, 4, 12 * NELTS, 64](c, a, b)
+        else:
+            # Very large M (> 256): 6x32 tile, KC=1024, TILE_N = 2*NR = 8*NELTS.
+            # Interleaved A/B (30 runs) on Skylake AVX-512 shows 6x32 beats the
+            # 4x48 tile by 3-5% from M=288 up (M=288/320/384/512 ratios
+            # 1.045/1.035/1.047/1.030), while 4x48 still wins at M=256 (0.98).
+            # KC=1024 (vs 512) wins another ~1.5-2% at M=512 here: up-proj has a
+            # wide C (N=11008), and C is loaded+stored once per k-panel, so K=2048
+            # split into 2 even panels (KC=1024) instead of 4 (KC=512) halves the
+            # 45 MB C re-traffic. (Down-proj has tiny C and long K, so it keeps
+            # KC=512 — larger KC there only spills the B/A panels.)
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64](c, a, b)
     else:
         # tall-K (down-proj-like).
         if m <= 64:

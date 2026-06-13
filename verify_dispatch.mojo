@@ -49,9 +49,14 @@ def check(m: Int, n: Int, k: Int) raises:
 def main() raises:
     print("=== correctness: dispatch vs naive ===")
     # Exercise full MR panels, NR remainders, and M tails for both orientations.
-    var ms = [2, 3, 4, 5, 6, 7, 13, 64, 65, 70, 96, 128, 130, 256]
+    # M>256 hits the new wide-N 6x32 branch; 257/300 also stress its M-tail.
+    var ms = [2, 3, 4, 5, 6, 7, 13, 64, 65, 70, 96, 128, 130, 256, 257, 300, 384, 512]
     for i in range(len(ms)):
-        check(ms[i], 2048, 768)   # tall-K (down-proj-like)
+        check(ms[i], 2048, 768)   # wide-N (N>K), incl. new M>256 6x32 branch
     for i in range(len(ms)):
-        check(ms[i], 770, 512)    # wide-N (up-proj-like, N not multiple of TILE_N)
+        check(ms[i], 770, 512)    # wide-N, N not a multiple of TILE_N (remainder)
+    # M>256 wide-N with K>1024 exercises the KC=1024 branch's multi-k-panel
+    # accumulation (2 panels: 1024 + partial) + N remainder + M tail together.
+    check(300, 1100, 1100)
+    check(384, 1100, 1100)
     print("all passed")
