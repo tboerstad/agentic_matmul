@@ -1552,10 +1552,17 @@ def matmul_dispatch[
     #       * tall-K (N < K, e.g. down proj):
     #           - M <= 64:  8x24 tile, KC=256, KU=4.
     #           - M >  64:  6x32 tile, KC=512.
-    #     NB: the tall-K (down-proj) GEMM still trails linalg ~10% at large M —
-    #     _prefill_gemm_v3 parallelizes over N, so every worker re-packs all of
-    #     A, which is wasteful when K (hence A) is large. Closing that needs an
-    #     M-parallel packing scheme.
+    #     NB: the tall-K (down-proj) GEMM still trails linalg ~7-11% at large M
+    #     (M >= 64). This was previously blamed on _prefill_gemm_v3's N-parallel
+    #     scheme re-packing all of A per worker, but that diagnosis is wrong on
+    #     this class of hardware: a shared single-pack-of-A variant was built and
+    #     measured (run `bench_sweep.mojo` / the config harness) and came out a
+    #     wash — A fits in L3, so the "redundant" re-reads are cheap, and these
+    #     large-M shapes are compute-bound, not A-packing-bound. An exhaustive
+    #     sweep of the tile (MR x NR), KC, KU, and NC_TILES found the configs
+    #     below already optimal; the residual gap is micro-kernel maturity vs
+    #     linalg's hand-tuned AVX-512 kernel, not memory layout. (Shared A-packing
+    #     may still help on hardware where A exceeds L3 — worth revisiting there.)
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
