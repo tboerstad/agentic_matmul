@@ -1,6 +1,6 @@
 from matrix import Matrix
 from linalg.matmul import matmul as linalg_matmul
-from layout import Coord, TileTensor, row_major
+from layout import Coord, Idx, TileTensor, row_major
 from std.collections import List
 from std.time import perf_counter_ns
 
@@ -29,9 +29,9 @@ def bench_one(label: String, m: Int, n: Int, k: Int) raises:
     var b_ptr = b.data.unsafe_ptr()
     var c_ptr = c_data.unsafe_ptr()
 
-    var c_tile = TileTensor(c_ptr, row_major(Coord(m, n)))
-    var a_tile = TileTensor(a_ptr, row_major(Coord(m, k)))
-    var b_tile = TileTensor(b_ptr, row_major(Coord(k, n)))
+    var c_tile = TileTensor(c_ptr, row_major(Coord(Idx(m), Idx(n))))
+    var a_tile = TileTensor(a_ptr, row_major(Coord(Idx(m), Idx(k))))
+    var b_tile = TileTensor(b_ptr, row_major(Coord(Idx(k), Idx(n))))
 
     # Warmup
     for _ in range(2):

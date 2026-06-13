@@ -56,11 +56,11 @@ def main() raises:
 
     print("--- 1x11008x2048 (decode) ---\n")
 
-    var t0: UInt
-    var t1: UInt
-    var dt: Float64
-    var min_ns: Float64
-    var sum_ns: Float64
+    var t0: UInt = 0
+    var t1: UInt = 0
+    var dt: Float64 = 0.0
+    var min_ns: Float64 = 0.0
+    var sum_ns: Float64 = 0.0
 
     # naive — one run (very slow)
     t0 = perf_counter_ns()
