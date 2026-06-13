@@ -163,7 +163,7 @@ Current losses (all the *largest*, non-headline shapes): down-proj M=128/256/512
 ≈ 0.94/0.89/0.91 and up-proj M=256/512 ≈ 0.93/0.91 vs `linalg`. Decode (M=1) and
 prefill (M=96) already win, so this is strictly the high-batch tail.
 
-### Update (Jun 2026): wide-N M>256 retuned to 6×32
+### Update (Jun 2026): wide-N M>256 retuned to 6×32 tile + KC=1024
 
 The wide-N (up-proj) large-M branch used a 4×48 register tile for all `M > 192`.
 An interleaved 30-run A/B on the Skylake AVX-512 VM shows the 6×32 tile (the
@@ -172,8 +172,20 @@ same config the tall-K branch already uses) beats 4×48 by 3–5% from M=288 up
 wins at M=256 (0.98). The 4×48 tile's lower MR caps A-broadcast reuse per packed-B
 load; the 6-row tile amortizes each B-load over more accumulators once M is large
 enough to fill the worker bands. Dispatch now uses 4×48 only for `192 < M ≤ 256`
-and 6×32 for `M > 256`. This narrows but does not close the up-proj M≥288 gap vs
-`linalg` — the residual is micro-kernel maturity (see below).
+and 6×32 for `M > 256`.
+
+On top of that, the 6×32 (M>256) branch moved from **KC=512 to KC=1024** for a
+further ~1.5–2% at M=512 (1024/512 ratio 1.020/1.016 across two 40-run passes).
+This is a *C-traffic* win specific to the wide-N orientation: the micro-kernel
+loads+stores its C tile once per k-panel, and up-proj's C is huge (N=11008 →
+45 MB at M=512). With K=2048, KC=1024 splits K into **2 even k-panels** instead of
+4 (KC=512), halving the C re-traffic; the even split also makes it more stable
+than KC=768 (3 uneven panels). KC=2048 (1 panel) over-grows the packed A/B panels
+and loses (0.92–0.95). The *down-proj* orientation was swept the same way and
+keeps KC=512 — its C is tiny (N=2048 → 8 MB) and K is long (11008), so larger KC
+buys no C savings and only spills the B/A panels (KC 768/1024/1536 all ≤1.01,
+mostly losses). These two changes narrow but do not close the up-proj M≥288 gap
+vs `linalg` — the residual is micro-kernel maturity (see below).
 
 The remaining large-M losses (down-proj M=128/256/512, up-proj M=256) are genuine
 micro-kernel maturity vs `linalg`'s hand-tuned AVX-512 kernel, **not** memory

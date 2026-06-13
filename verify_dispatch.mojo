@@ -55,4 +55,8 @@ def main() raises:
         check(ms[i], 2048, 768)   # wide-N (N>K), incl. new M>256 6x32 branch
     for i in range(len(ms)):
         check(ms[i], 770, 512)    # wide-N, N not a multiple of TILE_N (remainder)
+    # M>256 wide-N with K>1024 exercises the KC=1024 branch's multi-k-panel
+    # accumulation (2 panels: 1024 + partial) + N remainder + M tail together.
+    check(300, 1100, 1100)
+    check(384, 1100, 1100)
     print("all passed")
