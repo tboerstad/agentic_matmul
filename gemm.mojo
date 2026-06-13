@@ -1608,24 +1608,31 @@ def matmul_dispatch[
     elif m == 5:
         _prefill_gemm_v3[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
     elif n >= k:
-        # wide-N (up-proj-like): one 8x24 tile (KU=2, TILE_N = 3*NR = 9*NELTS)
-        # at every M, KC=256 for small M and 512 for large M.
-        # Re-measured Jun 2026 (interleaved A/B vs linalg, peak over 20 runs on
-        # this Skylake AVX-512 VM): 8x24 KC=512 beats the old large-M tiles —
-        # ~+4% over 4x48 at M=256 (0.92 -> ~0.96-0.99) and ~+3% over 6x32-KC1024
-        # at M=512 (0.88 -> ~0.94). MR=8 also leaves no scalar M-remainder at
-        # M=256/512. The earlier KC=1024 "halve-C-traffic" pick has since
-        # regressed (KC=512 now beats KC=1024 even for the old 6x32 tile), so
-        # the wide-N and tall-K large-M paths now share KC=512.
+        # wide-N (up-proj-like). The small-M band keeps the 8x24 tile (KU=2,
+        # TILE_N = 3*NR = 9*NELTS) that wins decisively at M<=192; the large-M
+        # band uses the N-balanced 6x32 tile (TILE_N = 2*NR = 8*NELTS = 64).
+        #
+        # Large-M retune Jun 13 2026 on the 2.10 GHz Xeon (4c, AVX-512, L2 2MB/
+        # core, L3 260MB) — a DIFFERENT machine from the Skylake 2.80 GHz VM the
+        # old 8x24/KC512 picks were tuned on, with 2x the L2. Interleaved A/B vs
+        # linalg, peak over 20 runs:
+        #   * 6x32 beats 8x24 by a wide margin for every M>192 here (e.g. M=256
+        #     8x24-KC512 0.93 -> 6x32-KC512 1.02; the higher MR of 8x24 no longer
+        #     pays once N=11008's per-row SIMD width matters more than i-panel
+        #     count). So the whole large-M band is now 6x32, flipping M=256 from
+        #     LOSE to WIN.
+        #   * KC: with the bigger L2 the C-traffic win from fewer k-panels now
+        #     dominates. KC=512 is best up to M~288 (M=256 1.02, M=288 1.045);
+        #     above that a single k-panel (KC=2048=K, no K split -> C written
+        #     once) wins (M=384 0.999->1.046, M=512 0.953->1.038), flipping both
+        #     of the old large-M losses to WINs. (On the small-L2 Skylake VM the
+        #     opposite held — KC=512 beat KC=1024 there; this pick is HW-specific.)
         if m <= 192:
             _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
-        elif m <= 256:
-            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 512, 2, 9 * NELTS, 64](c, a, b)
-        else:
-            # M > 256: the masked-remainder fix lets the N-balanced 6x32 tile
-            # beat 8x24 here (M=512: 0.946 vs 0.915 vs linalg); 8x24 still wins
-            # at M=256, so the crossover sits at 256.
+        elif m <= 288:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
+        else:
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
     else:
         # tall-K (down-proj-like): uniform 6x32 tile, TILE_N = 2*NR = 8*NELTS =
         # 64, KC=256 (M<=64) / 512 (M>64). TILE_N=64 splits N=2048 into 32 even
@@ -1638,10 +1645,20 @@ def matmul_dispatch[
         # beats 8x24 at every M — mid-M (M=8..64) flips from the noise floor to
         # clear WINS (1.01-1.28x), and large M improves to 0.92-0.97 (M=256
         # 0.88 -> 0.94). This replaces the old 8x24/6x32 three-band split.
+        # Large-M KC bump (Jun 13 2026, 2.10 GHz Xeon, L2 2MB/core): for M>256
+        # a larger KC=2048 (vs 512 -> ceil(11008/2048)=6 k-panels instead of 22)
+        # cuts the per-panel B re-pack / re-read overhead and wins on the heavy
+        # GEMMs — interleaved A/B vs linalg, peak/20: M=384 0.957->0.975, M=512
+        # 0.936->0.988. Pushing KC further over-grows the packed panels and
+        # collapses (KC=5504 0.75, full-K 0.45), and M<=256 keeps KC512 (M=128
+        # needs it: KC512 1.10 vs KC1024 1.06; M=256 is a wash). KC256 stays for
+        # the M<=64 band where the smaller packed panels help.
         if m <= 64:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 256, 4, 8 * NELTS, 64](c, a, b)
-        else:
+        elif m <= 256:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
+        else:
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
 
 
 # Default matmul points to the tiled version

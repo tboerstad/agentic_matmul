@@ -280,7 +280,45 @@ tile (MR×NR), KC, KU, NC_TILES — have all been swept and sit within the ±5�
 run-to-run noise of each other. Closing the last ~3–7% needs an assembly-level
 inner-loop rewrite to match `linalg`'s hand-tuned AVX-512 kernel.
 
+### Large-M retune on the 2.10 GHz Xeon (Jun 13 2026): 4 losses → 0
+
+The "genuine micro-kernel maturity, needs an assembly rewrite" conclusion above
+turned out to be **hardware-specific to the Skylake 2.80 GHz VM it was tuned
+on**. Re-running the sweep on the cloud 2.10 GHz Xeon (4 cores, AVX-512, **L2
+2 MB/core, L3 260 MB** — twice the L2 of the Skylake box) found a different set
+of losing shapes and a different optimum. Baseline (warm, peak/8, interleaved):
+up-proj M=256 ≈ 0.91–0.93, up-proj M=512 ≈ 0.95–0.97, down-proj M=512 ≈ 0.95
+(down-proj M=256 already *won* ~1.01 here). Two tile-selection fixes, each
+validated by interleaved A/B vs `linalg` (peak over 20 runs):
+
+- **up-proj (wide-N) M>192 → 6×32 (was 8×24 at M≤256).** On this machine the
+  6×32 tile beats 8×24 by a wide margin at every M>192 (M=256: 8×24-KC512 0.93
+  → 6×32-KC512 **1.02**) — N=11008's wide per-row SIMD outweighs 8×24's higher
+  i-panel count. This alone flips M=256 from LOSE to WIN.
+- **Larger KC where the 2 MB L2 allows it.** With double the L2 the C-traffic
+  saved by using fewer k-panels now dominates the bigger packed panels:
+  - up-proj M>288 → **KC=2048** (single k-panel, K=2048, C written once):
+    M=384 0.999→**1.046**, M=512 0.953→**1.038**. (M≤288 keeps KC=512: best at
+    M=256/288.)
+  - down-proj M>256 → **KC=2048** (6 k-panels over K=11008 vs 22 at KC=512):
+    M=384 0.957→**0.975**, M=512 0.936→**0.99** (parity). Pushing KC further
+    over-grows the panels and collapses (KC=5504 → 0.75, full-K → 0.45); M≤256
+    keeps KC=512 (M=128 needs it: 1.10 vs 1.06).
+
+This is the **opposite** of the Skylake finding ("KC=512 beats KC=1024 even for
+6×32") — a direct consequence of the larger L2, and a reminder that every KC/
+tile pick in this file is hardware-specific. Warm sweep after the retune: **21
+of 22 shapes WIN**, the lone exception being down-proj M=512 at ~0.99 (parity,
+flips WIN/LOSE between runs). The four clear large-M losses are gone with no
+micro-kernel rewrite — they were a stale tile/KC table carried over from a
+smaller-cache machine.
+
 ## Future work: how to close the remaining large-M gap
+
+> Superseded on the 2.10 GHz Xeon by the retune above — the four large-M losses
+> this section was written to attack are now WINs/parity there. The analysis
+> below still holds on the smaller-cache Skylake 2.80 GHz VM, where the larger-KC
+> fix does not apply (its 1 MB L2 cannot hold the bigger packed panels).
 
 Current losses (after the masked-remainder kernel above): only the four heaviest
 GEMMs — up-proj M=256/512 ≈ 0.93/0.92 and down-proj M=256/512 ≈ 0.94/0.95 vs
