@@ -97,6 +97,11 @@ residual capture-list / hoisted-binding overhead from the syntax migration.
 bash setup.sh
 ```
 
+The toolchain is pinned to the MAX 26.3 stable release (Mojo 1.0.0b1). All
+sources build warning-free under it. `setup.sh` installs it from the stable
+wheel index (`https://whl.modular.com/simple/`); to track the bleeding edge
+instead, swap in the nightly index (`https://whl.modular.com/nightly/simple/`).
+
 ## Run
 
 ```bash

@@ -146,9 +146,9 @@ def matmul_parallel[dtype: DType = DType.float64](
             i_end = m
 
         # Hoisted captures for inner closure (rule #5)
-        var a_val = Scalar[dtype](0)
-        var c_row = c_ptr
-        var b_row = b_ptr
+        var a_val: Scalar[dtype]
+        var c_row: type_of(c_ptr)
+        var b_row: type_of(b_ptr)
 
         for p0 in range(0, k, TILE):
             var p_end = p0 + TILE
@@ -211,11 +211,11 @@ def matmul_register_blocked[
 
         # Hoisted captures for inner closures (rule #5)
         var a_vals = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
-        var b_row = b_ptr
-        var c_row = c_ptr
-        var a_val = Scalar[dtype](0)
-        var i = i0
-        var j0_h = 0
+        var b_row: type_of(b_ptr)
+        var c_row: type_of(c_ptr)
+        var a_val: Scalar[dtype]
+        var i: Int
+        var j0_h: Int
 
         for p0 in range(0, k, TILE):
             var p_end = p0 + TILE
@@ -305,11 +305,11 @@ def matmul_packed[
             i_end = m
 
         # Hoisted captures for inner closures (rule #5)
-        var i = i0
-        var j0_h = 0
-        var p0_h = 0
-        var tile_k_h = 0
-        var c_row = c_ptr
+        var i: Int
+        var j0_h: Int
+        var p0_h: Int
+        var tile_k_h: Int
+        var c_row: type_of(c_ptr)
 
         for p0 in range(0, k, TILE):
             var p_end = p0 + TILE
@@ -425,12 +425,12 @@ def matmul_comptime[
         var tile_n = j_end - j0
 
         # Hoisted captures for inner closures (rule #5)
-        var i = 0
-        var rem_base = 0
-        var p0_h = 0
-        var tile_k_h = 0
-        var j0_h = j0
-        var c_row = c_ptr
+        var i: Int
+        var rem_base: Int
+        var p0_h: Int
+        var tile_k_h: Int
+        var j0_h: Int
+        var c_row: type_of(c_ptr)
 
         # j→k→i order: C panel stays in L1 across all k-tiles
         for p0 in range(0, k, TILE_K):
@@ -577,9 +577,9 @@ def _goto_gemv[
         var tile_n = min(TILE_J, n - j0)
 
         # Hoisted captures for inner closure (rule #5)
-        var c_row = c_ptr
-        var b_row = b_ptr
-        var a_val = Scalar[dtype](0)
+        var c_row: type_of(c_ptr)
+        var b_row: type_of(b_ptr)
+        var a_val: Scalar[dtype]
 
         for i in range(m):
             c_row = c_ptr + i * n + j0
@@ -633,13 +633,13 @@ def _goto_gemm[
         var bp_tile = bp_buf + j_tile_idx * bp_per_tile
 
         # Hoisted captures for inner closures (rule #5)
-        var c_row = c_ptr
-        var a_row = a_ptr
-        var bp_panel = bp_tile
-        var first_k = False
-        var kc_h = 0
-        var pc_h = 0
-        var i_h = 0
+        var c_row: type_of(c_ptr)
+        var a_row: type_of(a_ptr)
+        var bp_panel: type_of(bp_tile)
+        var first_k: Bool
+        var kc_h: Int
+        var pc_h: Int
+        var i_h: Int
 
         for pc in range(0, k, KC):
             var kc = min(KC, k - pc)
@@ -873,13 +873,13 @@ def _prefill_gemm[
         var ap_worker = ap_buf + worker_id * ap_per_worker
 
         # Hoisted captures for inner closures (rule #5)
-        var c_row = c_ptr
-        var a_row = a_ptr
-        var bp_panel = bp_worker
-        var is_first_k = False
-        var kc_h = 0
-        var pc_h = 0
-        var i_h = 0
+        var c_row: type_of(c_ptr)
+        var a_row: type_of(a_ptr)
+        var bp_panel: type_of(bp_worker)
+        var is_first_k: Bool
+        var kc_h: Int
+        var pc_h: Int
+        var i_h: Int
 
         # Process j-tiles in batches of NC_TILES to keep C in L2
         var jt = j_tile_start
@@ -1156,13 +1156,13 @@ def _prefill_gemm_v3[
         var ap_worker = ap_buf + worker_id * ap_per_worker
 
         # Hoisted captures for inner closures (rule #5)
-        var c_row = c_ptr
-        var a_row = a_ptr
-        var bp_panel = bp_worker
-        var is_first_k = False
-        var kc_h = 0
-        var pc_h = 0
-        var i_h = 0
+        var c_row: type_of(c_ptr)
+        var a_row: type_of(a_ptr)
+        var bp_panel: type_of(bp_worker)
+        var is_first_k: Bool
+        var kc_h: Int
+        var pc_h: Int
+        var i_h: Int
 
         var jt = j_tile_start
         while jt < j_tile_end:

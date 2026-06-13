@@ -31,7 +31,7 @@ Intel Xeon @ 2.10 GHz Granite Rapids; both 4 cores, AVX-512, KVM). Your results 
 
 ## First-time setup after cloning
 
-1. Run `bash setup.sh` to install dependencies (uv, Mojo nightly)
+1. Run `bash setup.sh` to install dependencies (uv, Mojo via MAX 26.3 → Mojo 1.0.0b1)
 2. Activate the venv: `source .venv/bin/activate`
 3. Verify the setup works: `mojo main.mojo`
 
@@ -48,6 +48,7 @@ Intel Xeon @ 2.10 GHz Granite Rapids; both 4 cores, AVX-512, KVM). Your results 
 - Closures passed to `vectorize` use the `unified {mut}` syntax: `fn name[width: Int](i: Int) unified {mut}:` — `unified` means it works in both parametric and runtime contexts, `{mut}` allows capturing and mutating enclosing variables
 - Use `parallelize[func](num_work_items, num_workers)` from `std.algorithm.functional` to distribute work across threads — the closure must use `capturing` (not `unified {mut}`): `fn worker(i: Int) capturing:`
 - Use `InlineArray[T, N]` (from `std.collections`) + `comptime for` to replace hand-numbered variables (e.g. `acc0`–`acc3`). The compiler flattens comptime-indexed `InlineArray` elements into registers, producing identical machine code to manual variables — but the code scales when you change tile sizes like MR/NR/KU
+- Declare hoisted closure-capture bindings type-only (`var c_row: type_of(c_ptr)`, `var kc_h: Int`) rather than with a dummy initializer (`var c_row = c_ptr`). The dummy value is always overwritten before the inner closure reads it, and Mojo 1.0.0b1 flags it as a dead store (`assignment ... was never used`). `type_of(x)` recovers an `UnsafePointer`'s full type including its `origin` parameter
 
 ## Development
 
