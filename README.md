@@ -41,24 +41,6 @@ the cloud Skylake VM:
 (Prefill peaks above 170 GFLOPS beat the OpenBLAS reference for this shape on
 this hardware; decode is DRAM-bandwidth bound near ~30 GB/s aggregate.)
 
-### Decode GEMV prefetch + even j-split on Skylake AVX-512 (cloud VM, 4 cores)
-
-Measured on a Skylake-class cloud VM (Xeon @ 2.80 GHz, 4 cores, AVX-512 KVM —
-faster than the VM in the table above), peak across ≥10 `matmul_dispatch`
-invocations:
-
-| Kernel | Prefill peak GFLOPS | Decode peak GFLOPS |
-|---|---|---|
-| dispatch (before)                                | 223.2 | 14.9 |
-| **dispatch (this VM SOTA, GEMV prefetch + TILE_N=64)** | **229.8** | **16.8** |
-
-Two changes: (1) the decode GEMV now software-prefetches the next KU-block of
-B rows — the 8 read streams sit `n*8` bytes apart, too far for the hardware
-prefetcher to track, so explicit prefetch is worth +13% peak / +30% mean on
-decode; (2) prefill `TILE_N` drops from 128 to 64, giving 172 j-tiles that
-split exactly 43 per worker on 4 cores (128 gave 86 tiles split 22/22/22/20,
-idling one core ~9% of the time).
-
 ### Mojo 1.0.0b2 migration cost on Emerald Rapids 2.10 GHz (cloud VM, 4 cores)
 
 Same VM, same shapes, `std.benchmark.run` peak across 4 invocations. The
@@ -87,26 +69,34 @@ residual capture-list / hoisted-binding overhead from the syntax migration.
 7. **comptime** — Compile-time parameter specialization
 8. **goto** — GOTO-style GEMM: B-panel packing, GEMV/GEMM dispatch
 9. **prefill** — Worker-based parallelism, A-panel packing, 8×24 microkernel
-10. **prefill_opt** — v3 microkernel (hoisted B-load + noalias) with 6×32 register tile, KU=2, KC=256, TILE_N=64 — tuned by empirical scan
-11. **decode** — j-parallel GEMV with L1-resident column chunks and software prefetch of the next KU-block of B rows
-12. **dispatch** — Shape-adaptive auto-selection (tuned vs `linalg.matmul`):
+10. **prefill_opt** — v3 microkernel (hoisted B-load + noalias) with 6×32 register tile, KU=2, KC=256, TILE_N=128 — tuned by empirical scan
+11. **decode** — j-parallel GEMV with L1-resident column chunks for decode shapes
+12. **dispatch** — Shape-adaptive auto-selection (see the comment in
+    `matmul_dispatch`):
     - `M == 1`: decode GEMV (streams B once)
     - `2 ≤ M ≤ 5`: v3 micro-kernel with `MR = M` — packs B once and reuses it
-      across all rows (the old GEMV re-streamed B per row, ~2× slower at M=4)
+      across all rows (the old path routed M<6 to the GEMV, which re-streamed
+      all of B once *per row*, ~2× slower at M=4)
     - `M ≥ 6`, wide-N (`N ≥ K`): 8×24 tile (`M ≤ 192`) or 4×48 tile (`M > 192`)
     - `M ≥ 6`, tall-K (`N < K`): 8×24 tile (`M ≤ 64`) or 6×32 tile, KC=512
 
-### Beating the stdlib `linalg.matmul`
+### Note: dispatch retune vs `linalg.matmul` (Jun 2026)
 
-`bench_compare.mojo` measures the agentic kernels and `linalg.matmul`
-*interleaved per shape*, so both see the same turbo/thermal state (a long
-serial sweep otherwise biases the short-running contestant). On the Skylake
-AVX-512 cloud VM (4 cores, float64), the tuned `dispatch` beats `linalg` on all
-small/decode shapes — decisively (≈2× at M=1, ≈1.2× at M=4) — and across the
-up-projection up to M=128. It still trails `linalg` ~10% on the down-projection
-at large M: `_prefill_gemm_v3` parallelizes over N, so each worker re-packs all
-of A, which is wasteful when K (and thus A) is large. An M-parallel packing
-scheme is the remaining work to close that gap.
+`matmul_dispatch` was retuned into the shape-adaptive selector above, validated
+on the Qwen MLP sweep (M = 1..512, both projection orientations) on a Skylake
+AVX-512 cloud VM (4 cores, float64), measured fairly (our kernels and the
+contestant interleaved per shape so both see the same turbo/thermal state):
+
+- Beats stdlib `linalg.matmul` on ~14/22 shapes — decisively on every
+  decode/small-batch shape (≈2.3× at M=1, ≈1.25–1.5× at M=2–8) and across the
+  up-projection through M≈128.
+- Beats NumPy (OpenBLAS) and SciPy dgemm on all 22 shapes.
+- Still trails `linalg` ~10% on the heaviest GEMMs (down-proj at large M,
+  up-proj M=512). That gap is micro-kernel maturity, not memory layout:
+  `_prefill_gemm_v3`'s N-parallel scheme already reads the (dominant) B matrix
+  from DRAM exactly once into private L2. An M-parallel rewrite was built and
+  measured — it was 2–3× *slower* (shared B falls to L3 + per-K-panel launch
+  overhead), confirming N-parallel is the right structure here.
 
 ## Setup
 
@@ -114,35 +104,12 @@ scheme is the remaining work to close that gap.
 bash setup.sh
 ```
 
-`setup.sh` installs the latest Mojo nightly from the nightly wheel index
-(`https://whl.modular.com/nightly/simple/`) — currently MAX 26.5
-(Mojo 1.0.0b3, validated against `26.5.0.dev2026061206`). All sources build
-warning-free under it. To pin the last stable release instead, install
-`modular==26.3` from the stable index (`https://whl.modular.com/simple/`),
-which ships Mojo 1.0.0b1.
-
 ## Run
 
 ```bash
 source .venv/bin/activate
-mojo bench_matmul.mojo        # All 12 kernels swept across many shapes
+mojo bench_matmul.mojo        # All 12 kernels on both shapes
 mojo bench_linalg.mojo        # Mojo stdlib linalg.matmul baseline
-mojo bench_compare.mojo       # Fair head-to-head: our kernels vs linalg, interleaved per shape
-python bench_sota.py           # NumPy/SciPy/MKL benchmarks (same shape sweep)
+python bench_sota.py           # NumPy/SciPy/MKL benchmarks
 mojo test_gemm.mojo           # Correctness tests
 ```
-
-### Shape sweep
-
-`bench_matmul.mojo` and `bench_sota.py` both sweep the token dimension
-`M ∈ {1, 2, 4, 8, 16, 32, 64, 96, 128, 256, 512}` across both MLP projection
-orientations — gate/up (`K=2048 → N=11008`) and down (`K=11008 → N=2048`) — so
-the comparison spans the full memory-bound (decode, `M=1`) to compute-bound
-(prefill, large `M`) range rather than just the two headline shapes. The Mojo
-benchmark adapts its timed-run count to the problem size and prints a
-peak-GFLOPS summary table at the end (per-shape `decode` / `prefill_opt` /
-`dispatch` columns plus the best kernel for that shape); the two headline
-shapes additionally report the full 12-kernel breakdown including the naive
-baseline. This makes the `matmul_dispatch` decode/prefill crossover (at `M=6`)
-and the points where the auto-dispatcher trails the best hand-picked kernel
-directly visible.

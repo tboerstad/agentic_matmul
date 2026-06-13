@@ -1,6 +1,6 @@
 from matrix import Matrix
 from linalg.matmul import matmul as linalg_matmul
-from layout import Coord, TileTensor, row_major
+from layout import Coord, Idx, TileTensor, row_major
 from std.collections import List
 from std.time import perf_counter_ns
 
@@ -29,9 +29,9 @@ def bench_one(label: String, m: Int, n: Int, k: Int) raises:
     var b_ptr = b.data.unsafe_ptr()
     var c_ptr = c_data.unsafe_ptr()
 
-    var c_tile = TileTensor(c_ptr, row_major(Coord(m, n)))
-    var a_tile = TileTensor(a_ptr, row_major(Coord(m, k)))
-    var b_tile = TileTensor(b_ptr, row_major(Coord(k, n)))
+    var c_tile = TileTensor(c_ptr, row_major(Coord(Idx(m), Idx(n))))
+    var a_tile = TileTensor(a_ptr, row_major(Coord(Idx(m), Idx(k))))
+    var b_tile = TileTensor(b_ptr, row_major(Coord(Idx(k), Idx(n))))
 
     # Warmup
     for _ in range(2):
@@ -66,15 +66,9 @@ def main() raises:
     print("=" * 50)
     print("")
 
-    # Same shape grid as bench_matmul.mojo / bench_sota.py: sweep the token
-    # dimension M across both Qwen 2.5 VL 3B MLP projection orientations.
-    var m_sweep = [1, 2, 4, 8, 16, 32, 64, 96, 128, 256, 512]
-
-    print("--- up-proj sweep  (M x 11008 x 2048) ---\n")
-    for ref m in m_sweep:
-        bench_one("up   M=" + String(m), m, 11008, 2048)
+    print("--- 1x11008x2048 (decode) ---\n")
+    bench_one("linalg", 1, 11008, 2048)
     print("")
 
-    print("--- down-proj sweep (M x 2048 x 11008) ---\n")
-    for ref m in m_sweep:
-        bench_one("down M=" + String(m), m, 2048, 11008)
+    print("--- 96x11008x2048 (prefill) ---\n")
+    bench_one("linalg", 96, 11008, 2048)
