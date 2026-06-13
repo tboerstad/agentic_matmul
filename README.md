@@ -108,8 +108,23 @@ which ships Mojo 1.0.0b1.
 
 ```bash
 source .venv/bin/activate
-mojo bench_matmul.mojo        # All 12 kernels on both shapes
+mojo bench_matmul.mojo        # All 12 kernels swept across many shapes
 mojo bench_linalg.mojo        # Mojo stdlib linalg.matmul baseline
-python bench_sota.py           # NumPy/SciPy/MKL benchmarks
+python bench_sota.py           # NumPy/SciPy/MKL benchmarks (same shape sweep)
 mojo test_gemm.mojo           # Correctness tests
 ```
+
+### Shape sweep
+
+`bench_matmul.mojo` and `bench_sota.py` both sweep the token dimension
+`M ∈ {1, 2, 4, 8, 16, 32, 64, 96, 128, 256, 512}` across both MLP projection
+orientations — gate/up (`K=2048 → N=11008`) and down (`K=11008 → N=2048`) — so
+the comparison spans the full memory-bound (decode, `M=1`) to compute-bound
+(prefill, large `M`) range rather than just the two headline shapes. The Mojo
+benchmark adapts its timed-run count to the problem size and prints a
+peak-GFLOPS summary table at the end (per-shape `decode` / `prefill_opt` /
+`dispatch` columns plus the best kernel for that shape); the two headline
+shapes additionally report the full 12-kernel breakdown including the naive
+baseline. This makes the `matmul_dispatch` decode/prefill crossover (at `M=6`)
+and the points where the auto-dispatcher trails the best hand-picked kernel
+directly visible.

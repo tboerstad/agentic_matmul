@@ -21,10 +21,16 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-SHAPES = [
-    ("decode  (1x11008x2048)", 1, 11008, 2048),
-    ("prefill (96x11008x2048)", 96, 11008, 2048),
-]
+# Sweep the token dimension M from decode (1) to large prefill batches across
+# both Qwen 2.5 VL 3B MLP projection orientations, so the reference libraries
+# can be compared against the Mojo kernels (bench_matmul.mojo) on the same grid:
+#   - "up"   proj: K=2048  -> N=11008  (gate/up)
+#   - "down" proj: K=11008 -> N=2048   (down)
+M_SWEEP = [1, 2, 4, 8, 16, 32, 64, 96, 128, 256, 512]
+SHAPES = (
+    [(f"up   M={m:<4d}({m}x11008x2048)", m, 11008, 2048) for m in M_SWEEP]
+    + [(f"down M={m:<4d}({m}x2048x11008)", m, 2048, 11008) for m in M_SWEEP]
+)
 WARMUP = 5
 ITERS = 20  # measurement iterations
 DTYPE = np.float64
