@@ -87,40 +87,52 @@ on the Qwen MLP sweep (M = 1..512, both projection orientations) on a Skylake
 AVX-512 cloud VM (4 cores, float64), measured fairly (our kernels and the
 contestant interleaved per shape so both see the same turbo/thermal state):
 
-- Beats stdlib `linalg.matmul` on ~14/22 shapes — decisively on every
-  decode/small-batch shape (≈2.3× at M=1, ≈1.25–1.5× at M=2–8) and across the
-  up-projection through M≈128.
+- Beats stdlib `linalg.matmul` on 17/22 shapes — decisively on every
+  decode/small-batch shape (≈1.9–2.4× at M=1, ≈1.2–1.3× at M=2–8), across the
+  up-projection through M≈128, and on the full down-projection through M=96
+  (after the load-balance fix below).
 - Beats NumPy (OpenBLAS) and SciPy dgemm on all 22 shapes.
-- Still trails `linalg` ~7–11% on the heaviest GEMMs (down-proj at large M,
-  up-proj M ≥ 256). That gap is micro-kernel maturity, not memory layout:
+- Still trails `linalg` ~4–11% on the 5 heaviest GEMMs (down-proj M ≥ 128,
+  up-proj M ≥ 256). That residual is micro-kernel maturity, not memory layout:
   `_prefill_gemm_v3`'s N-parallel scheme already reads the (dominant) B matrix
   from DRAM exactly once into private L2. An M-parallel rewrite was built and
   measured — it was 2–3× *slower* (shared B falls to L3 + per-K-panel launch
   overhead), confirming N-parallel is the right structure here.
 
-### Note: where we still lose, and what does *not* close it (Jun 2026 re-audit)
+### Note: down-proj mid-M was a load-balance bug, not micro-kernel maturity (Jun 2026)
 
-Re-measured on the Xeon @ 2.10 GHz cloud VM (4 cores, AVX-512, float64) with
-`bench_sweep.mojo`, which interleaves `matmul_dispatch` against `linalg.matmul`
-per shape. **Both headline shapes win** (decode 1×11008×2048 ≈ 2.0×, prefill
-96×11008×2048 ≈ 1.07×). The remaining losses are confined to:
+An assembly-level re-audit on the Skylake @ 2.80 GHz cloud VM (4 cores, AVX-512,
+float64) found that `_prefill_gemm_v3` and `linalg.matmul` **compile to the same
+micro-kernel** — a 6×32 (or 8×24) register tile with 24 `zmm` accumulators that
+never spill, B-loads hoisted, A broadcast, running `vfmadd231pd` at the
+theoretical 2 FMA/cycle peak. The compute core is not where we lose.
+
+The real losses were in everything *around* the micro-kernel, and the biggest
+one was a pure scheduling artifact. The down-proj `M ≤ 64` branch used
+`TILE_N = 9*NELTS = 72`, which splits N=2048 into **29 j-tiles → 8/8/8/5 across
+4 workers**, idling one core ~10% of the time. That cost 7–8% at M=32..64 and
+showed up as a sharp cliff (down-proj M=8..64 ratios ~0.81–0.83, while the
+already-balanced M≥96 path sat near 0.99). Switching that branch to
+`TILE_N = 6*NELTS = 48` (43 j-tiles ≈ 11/11/11/10, a clean split) flips all of
+M=8..64 from LOSE to **WIN** (≈1.02–1.15× vs linalg) with no micro-kernel change.
+This is the same even-split lesson `matmul_prefill_opt` already applied to the
+prefill shape — it just hadn't been carried over to the tall-K branch.
+
+After the fix, the remaining losses are confined to the largest GEMMs:
 
 | Shape | ratio (dispatch / linalg) |
 |---|---|
-| down-proj M=64..512 | 0.89 – 0.92 |
-| up-proj M=256 / 512  | 0.97 / 0.93 |
+| down-proj M=128 / 256 / 512 | 0.96 / 0.89 / 0.90 |
+| up-proj   M=256 / 512       | 0.96 / 0.90 |
 
-The README previously blamed the down-proj gap on `_prefill_gemm_v3` re-packing
-all of A per N-worker, and suggested an M-parallel / shared-A packing scheme as
-the fix. **That diagnosis turned out to be wrong on this hardware.** A shared
-single-pack-of-A variant (`SHARED_A`) was implemented and measured head-to-head:
-it is a *wash* (+1% at M=128, −0.4% at M=512, noise elsewhere). The reason is
-that A fits comfortably in the 260 MB L3, so the "redundant" re-reads are L3
-traffic, not DRAM — and at these sizes the kernel is **compute-bound**, not
-A-packing-bound. An exhaustive sweep of the micro-kernel tile (MR×NR), KC, KU,
-and NC_TILES likewise found the current configs already optimal. The residual
-gap is genuine micro-kernel maturity vs linalg's hand-tuned AVX-512 kernel.
-(Shared A-packing could still pay off on hardware where A exceeds L3.)
+These are the genuine micro-kernel-maturity gap visible in the assembly:
+`linalg` handles M/N remainder tiles with **masked AVX-512 load/store** (staying
+full-width SIMD) where ours drops to a scalar `vectorize` tail, and it
+**prefetches the packed B inside the micro-kernel** where ours only prefetches
+during the packing pass. (An earlier theory blamed `_prefill_gemm_v3` re-packing
+A per N-worker; a `SHARED_A` variant was measured and came out a wash — A fits in
+L3, so the re-reads are L3 traffic, not DRAM. Shared A-packing could still pay
+off on hardware where A exceeds L3.)
 
 ## Setup
 

@@ -1590,7 +1590,10 @@ def matmul_dispatch[
         # tall-K (down-proj-like).
         if m <= 64:
             # 8x24 tile, KU=4 — far better than 6x32 for narrow-N mid-M.
-            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 4, 9 * NELTS, 64](c, a, b)
+            # TILE_N = 2*NR = 6*NELTS (48): N=2048 → 43 j-tiles ≈ 11/11/11/10
+            # across 4 workers. The old 9*NELTS (72) gave 29 tiles → 8/8/8/5,
+            # idling one core ~10% of the time and costing 7-8% at M=32..64.
+            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 4, 6 * NELTS, 64](c, a, b)
         else:
             # Large M: 6x32 tile, KC=512, TILE_N = 2*NR = 8*NELTS.
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
