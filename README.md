@@ -156,6 +156,42 @@ re-reads are L3 traffic, not DRAM.)
 > with an interleaved A/B of the two variants (peak GFLOPS over ~15–20 runs),
 > never by comparing absolute numbers across runs.
 
+## Future work: how to close the remaining large-M gap
+
+Current losses (all the *largest*, non-headline shapes): down-proj M=128/256/512
+≈ 0.94/0.89/0.91 and up-proj M=256/512 ≈ 0.93/0.91 vs `linalg`. Decode (M=1) and
+prefill (M=96) already win, so this is strictly the high-batch tail.
+
+Pursue these in order — each is independently shippable and A/B-testable:
+
+1. **2-D `MC × KC` cache blocking (highest expected payoff).** The losses scale
+   with M, the classic signature of an A-panel that outgrows L2. We currently
+   pack *all* of M per worker (`ap_per_worker = num_i_panels * MR * KC`); at
+   M=512/KC=512 that panel is ≈2 MB, past the 1 MB L2. Add an outer `MC` loop
+   (BLIS 5-loop: `jc[NC] → pc[KC] → ic[MC] → jr → ir`) so the packed-A block
+   stays L2-resident, streamed against the L1-resident packed-B micro-panel.
+   Start with `MC ≈ 128–256` rows and sweep. This is a real rewrite of
+   `_prefill_gemm_v3`'s worker loop, not a tweak.
+2. **M-parallelism for very large M.** Today workers split only the N (j-tile)
+   dimension. At large M and modest N (down-proj N=2048 → 32 j-tiles / 4 workers)
+   a 2-D `(M, N)` work split can improve locality and balance. Cheap to try once
+   MC blocking exists (parallelize the `ic` loop).
+3. **Per-M KC/tile dispatch refinement (marginal, ≤2%).** `6×32`/KC=512 is
+   already near-optimal for M ≥ 192; KC=384 is ~2% better at M=96 but inside the
+   noise floor. Only worth wiring up if step 1 lands and exposes a clean signal.
+
+**Dead ends — already measured, do not re-attempt without new evidence:**
+- In-kernel packed-B prefetch (linalg does it): A/B neutral-to-harmful here
+  (0.98–1.01); ILP + HW prefetcher already hide the latency.
+- Masked-SIMD / zero-edge tiles: a zero-edge `4×32` lost at every M, so the
+  scalar M-remainder is *not* the bottleneck.
+- `SHARED_A` (pack A once, share across N-workers): a wash — A fits in L3.
+
+**How to validate any of the above:** interleaved A/B of the two kernel variants,
+peak GFLOPS over ~15–20 runs (see the methodology note above). The throwaway
+`exp_*.mojo` harnesses used for the TILE_N and KC sweeps are the template;
+gate the new path behind a comptime flag so on/off can be measured in one binary.
+
 ## Setup
 
 ```bash
