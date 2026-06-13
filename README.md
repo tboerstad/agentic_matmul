@@ -296,12 +296,32 @@ layout — every cheap structural lever has now been measured and rejected (belo
   (8×24 won M=128/256 but lost M=192/384 in interleaved A/B) — i.e. inside the
   noise floor, not a real signal. Kept 6×32.
 
-**Still open (needs a different machine or a real micro-kernel rewrite):**
-- **M-parallelism for very large M.** Workers split only the N (j-tile) dimension.
-  At large M and modest N (down-proj N=2048 → 32 j-tiles / 4 workers) a 2-D
-  `(M, N)` split could improve balance. Untested.
+- **2-D `(M, N)` worker split — built and measured *slower* (Jun 13 2026).** The
+  N-parallel scheme splits only j-tiles across the 4 cores, so each worker packs
+  *all* M rows of A; at large M that packed-A panel spills L2 (M=512/KC=512 ≈
+  2 MB > 1 MB L2). Added a `WM` comptime param to `_prefill_gemm_v3` forming a
+  `WM × (cores/WM)` worker grid — each worker owns a row-band so its packed-A
+  shrinks ~WM-fold and stays L2-resident. Verified bit-identical to `WM=1`
+  (checksum_err 0.0), then A/B'd vs `WM=1` and linalg (peak/20) on down-proj
+  large M. **It lost at every M:** down-proj M=256 ratio WM=1 0.95 → WM=2 0.91 →
+  WM=4 0.73; M=512 0.94 → 0.93 → 0.76. Same root cause as the MC-blocking loss:
+  A fits in L3 so the "redundant" per-worker A re-reads are cheap, and splitting
+  M just adds WM-fold redundant **B**-packing (B is the big matrix for down-proj)
+  plus B re-reads from L3. The `WM` param was reverted to keep the hot kernel
+  clean. Confirms packed-A L2 residency is **not** the down-proj bottleneck.
+
+**Still open (needs a real micro-kernel rewrite, not a memory-layout change):**
 - **Micro-kernel parity with `linalg`** on the heaviest GEMMs — the residual
-  ~9–11% at M≥256 lives here, not in cache blocking.
+  now lives entirely here. Both kernels are far from the 358 GFLOPS f64 peak
+  (linalg ~58%, dispatch ~50% at down-proj M=256), so there is headroom, but the
+  N=2048 down-proj shape is a poor fit for register-blocked tiling: it balances
+  cleanly across 4 cores only with NR=32 (TILE_N=64 → 32 even tiles), yet the
+  register-efficient MR for NR=32 (MR=6) leaves an M-remainder, while the
+  remainder-free MR=8 forces NR=24 (TILE_N=48 → 43 tiles, 11/11/11/10 imbalance).
+  Closing it needs `linalg`-style **masked AVX-512 N-remainder handling** (so a
+  perfectly-balanced NR=32 tiling has no scalar tail) and/or **pack/compute
+  overlap** to hide the ~5–8% redundant A/B-packing cost. Both are substantial
+  and unproven on this hardware.
 
 **How to validate any of the above:** interleaved A/B of the two kernel variants,
 peak GFLOPS over ~15–20 runs (see the methodology note above). The throwaway
