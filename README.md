@@ -157,11 +157,135 @@ re-reads are L3 traffic, not DRAM.)
 > with an interleaved A/B of the two variants (peak GFLOPS over ~15–20 runs),
 > never by comparing absolute numbers across runs.
 
+### Remeasurement (Jun 13 2026): down-proj mid-M now sits on the noise floor
+
+Re-ran `bench_sweep.mojo` on the Skylake @ 2.80 GHz cloud VM (4 cores, AVX-512,
+float64, Mojo 1.0.0b3 `dev2026061206`). The first sweep was discarded as a cold
+start (absolute GFLOPS ~20% below warm state); the table below is the **median
+ratio across 3 warm runs** (`dispatch / linalg`, peak GFLOPS per shape):
+
+| M | up-proj (N=11008 K=2048) | down-proj (N=2048 K=11008) |
+|---|---|---|
+| 1   | 2.63 WIN | 2.44 WIN |
+| 2   | 1.21 WIN | 1.13 WIN |
+| 4   | 1.18 WIN | 1.10 WIN |
+| 8   | 1.18 WIN | 0.99 ~tie |
+| 16  | 1.18 WIN | 0.97 LOSE |
+| 32  | 1.20 WIN | 0.99 ~tie |
+| 64  | 1.09 WIN | 0.96 LOSE |
+| 96  | 1.07 WIN | 1.02 WIN |
+| 128 | 1.03 WIN | 0.95 LOSE |
+| 256 | 0.93 LOSE | 0.88 LOSE |
+| 512 | 0.91 LOSE | 0.90 LOSE |
+
+Two things changed versus the post-load-balance-fix snapshot documented above:
+
+- **Up-proj improved at the top of the winning band.** Dispatch now wins cleanly
+  through M=128 (1.03–1.07×, previously a slight LOSE at M=96/128). M=256/512 are
+  unchanged losses (~0.91–0.93×).
+- **Down-proj mid-M (M=8..64) regressed from "decisive WIN" back to the noise
+  floor.** The `TILE_N=48` even-split fix claimed ≈1.02–1.15× here; the
+  remeasured median is ~0.96–0.99× — a marginal tie that flips WIN/LOSE between
+  runs (e.g. M=8: 1.03 / 0.99 / 0.96 across the three warm runs). The even-split
+  scheduling win is real but no longer dominates: at these mid-M sizes the gap to
+  `linalg` is back inside the ±5–10% run-to-run swing, so this band should be
+  read as a tie, not a win. The headline shapes are unaffected — decode (M=1)
+  still wins ~2.4–2.6× and prefill (M=96) wins on both orientations (1.07× /
+  1.02×).
+
+Net warm-state tally: dispatch clearly beats `linalg` on the full decode/small-M
+column and the entire up-proj band through M=128 (13/22 shapes by strict median,
+~16/22 counting the down-proj mid-M ties), and trails only on the heaviest GEMMs
+(down-proj M≥128, up-proj M≥256) — the same residual large-M gap addressed next.
+
+### Large-M retune (Jun 13 2026): unify on the 8×24 tile, drop the KC=1024 pick
+
+Questioning the "residual is unfixable micro-kernel maturity" conclusion above:
+an interleaved A/B (peak over 20–25 runs, the blessed methodology) of *several*
+tile shapes — not just the 6×32 ⇄ 8×24 pair the earlier note tried — found the
+large-M tile selection was simply mistuned, and that the tuning had drifted
+across compiler bumps. Two concrete fixes, both validated head-to-head:
+
+- **Up-proj (wide-N) M>192 → 8×24, KC=512** (was 4×48 KC=512 at M=256 and 6×32
+  KC=1024 at M>256). The 8×24 tile wins ~+4% at M=256 (0.92 → ~0.96) and ~+3%
+  at M=512 (0.91 → ~0.93). MR=8 also divides M=256/512 with no scalar
+  remainder. The old KC=1024 "halve the wide-C re-traffic" pick has since
+  *regressed* — at current codegen KC=512 beats KC=1024 even for the 6×32 tile —
+  so the special case was removed and both orientations now share KC=512.
+- **Down-proj (tall-K) M≥128 → 8×24, KC=512** (was 6×32 KC=512). MR=8 divides
+  M=128/256/512 evenly; the old MR=6 left a 4-row scalar-`vectorize` tail at
+  M=256, which was the single worst-tuned shape (0.85 in isolation). 8×24 wins
+  ~+4% at M=256 in controlled A/B, neutral at M=128/512. The `64 < M < 128`
+  band keeps 6×32 KC=512 — it wins the M≈96 down-proj prefill batch (~1.01×)
+  where 8×24 loses ~5% (both MR divide 96 evenly, but NR=32's wider per-row
+  SIMD pays off before the i-panel count grows). So down-proj now crosses tiles
+  twice across M; the dispatch comment documents all three bands.
+
+This collapses the old per-M tile zoo (8×24 / 4×48 / 6×32 / KC=1024) down to
+"8×24 everywhere, with a single 6×32 band for the down-proj M≈96 batch", and
+narrows the up-proj large-M gap to near-parity (M=256 ~0.96, M=512 ~0.93).
+
+**Dead ends re-confirmed on this hardware during the retune (do not re-attempt
+without a smaller-L3 machine):**
+- *Larger KC to cut down-proj C re-traffic* — K=11008=256×43, so KC∈{688,1376,
+  2752} give clean 16/8/4 k-panels (vs 22 uneven at KC=512). All lost: KC=2752
+  ran 0.70–0.76. The bigger packed A/B panels spilling cache cost far more than
+  the C-traffic saved. KC=512 stays.
+- *High-MR / narrow-NR tiles* (10×16, 12×16 — higher FLOP/byte of L1 traffic):
+  measured *worse* (~0.78–0.82), so down-proj large-M is not L1-load-bound.
+
+Residual after the retune: up-proj M=256/512 are near-parity (~0.93–0.96) and
+down-proj M≥128 still trails ~0.88–0.95. That tail is addressed by the
+masked-remainder kernel below; the 2-D (M,N) worker split was built and refuted
+(see Dead ends).
+
+### Masked register-blocked M-remainder (Jun 13 2026): 9 losses → 4
+
+The largest unlock came from fixing how the prefill kernel handles the
+**M-remainder** — the `m % MR` rows left over when the register tile's `MR`
+doesn't divide `M`. The old path swept these row-by-row: each remainder row ran
+its own full K-loop with only `NR_VECS` (=4) independent accumulators, far too
+shallow to hide the 4-cycle FMA latency. That scalar-ish tax is what forced the
+dispatch onto `MR`-divides-`M` tiles even when they tiled `N` badly.
+
+`_prefill_gemm_v3` now handles all `r = m % MR` leftover rows as **one
+register-blocked masked block**: a single K-sweep with `r × NR_VECS`
+accumulators, reusing the already-packed B panel at full `NR` width, with the
+inactive rows masked out of the C load/store (`comptime for mr … if mr < r`).
+Verified bit-identical (`verify_dispatch` max_err 0.0 on remainder shapes
+M=300/257/130/70/13/7).
+
+With the tail no longer slow, the tile choice flips to whatever balances `N`
+best, and `N=2048` balances perfectly only with **NR=32** (TILE_N=64 → 32 even
+j-tiles, zero N-remainder). So **down-proj is now a uniform 6×32 tile** at every
+M (KC=256 for M≤64, 512 above), and up-proj M>256 also moves to 6×32. Warm
+interleaved sweep vs `linalg` (peak/20):
+
+| M | up-proj | down-proj |
+|---|---|---|
+| 1–64   | WIN (1.05–2.4×) | **WIN (1.05–2.0×)** — mid-M was the noise floor |
+| 96, 128| WIN (1.04–1.09×) | **WIN** (1.02–1.03×; M=128 ≈ 1.00) |
+| 256    | 0.93 LOSE | 0.94–0.95 LOSE |
+| 512    | 0.91–0.94 LOSE | 0.93–0.97 LOSE |
+
+Losing shapes dropped from **9 to 4**. The entire down-proj mid-M band
+(M=8..64), previously stuck on the noise floor at ~0.96–0.99, now wins
+decisively (e.g. M=8 → 1.28–1.30×, M=16 → 1.19–1.25×), and down-proj M=256
+improved 0.88 → 0.94. The only remaining losses are the **four heaviest GEMMs**
+(up/down-proj M=256/512), all at ~0.93–0.97.
+
+Those four are genuine micro-kernel maturity: at M≥256 both kernels are
+compute-bound at ~66–70% of the 358 GFLOPS f64 peak, and the cheap knobs —
+tile (MR×NR), KC, KU, NC_TILES — have all been swept and sit within the ±5–10%
+run-to-run noise of each other. Closing the last ~3–7% needs an assembly-level
+inner-loop rewrite to match `linalg`'s hand-tuned AVX-512 kernel.
+
 ## Future work: how to close the remaining large-M gap
 
-Current losses (all the *largest*, non-headline shapes): down-proj M=128/256/512
-≈ 0.94/0.89/0.91 and up-proj M=256/512 ≈ 0.93/0.91 vs `linalg`. Decode (M=1) and
-prefill (M=96) already win, so this is strictly the high-batch tail.
+Current losses (after the masked-remainder kernel above): only the four heaviest
+GEMMs — up-proj M=256/512 ≈ 0.93/0.92 and down-proj M=256/512 ≈ 0.94/0.95 vs
+`linalg`. Everything M≤128 on both orientations now wins, so this is strictly
+the high-batch tail.
 
 ### Update (Jun 2026): wide-N M>256 retuned to 6×32 tile + KC=1024
 
@@ -214,12 +338,32 @@ layout — every cheap structural lever has now been measured and rejected (belo
   (8×24 won M=128/256 but lost M=192/384 in interleaved A/B) — i.e. inside the
   noise floor, not a real signal. Kept 6×32.
 
-**Still open (needs a different machine or a real micro-kernel rewrite):**
-- **M-parallelism for very large M.** Workers split only the N (j-tile) dimension.
-  At large M and modest N (down-proj N=2048 → 32 j-tiles / 4 workers) a 2-D
-  `(M, N)` split could improve balance. Untested.
+- **2-D `(M, N)` worker split — built and measured *slower* (Jun 13 2026).** The
+  N-parallel scheme splits only j-tiles across the 4 cores, so each worker packs
+  *all* M rows of A; at large M that packed-A panel spills L2 (M=512/KC=512 ≈
+  2 MB > 1 MB L2). Added a `WM` comptime param to `_prefill_gemm_v3` forming a
+  `WM × (cores/WM)` worker grid — each worker owns a row-band so its packed-A
+  shrinks ~WM-fold and stays L2-resident. Verified bit-identical to `WM=1`
+  (checksum_err 0.0), then A/B'd vs `WM=1` and linalg (peak/20) on down-proj
+  large M. **It lost at every M:** down-proj M=256 ratio WM=1 0.95 → WM=2 0.91 →
+  WM=4 0.73; M=512 0.94 → 0.93 → 0.76. Same root cause as the MC-blocking loss:
+  A fits in L3 so the "redundant" per-worker A re-reads are cheap, and splitting
+  M just adds WM-fold redundant **B**-packing (B is the big matrix for down-proj)
+  plus B re-reads from L3. The `WM` param was reverted to keep the hot kernel
+  clean. Confirms packed-A L2 residency is **not** the down-proj bottleneck.
+
+**Still open (needs a real micro-kernel rewrite, not a memory-layout change):**
 - **Micro-kernel parity with `linalg`** on the heaviest GEMMs — the residual
-  ~9–11% at M≥256 lives here, not in cache blocking.
+  now lives entirely here. Both kernels are far from the 358 GFLOPS f64 peak
+  (linalg ~58%, dispatch ~50% at down-proj M=256), so there is headroom, but the
+  N=2048 down-proj shape is a poor fit for register-blocked tiling: it balances
+  cleanly across 4 cores only with NR=32 (TILE_N=64 → 32 even tiles), yet the
+  register-efficient MR for NR=32 (MR=6) leaves an M-remainder, while the
+  remainder-free MR=8 forces NR=24 (TILE_N=48 → 43 tiles, 11/11/11/10 imbalance).
+  Closing it needs `linalg`-style **masked AVX-512 N-remainder handling** (so a
+  perfectly-balanced NR=32 tiling has no scalar tail) and/or **pack/compute
+  overlap** to hide the ~5–8% redundant A/B-packing cost. Both are substantial
+  and unproven on this hardware.
 
 **How to validate any of the above:** interleaved A/B of the two kernel variants,
 peak GFLOPS over ~15–20 runs (see the methodology note above). The throwaway

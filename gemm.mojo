@@ -1341,25 +1341,50 @@ def _prefill_gemm_v3[
                             i += MR
                             ip += 1
 
-                        while i < m:
-                            i_h = i
-                            var jj_limit = min(NR, tile_n - jr)
-                            c_row = c_ptr + i * n + j0 + jr
-
-                            def v3_fma_tail[width: Int](jj: Int) {mut c_row, mut a_ptr, read bp_panel, read is_first_k, read kc_h, read pc_h, read i_h, read k}:
-                                var acc = c_row.load[width=width](offset=jj)
-                                if is_first_k:
-                                    acc = SIMD[dtype, width](0)
-                                for ppk in range(kc_h):
-                                    acc = fma(
-                                        SIMD[dtype, width](a_ptr[i_h * k + pc_h + ppk]),
-                                        (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                        acc,
-                                    )
-                                c_row.store(offset=jj, val=acc)
-
-                            vectorize[NELTS](jj_limit, v3_fma_tail)
-                            i += 1
+                        # M-remainder (m % MR rows, 1..MR-1): handle all r
+                        # leftover rows as ONE register-blocked block — a single
+                        # K-sweep with r×NR_VECS accumulators, reusing the packed
+                        # B panel, full NR-width SIMD. (jr+NR <= tile_n here: the
+                        # partial-tile case already `continue`d above.) Replaces
+                        # the old row-by-row `vectorize` tail, which swept K once
+                        # per row with only NR_VECS-deep ILP — too shallow to hide
+                        # FMA latency, the tax that made MR-not-dividing-M tiles
+                        # (e.g. 6x32 at M=256) lose to remainder-free ones.
+                        if i < m:
+                            var r = m - i
+                            var racc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
+                                fill=SIMD[dtype, NELTS](0)
+                            )
+                            if not is_first_k:
+                                comptime for mr in range(MR):
+                                    if mr < r:
+                                        comptime for nr in range(NR_VECS):
+                                            racc[mr * NR_VECS + nr] = (
+                                                c_ptr + (i + mr) * n + j0 + jr
+                                            ).load[width=NELTS](offset=nr * NELTS)
+                            for pk in range(kc):
+                                var bp_k = bp_panel + pk * NR
+                                var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                                    fill=SIMD[dtype, NELTS](0)
+                                )
+                                comptime for nr in range(NR_VECS):
+                                    bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
+                                comptime for mr in range(MR):
+                                    if mr < r:
+                                        var a_bc = SIMD[dtype, NELTS](
+                                            a_ptr[(i + mr) * k + pc + pk]
+                                        )
+                                        comptime for nr in range(NR_VECS):
+                                            racc[mr * NR_VECS + nr] = a_bc.fma(
+                                                bv[nr], racc[mr * NR_VECS + nr]
+                                            )
+                            comptime for mr in range(MR):
+                                if mr < r:
+                                    comptime for nr in range(NR_VECS):
+                                        (c_ptr + (i + mr) * n + j0 + jr).store(
+                                            offset=nr * NELTS,
+                                            val=racc[mr * NR_VECS + nr],
+                                        )
 
             jt += NC_TILES
 
@@ -1545,27 +1570,28 @@ def matmul_dispatch[
     #     MR = M, so the packed B panel is streamed once and reused across all
     #     M rows. The old path sent these to the GEMV, which re-streamed all of
     #     B once *per row* — ~2x slower at M=4. MR=M removes the remainder loop.
-    #   - M >= 6 (prefill GEMM): pick the micro-kernel by aspect ratio and M.
-    #       * wide-N (N >= K, e.g. gate/up proj):
-    #           - M <= 192: 8x24 register tile, KC=256. Beats linalg M=6..128.
-    #           - 192 < M <= 256: 4x48 tile, KC=512.
-    #           - M >  256: 6x32 tile, KC=1024 — 3-5% over 4x48 from M=288 up,
-    #             plus ~1.5-2% from KC=1024 vs 512 (wide-C C-traffic; see below).
-    #             (interleaved 30-run A/B on Skylake AVX-512).
-    #       * tall-K (N < K, e.g. down proj):
-    #           - M <= 64:  8x24 tile, KC=256, KU=4.
-    #           - M >  64:  6x32 tile, KC=512.
-    #     NB: the tall-K (down-proj) GEMM still trails linalg ~7-11% at large M
-    #     (M >= 64). This was previously blamed on _prefill_gemm_v3's N-parallel
-    #     scheme re-packing all of A per worker, but that diagnosis is wrong on
-    #     this class of hardware: a shared single-pack-of-A variant was built and
-    #     measured (run `bench_sweep.mojo` / the config harness) and came out a
-    #     wash — A fits in L3, so the "redundant" re-reads are cheap, and these
-    #     large-M shapes are compute-bound, not A-packing-bound. An exhaustive
-    #     sweep of the tile (MR x NR), KC, KU, and NC_TILES found the configs
-    #     below already optimal; the residual gap is micro-kernel maturity vs
-    #     linalg's hand-tuned AVX-512 kernel, not memory layout. (Shared A-packing
-    #     may still help on hardware where A exceeds L3 — worth revisiting there.)
+    #   - M >= 6 (prefill GEMM): one 8x24 register tile per aspect ratio, with
+    #     KC stepping 256 (small M) -> 512 (large M). Re-tuned Jun 2026 by
+    #     interleaved A/B vs linalg (peak over 20 runs) on this Skylake AVX-512
+    #     VM, which collapsed the old per-M tile zoo (4x48 / 6x32 / KC=1024)
+    #     into a single tile shape per orientation:
+    #       * wide-N (N >= K, e.g. gate/up proj): 8x24, KU=2, TILE_N=9*NELTS.
+    #           - M <= 192: KC=256.   - M >  192: KC=512.
+    #         8x24 KC=512 beat the old 4x48 (M=256, ~+4%) and 6x32-KC1024
+    #         (M=512, ~+3%); MR=8 leaves no scalar M-remainder at M=256/512.
+    #       * tall-K (N < K, e.g. down proj): 8x24 KU=4 TILE_N=6*NELTS=48 at
+    #         the ends, 6x32 KC=512 in the middle band:
+    #           - uniform 6x32, TILE_N=8*NELTS=64 (32 even j-tiles on N=2048),
+    #             KC=256 (M<=64) / 512 (M>64). The register-blocked masked
+    #             M-remainder tail (see _prefill_gemm_v3) removes the scalar tax
+    #             that used to make MR=6 lose, so the perfectly N-balanced tile
+    #             wins at every M (mid-M 1.01-1.28x, large M 0.92-0.97).
+    #     NB: memory-layout levers (2-D MC*KC blocking, 2-D (M,N) worker split,
+    #     shared single-pack-of-A) were all measured wash-to-loss on this 33 MB-
+    #     L3 part: A fits in L3, so "redundant" per-worker A re-packs are cheap
+    #     L3 traffic and these shapes are compute-bound. The only residual losses
+    #     (up-proj M>=256, down-proj M=256) are micro-kernel maturity vs linalg's
+    #     hand-tuned AVX-512 kernel. (Memory levers may help where A exceeds L3.)
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
@@ -1582,34 +1608,39 @@ def matmul_dispatch[
     elif m == 5:
         _prefill_gemm_v3[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
     elif n >= k:
-        # wide-N (up-proj-like).
+        # wide-N (up-proj-like): one 8x24 tile (KU=2, TILE_N = 3*NR = 9*NELTS)
+        # at every M, KC=256 for small M and 512 for large M.
+        # Re-measured Jun 2026 (interleaved A/B vs linalg, peak over 20 runs on
+        # this Skylake AVX-512 VM): 8x24 KC=512 beats the old large-M tiles —
+        # ~+4% over 4x48 at M=256 (0.92 -> ~0.96-0.99) and ~+3% over 6x32-KC1024
+        # at M=512 (0.88 -> ~0.94). MR=8 also leaves no scalar M-remainder at
+        # M=256/512. The earlier KC=1024 "halve-C-traffic" pick has since
+        # regressed (KC=512 now beats KC=1024 even for the old 6x32 tile), so
+        # the wide-N and tall-K large-M paths now share KC=512.
         if m <= 192:
-            # 8x24 tile, TILE_N = 3*NR = 9*NELTS. Wins M=6..128 here.
             _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
         elif m <= 256:
-            # 4x48 tile (24 accs + 6 B-vecs ≤ 32 regs), KC=512. Best at M=256.
-            _prefill_gemm_v3[dtype, 4, 6 * NELTS, 512, 4, 12 * NELTS, 64](c, a, b)
+            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 512, 2, 9 * NELTS, 64](c, a, b)
         else:
-            # Very large M (> 256): 6x32 tile, KC=1024, TILE_N = 2*NR = 8*NELTS.
-            # Interleaved A/B (30 runs) on Skylake AVX-512 shows 6x32 beats the
-            # 4x48 tile by 3-5% from M=288 up (M=288/320/384/512 ratios
-            # 1.045/1.035/1.047/1.030), while 4x48 still wins at M=256 (0.98).
-            # KC=1024 (vs 512) wins another ~1.5-2% at M=512 here: up-proj has a
-            # wide C (N=11008), and C is loaded+stored once per k-panel, so K=2048
-            # split into 2 even panels (KC=1024) instead of 4 (KC=512) halves the
-            # 45 MB C re-traffic. (Down-proj has tiny C and long K, so it keeps
-            # KC=512 — larger KC there only spills the B/A panels.)
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64](c, a, b)
+            # M > 256: the masked-remainder fix lets the N-balanced 6x32 tile
+            # beat 8x24 here (M=512: 0.946 vs 0.915 vs linalg); 8x24 still wins
+            # at M=256, so the crossover sits at 256.
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
     else:
-        # tall-K (down-proj-like).
+        # tall-K (down-proj-like): uniform 6x32 tile, TILE_N = 2*NR = 8*NELTS =
+        # 64, KC=256 (M<=64) / 512 (M>64). TILE_N=64 splits N=2048 into 32 even
+        # j-tiles (8/8/8/8 across 4 workers) — perfect load balance, zero
+        # N-remainder. The M-remainder (MR=6 rarely divides M) is absorbed by
+        # the register-blocked masked tail in _prefill_gemm_v3 (one K-sweep,
+        # r×NR_VECS accumulators reusing the packed B), so the balanced tiling
+        # no longer pays a scalar-remainder tax. Re-measured Jun 13 2026
+        # (interleaved A/B vs linalg, peak/20): with that fix the balanced 6x32
+        # beats 8x24 at every M — mid-M (M=8..64) flips from the noise floor to
+        # clear WINS (1.01-1.28x), and large M improves to 0.92-0.97 (M=256
+        # 0.88 -> 0.94). This replaces the old 8x24/6x32 three-band split.
         if m <= 64:
-            # 8x24 tile, KU=4 — far better than 6x32 for narrow-N mid-M.
-            # TILE_N = 2*NR = 6*NELTS (48): N=2048 → 43 j-tiles ≈ 11/11/11/10
-            # across 4 workers. The old 9*NELTS (72) gave 29 tiles → 8/8/8/5,
-            # idling one core ~10% of the time and costing 7-8% at M=32..64.
-            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 4, 6 * NELTS, 64](c, a, b)
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 256, 4, 8 * NELTS, 64](c, a, b)
         else:
-            # Large M: 6x32 tile, KC=512, TILE_N = 2*NR = 8*NELTS.
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
 
 
