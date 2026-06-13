@@ -76,6 +76,30 @@ decode delta is Mojo 1.0.0b2 codegen drift (the unchanged `linalg.matmul`
 stdlib kernel regresses ~10% across the same compiler bump); the rest is
 residual capture-list / hoisted-binding overhead from the syntax migration.
 
+### Profiling rerun on Skylake AVX-512 (cloud VM, 4 cores) with Mojo 1.0.0b1
+
+Fresh profiling session (2026-06-13) on a Skylake-class cloud VM (Xeon @
+2.80 GHz, 4 cores, AVX-512, KVM) built with Mojo 1.0.0b1 (`modular 26.3.0`) —
+one beta behind the 1.0.0b2 build used for the numbers above. All four kernels
+measured on the *same* VM in one session: Mojo (agentic) is the peak across ≥15
+`matmul_dispatch` invocations; NumPy/SciPy are the `bench_sota.py` 20-iteration
+peak; Mojo linalg is `bench_linalg.mojo`:
+
+| Kernel | Prefill peak GFLOPS | Decode peak GFLOPS |
+|---|---|---|
+| SciPy dgemm (OpenBLAS)               | 129.9 | 4.0 |
+| NumPy (OpenBLAS, multi-thread)       | 153.4 | 9.3 |
+| **Mojo (agentic matmul, dispatch)**  | **160.9** | **11.7** |
+| Mojo linalg (stdlib)                 | 141.7 | 4.0 |
+
+This VM is meaningfully slower than the reference Skylake VM in the top table
+(its NumPy OpenBLAS peaks ~153/9.3 vs ~217/13.4 there), so these numbers are
+not directly comparable to the headline table — cloud VMs sharing the same
+nominal "Xeon @ 2.80 GHz" spec vary widely in delivered throughput. On *this*
+VM the agentic `dispatch` kernel still leads NumPy OpenBLAS on both shapes
+(+5% prefill, +25% decode) and beats the stdlib `linalg.matmul` baseline
+(+14% prefill, ~3x decode).
+
 ## Kernel evolution
 
 1. **naive** — Triple-nested loop baseline
