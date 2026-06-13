@@ -1534,21 +1534,59 @@ def matmul_decode[
 def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # Computes C = A * B  —  dispatches to the fastest kernel.
-    #   - M < 6 (decode): j-parallel GEMV with L1-resident column chunks
-    #   - M >= 6 (prefill): optimized 6×32 GEMM with v3 microkernel
+    # Computes C = A * B  —  dispatches to the fastest kernel for the shape.
+    #
+    # Tuned by empirical scan on Xeon Skylake AVX-512 (4 cores) across the
+    # Qwen 2.5 VL 3B MLP projection sweep (M = 1..512, both orientations):
+    #
+    #   - M == 1 (pure decode GEMV): j-parallel GEMV with L1-resident column
+    #     chunks + software prefetch. Streams B exactly once.
+    #   - 2 <= M <= 5 (small-batch decode): the v3 GEMM micro-kernel with
+    #     MR = M, so the packed B panel is streamed once and reused across all
+    #     M rows. The old path sent these to the GEMV, which re-streamed all of
+    #     B once *per row* — ~2x slower at M=4. MR=M removes the remainder loop.
+    #   - M >= 6 (prefill GEMM): pick the micro-kernel by aspect ratio and M.
+    #       * wide-N (N >= K, e.g. gate/up proj):
+    #           - M <= 192: 8x24 register tile, KC=256. Beats linalg M=6..128.
+    #           - M >  192: 4x48 tile, KC=512 — better at very large M.
+    #       * tall-K (N < K, e.g. down proj):
+    #           - M <= 64:  8x24 tile, KC=256, KU=4.
+    #           - M >  64:  6x32 tile, KC=512.
+    #     NB: the tall-K (down-proj) GEMM still trails linalg ~10% at large M —
+    #     _prefill_gemm_v3 parallelizes over N, so every worker re-packs all of
+    #     A, which is wasteful when K (hence A) is large. Closing that needs an
+    #     M-parallel packing scheme.
     comptime NELTS = simd_width_of[dtype]()
-    comptime MR = 6
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
 
-    if a.rows < MR:
+    if m == 1:
         _decode_gemv(c, a, b)
+    elif m == 2:
+        _prefill_gemm_v3[dtype, 2, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif m == 3:
+        _prefill_gemm_v3[dtype, 3, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif m == 4:
+        _prefill_gemm_v3[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif m == 5:
+        _prefill_gemm_v3[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif n >= k:
+        # wide-N (up-proj-like).
+        if m <= 192:
+            # 8x24 tile, TILE_N = 3*NR = 9*NELTS. Wins M=6..128 here.
+            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
+        else:
+            # Large M: 4x48 tile (24 accs + 6 B-vecs ≤ 32 regs), KC=512.
+            _prefill_gemm_v3[dtype, 4, 6 * NELTS, 512, 4, 12 * NELTS, 64](c, a, b)
     else:
-        comptime NR = 4 * NELTS   # 32: 24 accs + 4 B-vecs + 6 A-broadcasts ≤ 32 regs
-        comptime KC = 256
-        comptime KU = 2
-        comptime TILE_N = 64      # 172 j-tiles = exactly 43 per worker on 4 cores
-        comptime NC_TILES = 64
-        _prefill_gemm_v3[dtype, MR, NR, KC, KU, TILE_N, NC_TILES](c, a, b)
+        # tall-K (down-proj-like).
+        if m <= 64:
+            # 8x24 tile, KU=4 — far better than 6x32 for narrow-N mid-M.
+            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 4, 9 * NELTS, 64](c, a, b)
+        else:
+            # Large M: 6x32 tile, KC=512, TILE_N = 2*NR = 8*NELTS.
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
 
 
 # Default matmul points to the tiled version

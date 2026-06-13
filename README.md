@@ -89,7 +89,24 @@ residual capture-list / hoisted-binding overhead from the syntax migration.
 9. **prefill** — Worker-based parallelism, A-panel packing, 8×24 microkernel
 10. **prefill_opt** — v3 microkernel (hoisted B-load + noalias) with 6×32 register tile, KU=2, KC=256, TILE_N=64 — tuned by empirical scan
 11. **decode** — j-parallel GEMV with L1-resident column chunks and software prefetch of the next KU-block of B rows
-12. **dispatch** — Auto-selects decode (M < 6) or prefill_opt based on shape
+12. **dispatch** — Shape-adaptive auto-selection (tuned vs `linalg.matmul`):
+    - `M == 1`: decode GEMV (streams B once)
+    - `2 ≤ M ≤ 5`: v3 micro-kernel with `MR = M` — packs B once and reuses it
+      across all rows (the old GEMV re-streamed B per row, ~2× slower at M=4)
+    - `M ≥ 6`, wide-N (`N ≥ K`): 8×24 tile (`M ≤ 192`) or 4×48 tile (`M > 192`)
+    - `M ≥ 6`, tall-K (`N < K`): 8×24 tile (`M ≤ 64`) or 6×32 tile, KC=512
+
+### Beating the stdlib `linalg.matmul`
+
+`bench_compare.mojo` measures the agentic kernels and `linalg.matmul`
+*interleaved per shape*, so both see the same turbo/thermal state (a long
+serial sweep otherwise biases the short-running contestant). On the Skylake
+AVX-512 cloud VM (4 cores, float64), the tuned `dispatch` beats `linalg` on all
+small/decode shapes — decisively (≈2× at M=1, ≈1.2× at M=4) — and across the
+up-projection up to M=128. It still trails `linalg` ~10% on the down-projection
+at large M: `_prefill_gemm_v3` parallelizes over N, so each worker re-packs all
+of A, which is wasteful when K (and thus A) is large. An M-parallel packing
+scheme is the remaining work to close that gap.
 
 ## Setup
 
@@ -110,6 +127,7 @@ which ships Mojo 1.0.0b1.
 source .venv/bin/activate
 mojo bench_matmul.mojo        # All 12 kernels swept across many shapes
 mojo bench_linalg.mojo        # Mojo stdlib linalg.matmul baseline
+mojo bench_compare.mojo       # Fair head-to-head: our kernels vs linalg, interleaved per shape
 python bench_sota.py           # NumPy/SciPy/MKL benchmarks (same shape sweep)
 mojo test_gemm.mojo           # Correctness tests
 ```
