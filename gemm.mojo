@@ -1583,8 +1583,9 @@ def matmul_dispatch[
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Computes C = A * B  —  dispatches to the fastest kernel for the shape.
     #
-    # Tuned by empirical scan on Xeon Skylake AVX-512 (4 cores) across the
-    # Qwen 2.5 VL 3B MLP projection sweep (M = 1..512, both orientations):
+    # Tuned by empirical scan across both the Qwen 2.5 VL 3B MLP projection
+    # sweep (M = 1..512, both orientations) and a general (M,N,K) sweep
+    # (square / wide-N / tall-K), most recently on the 2.10 GHz Xeon:
     #
     #   - M == 1 (pure decode GEMV): j-parallel GEMV with L1-resident column
     #     chunks + software prefetch. Streams B exactly once.
@@ -1592,22 +1593,23 @@ def matmul_dispatch[
     #     MR = M, so the packed B panel is streamed once and reused across all
     #     M rows. The old path sent these to the GEMV, which re-streamed all of
     #     B once *per row* — ~2x slower at M=4. MR=M removes the remainder loop.
-    #   - M >= 6 (prefill GEMM): one 8x24 register tile per aspect ratio, with
-    #     KC stepping 256 (small M) -> 512 (large M). Re-tuned Jun 2026 by
-    #     interleaved A/B vs linalg (peak over 20 runs) on this Skylake AVX-512
-    #     VM, which collapsed the old per-M tile zoo (4x48 / 6x32 / KC=1024)
-    #     into a single tile shape per orientation:
-    #       * wide-N (N >= K, e.g. gate/up proj): 8x24, KU=2, TILE_N=9*NELTS.
-    #           - M <= 192: KC=256.   - M >  192: KC=512.
-    #         8x24 KC=512 beat the old 4x48 (M=256, ~+4%) and 6x32-KC1024
-    #         (M=512, ~+3%); MR=8 leaves no scalar M-remainder at M=256/512.
-    #       * tall-K (N < K, e.g. down proj): 8x24 KU=4 TILE_N=6*NELTS=48 at
-    #         the ends, 6x32 KC=512 in the middle band:
-    #           - uniform 6x32, TILE_N=8*NELTS=64 (32 even j-tiles on N=2048),
-    #             KC=256 (M<=64) / 512 (M>64). The register-blocked masked
-    #             M-remainder tail (see _prefill_gemm_v3) removes the scalar tax
-    #             that used to make MR=6 lose, so the perfectly N-balanced tile
-    #             wins at every M (mid-M 1.01-1.28x, large M 0.92-0.97).
+    #   - M >= 6, N <= 192 (narrow N): the kernel parallelizes only over N
+    #     (j-tiles), so a narrow N starves the cores (N=64 -> 1 j-tile at the
+    #     default TILE_N=64 -> 1 of 4 cores busy). A narrow NR=16/TILE_N=16 tile
+    #     splits N into >= num_workers j-tiles, recovering the small-square shapes
+    #     (sq64 0.44->0.83). See the branch comment below.
+    #   - M >= 6, N > 192 (prefill GEMM): a 6x32 register tile (TILE_N=8*NELTS=64,
+    #     32 even j-tiles on N=2048), KC stepping 256 (small M) -> 512 -> a
+    #     cache-aware large KC. The register-blocked masked M-remainder tail (see
+    #     _prefill_gemm_v3) removes the scalar tax that used to force MR-divides-M
+    #     tiles, so the N-balanced 6x32 wins at almost every M. Two exceptions,
+    #     each validated by interleaved A/B vs linalg (peak/20+):
+    #       * wide-N (N >= K) small-M corner: very wide N (>= 9*1024) AND M <= 32
+    #         keeps the older 8x24 tile (KU=2, TILE_N=9*NELTS), which still edges
+    #         6x32 by ~2-4% there (the Qwen up-proj small batch).
+    #       * square-ish large M (N <= M): cap the cache-aware KC at 1024 — a
+    #         single huge k-panel thrashes the M*KC packed-A when N is too narrow
+    #         to amortize it (sq2048 KC2048 0.87 -> KC1024 0.93).
     #     NB: memory-layout levers (2-D MC*KC blocking, 2-D (M,N) worker split,
     #     shared single-pack-of-A) were all measured wash-to-loss on this 33 MB-
     #     L3 part: A fits in L3, so "redundant" per-worker A re-packs are cheap
@@ -1629,10 +1631,21 @@ def matmul_dispatch[
         _prefill_gemm_v3[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
     elif m == 5:
         _prefill_gemm_v3[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif n <= 3 * 64:
+        # Small-N (N <= 192). The default TILE_N=64 splits such an N into fewer
+        # than 4 j-tiles (N=64 -> 1, N=128 -> 2), and since the kernel only
+        # parallelizes over j-tiles that idles most of a 4-core box — the single
+        # biggest general-shape loss (square N=K<=128 ran 0.4-0.5x vs linalg).
+        # A narrow NR=16 / TILE_N=16 tile splits N into >= num_workers j-tiles
+        # (N=64 -> 4, N=96 -> 6, N=128 -> 8), filling the cores; measured on the
+        # 2.10 GHz Xeon (4c) it recovers sq64 0.64->0.82, sq96 0.54->0.74,
+        # sq128 0.52->0.66. N >= 256 already yields >= 4 tiles at TILE_N=64 and
+        # keeps the wider tile below. (Cannot affect the Qwen MLP shapes, whose
+        # N is 2048 or 11008 — this branch only fires for narrow N.)
+        _prefill_gemm_v3[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS, 64](c, a, b)
     elif n >= k:
-        # wide-N (up-proj-like). The small-M band keeps the 8x24 tile (KU=2,
-        # TILE_N = 3*NR = 9*NELTS) that wins decisively at M<=192; the large-M
-        # band uses the N-balanced 6x32 tile (TILE_N = 2*NR = 8*NELTS = 64).
+        # wide-N (up-proj-like). The small-M band uses the N-balanced 6x32 tile
+        # (TILE_N = 2*NR = 8*NELTS = 64), same as the large-M band below.
         #
         # Large-M retune Jun 13 2026 on the 2.10 GHz Xeon (4c, AVX-512, L2 2MB/
         # core, L3 260MB) — a DIFFERENT machine from the Skylake 2.80 GHz VM the
@@ -1649,8 +1662,26 @@ def matmul_dispatch[
         #     once) wins (M=384 0.999->1.046, M=512 0.953->1.038), flipping both
         #     of the old large-M losses to WINs. (On the small-L2 Skylake VM the
         #     opposite held — KC=512 beat KC=1024 there; this pick is HW-specific.)
-        if m <= 192:
+        #
+        # Small-M band: 6x32 instead of the old uniform 8x24 (KU=2, TILE_N=72).
+        # The 8x24 pick was tuned only on the Qwen up-proj (N=11008); on
+        # moderate-width wide-N it loses badly. Direct interleaved A/B 8x24 vs
+        # 6x32 (peak/25) across N widths at K=2048 found a clean crossover:
+        #   * N <= 4096: 6x32 wins at every M=8..128 (up to +15%, e.g. N=2048
+        #     M=128 6/8=1.15; N=4096 M=32 1.05).
+        #   * N = 8192: 6x32 wins M>=16, a tie at M=8.
+        #   * N = 11008 (the Qwen up-proj): 8x24 still edges 6x32 by ~2-4% at
+        #     M<=32 (M=8 1.34 vs 1.27, M=16 1.19 vs 1.14, M=32 1.14 vs 1.12),
+        #     but 6x32 retakes it from M>=64 (and the headline prefill M=96
+        #     already preferred 6x32).
+        # So 8x24 only genuinely wins in one corner — very wide N AND M<=32 —
+        # which is exactly the Qwen up-proj small-batch shape. Keep 8x24 there
+        # (no headline regression) and use the N-balanced 6x32 everywhere else,
+        # which flips the whole moderate-/square-N small-M band from LOSE to WIN.
+        if n >= 9 * 1024 and m <= 32:
             _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
+        elif m <= 192:
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 256, 4, 8 * NELTS, 64](c, a, b)
         elif m <= 288:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
         else:
@@ -1659,6 +1690,17 @@ def matmul_dispatch[
             # the other half. This is KC=1024 on a 1 MB/core L2 and KC=2048 on a
             # 2 MB/core L2; a KC large enough to fill the whole L2 thrashes A/C.
             var kc = _l2_resident_kc[dtype](64, k)
+            # Square-ish large-M guard: the big-KC pick assumes a wide N whose
+            # large C amortizes the resulting big packed-A panel (M*KC). When N
+            # is not wider than M (square-ish), C is small, so a single huge
+            # k-panel buys almost no C-traffic saving while its M*KC packed-A
+            # thrashes cache. Measured on the 2.10 GHz Xeon (interleaved A/B vs
+            # linalg, peak/12): sq2048 (M=N=K=2048) KC=2048 0.86 -> KC=1024 0.93,
+            # whereas a genuinely wide M=2048 N=8192 shape still prefers KC=2048.
+            # Gating on n <= m caps only square-ish M>288 shapes and can never
+            # touch a Qwen/headline shape (all M<=512, all N wider than M).
+            if n <= m:
+                kc = min(kc, 1024)
             if kc >= 2048:
                 _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
             elif kc >= 1024:
