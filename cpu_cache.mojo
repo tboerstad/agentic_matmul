@@ -21,10 +21,19 @@ Trivial API for the kernels:
 
 All accessors return 0 when the value can't be determined, so callers should
 fall back to a sensible default in that case.
+
+Cache geometry is fixed for the life of the process, so the (relatively heavy)
+hardware probe — a `cpuid` enumeration on x86, a handful of `sysctlbyname`
+calls on macOS — runs at most once. The first accessor call detects the whole
+L1/L2/L3/line geometry in a single pass and memoizes it in a process-global via
+`_Global` (thread-safe, lazily initialized); every later call just reads the
+cached struct. This matters because the matmul dispatcher queries the L2 size
+on each call, and without memoization a decode/prefill loop would re-run the
+`cpuid` walk on every matmul.
 """
 
 from std.collections import List
-from std.ffi import external_call
+from std.ffi import _Global, external_call
 from std.memory.unsafe_pointer import alloc
 from std.sys import CompilationTarget
 from std.sys.intrinsics import inlined_assembly
@@ -136,11 +145,15 @@ def _query_caches() -> List[CacheInfo]:
     return caches^
 
 
-def _cpuid_cache_size(level: Int) -> Int:
-    """Size in bytes of the data/unified cache at `level` (x86), or 0."""
+def _cpuid_cache_size(caches: List[CacheInfo], level: Int) -> Int:
+    """Size in bytes of the data/unified cache at `level` (x86), or 0.
+
+    Takes the already-enumerated cache list so a single `_query_caches()` pass
+    can answer every level (see `_detect_cache_geometry`).
+    """
     var best = 0
     var best_is_data = False
-    for c in _query_caches():
+    for c in caches:
         if c.level != level:
             continue
         var is_data = (
@@ -154,9 +167,9 @@ def _cpuid_cache_size(level: Int) -> Int:
     return best
 
 
-def _cpuid_line_size() -> Int:
+def _cpuid_line_size(caches: List[CacheInfo]) -> Int:
     """Coherency line size in bytes from the first reported cache (x86), or 0."""
-    for c in _query_caches():
+    for c in caches:
         if c.line_size > 0:
             return c.line_size
     return 0
@@ -206,21 +219,82 @@ def _macos_cache_size(primary: String, fallback: String) -> Int:
     return _sysctl_size(fallback)
 
 
+# --- memoized geometry -------------------------------------------------------
+
+
+struct CacheGeometry(Copyable, Movable):
+    """The host's resolved cache geometry, detected once and then cached.
+
+    All fields are in bytes and are 0 when the corresponding value can't be
+    determined on this host.
+    """
+
+    var l1: Int
+    """Per-core L1 data (or unified) cache size."""
+    var l2: Int
+    """Per-core L2 cache size."""
+    var l3: Int
+    """L3 (last-level) cache size."""
+    var line: Int
+    """Coherency line size."""
+
+    def __init__(out self, l1: Int, l2: Int, l3: Int, line: Int):
+        self.l1 = l1
+        self.l2 = l2
+        self.l3 = l3
+        self.line = line
+
+
+def _detect_cache_geometry() -> CacheGeometry:
+    """Probe the hardware for the full cache geometry in a single pass.
+
+    Runs the platform-specific detection exactly once — `_Global` below makes
+    this the lazily-initialized backing store, so the `cpuid` walk / `sysctl`
+    calls happen on the first accessor and never again.
+    """
+    comptime if CompilationTarget.is_macos():
+        return CacheGeometry(
+            _macos_cache_size("hw.perflevel0.l1dcachesize", "hw.l1dcachesize"),
+            _macos_cache_size("hw.perflevel0.l2cachesize", "hw.l2cachesize"),
+            _macos_cache_size("hw.perflevel0.l3cachesize", "hw.l3cachesize"),
+            _sysctl_size("hw.cachelinesize"),
+        )
+
+    # x86: enumerate the cache hierarchy once and read every level from it.
+    var caches = _query_caches()
+    return CacheGeometry(
+        _cpuid_cache_size(caches, 1),
+        _cpuid_cache_size(caches, 2),
+        _cpuid_cache_size(caches, 3),
+        _cpuid_line_size(caches),
+    )
+
+
+# Process-global, thread-safe, lazily initialized: the first read triggers
+# `_detect_cache_geometry`, every later read returns the cached struct.
+comptime _CACHE_GEOMETRY = _Global["agentic_matmul_cpu_cache", _detect_cache_geometry]
+
+
+def _cached_geometry() -> CacheGeometry:
+    """Return the memoized cache geometry, detecting it on first use."""
+    try:
+        return _CACHE_GEOMETRY.get_or_create_ptr()[].copy()
+    except:
+        # Detection itself never raises; this only guards the global accessor.
+        return CacheGeometry(0, 0, 0, 0)
+
+
 # --- public API -------------------------------------------------------------
 
 
 def l1_data_cache_size() -> Int:
     """Per-core L1 data (or unified) cache size in bytes; 0 if undetectable."""
-    comptime if CompilationTarget.is_macos():
-        return _macos_cache_size("hw.perflevel0.l1dcachesize", "hw.l1dcachesize")
-    return _cpuid_cache_size(1)
+    return _cached_geometry().l1
 
 
 def l2_cache_size() -> Int:
     """Per-core L2 cache size in bytes; 0 if undetectable."""
-    comptime if CompilationTarget.is_macos():
-        return _macos_cache_size("hw.perflevel0.l2cachesize", "hw.l2cachesize")
-    return _cpuid_cache_size(2)
+    return _cached_geometry().l2
 
 
 def l3_cache_size() -> Int:
@@ -229,9 +303,7 @@ def l3_cache_size() -> Int:
     Apple Silicon has no per-core L3 (it uses a shared system-level cache that
     macOS does not surface here), so this typically returns 0 there.
     """
-    comptime if CompilationTarget.is_macos():
-        return _macos_cache_size("hw.perflevel0.l3cachesize", "hw.l3cachesize")
-    return _cpuid_cache_size(3)
+    return _cached_geometry().l3
 
 
 def cache_line_size() -> Int:
@@ -240,6 +312,4 @@ def cache_line_size() -> Int:
     Typically 64 on x86 and 128 on Apple Silicon. Useful for choosing packing
     alignment and the inner-kernel stride in the matmul.
     """
-    comptime if CompilationTarget.is_macos():
-        return _sysctl_size("hw.cachelinesize")
-    return _cpuid_line_size()
+    return _cached_geometry().line
