@@ -67,7 +67,7 @@ def bench_shape(label: String, m: Int, n: Int, k: Int) raises:
     var ratio = d_gf / l_gf
     var tag = String("WIN ") if ratio >= 1.0 else String("LOSE")
     print(
-        "  ", label, "M=", m,
+        "  ", label, "M=", m, "N=", n, "K=", k,
         "| dispatch", d_gf, "| linalg", l_gf,
         "| ratio", ratio, tag,
     )
@@ -83,3 +83,48 @@ def main() raises:
     print("\n=== down proj (tall-K): N=2048 K=11008 ===\n")
     for i in range(len(ms)):
         bench_shape("down", ms[i], 2048, 11008)
+
+    # --- Extra (M, N, K) probe shapes ---------------------------------------
+    # The dispatch hard-codes TILE_N / KC for the two Qwen orientations above
+    # (N=11008 and N=2048 split evenly across 4 workers). These shapes leave
+    # that comfort zone to surface where we trail linalg: square GEMMs (which
+    # sit on the N>=K branch boundary), other N values that tile unevenly into
+    # 4 workers, odd N/K (remainder paths), small-K (low arithmetic intensity),
+    # and larger compute-bound GEMMs.
+    var lbl = [
+        # Square GEMM (N == K -> wide-N branch). Classic compute-bound case.
+        String("sq256 "), "sq512 ", "sq1024", "sq2048",
+        # Larger square-ish / other-model FFN shapes (hidden 4096, Llama-ish).
+        "h4k-m128", "h4k-m512", "ffn-up8k", "ffn-dn8k",
+        # N values that do NOT divide cleanly across 4 workers at TILE_N=64/72.
+        "N3072 ", "N4000 ", "N5504 ",
+        # Odd dims -> exercise the SIMD N-remainder and K tail directly.
+        "N-odd ", "K-odd ", "M-rem ", "M-prime",
+        # Small K: low FLOP/byte, packing overhead dominates.
+        "K128  ", "K256w ",
+    ]
+    var em = [
+        256, 512, 1024, 2048,
+        128, 512, 512, 512,
+        512, 512, 512,
+        512, 512, 100, 333,
+        512, 512,
+    ]
+    var en = [
+        256, 512, 1024, 2048,
+        4096, 4096, 8192, 2048,
+        3072, 4000, 5504,
+        11007, 2048, 11008, 4096,
+        2048, 11008,
+    ]
+    var ek = [
+        256, 512, 1024, 2048,
+        4096, 4096, 2048, 8192,
+        2048, 2048, 2048,
+        2048, 2047, 2048, 4096,
+        128, 256,
+    ]
+
+    print("\n=== extra (M,N,K) probe shapes ===\n")
+    for i in range(len(em)):
+        bench_shape(lbl[i], em[i], en[i], ek[i])
