@@ -53,6 +53,14 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
 - `M == 1`: decode GEMV (streams B once).
 - `2 ≤ M ≤ 5`: v3 micro-kernel with `MR = M` — packs B once and reuses it across
   all rows (vs the GEMV re-streaming all of B per row, ~2× slower at M=4).
+- **Small box, M-dominant, B fits L2** (`M ≥ 64`, `M ≥ N`, `K·N·8 ≤ 512 KB`):
+  M-parallel, no-packing `_thin_n_gemm` — each core owns a band of C's rows and
+  sweeps the full N, reading A/B straight from source (B stays L2-resident, so
+  packing buys nothing). The packed prefill kernel's packing + thread-launch
+  overhead dwarfs the tiny compute on these cache-resident shapes; this branch
+  pays none of it. Fixes the worst shapes in the general sweep — sq128 0.65→1.0,
+  sq96 0.71→1.16, 512×128×512 0.56→0.84. The `M ≥ N` gate keeps it unreachable
+  for every wide/headline shape (Qwen up/down proj are `N ≫ M`).
 - `M ≥ 6`: parallel `_prefill_gemm_v3` (N-parallel: each worker owns a band of
   j-tiles, reading the dominant B matrix from DRAM once into private L2). Tile and
   KC are selected per regime — narrow NR=16 for `N ≤ 192` (so a small N still
@@ -70,12 +78,18 @@ kernels see the same turbo/thermal state:
 - **21/22 Qwen shapes WIN.** Decode (M=1) wins ~2.4–2.6×; small/mid-M wins
   1.05–3.4×; the lone exception is down-proj M=512 at ~0.99 (parity).
 - Beats NumPy (OpenBLAS) and SciPy dgemm on all 22 shapes.
-- General-shape `--full` sweep: 32 WINs after the small-N / wide-N-small-M /
-  square-large-M fixes. After the square-ish KC/TILE_N retune for this 2 MB/core
-  L2 (KC 512→1024, load-balance-aware TILE_N), the large squares closed to
-  ~0.88–0.91 (sq1024/sq2048 +3–5%). Residual losses are the small squares
-  (M≤512) and low-arithmetic-intensity corners (K=128, odd N/K) where `linalg`'s
-  masked remainder handling wins.
+- General-shape `--full` sweep: a clear majority WIN after the small-N /
+  wide-N-small-M / square-large-M / small-box fixes (the exact tally swings
+  ±several with VM turbo/thermal, so judge per-shape via interleaved A/B, not the
+  single-run count). Two recent levers: (1) the square-ish KC/TILE_N retune for
+  the 2 MB/core L2 (KC 512→1024, load-balance-aware TILE_N) closed the large
+  squares to ~0.88–0.91 (sq1024/sq2048 +3–5%); (2) the small-box M-parallel
+  route flipped the two worst shapes in the whole sweep — square sq96/sq128,
+  which interleaved-A/B (peak/40) lifts 0.65–0.71 → 1.0–1.16 — plus the tall
+  cache-resident boxes (512×128×512 0.56→0.84, 256×128×512 0.63→0.90). Residual
+  losses are the mid/large squares (sq256 ~0.80, sq512 ~0.90) and low-arithmetic-
+  intensity corners (K=128, odd N/K) where `linalg`'s masked AVX-512 remainder
+  handling wins.
 
 ### Key findings from tuning
 
@@ -95,6 +109,15 @@ it:
 - **KC is cache-size-dependent.** On the 1 MB-L2 Skylake, KC=512 is best; on the
   2 MB-L2 Xeon, KC=2048 (fewer k-panels, less C re-traffic) wins large-M — the
   *opposite* conclusion. Every KC/tile pick in the file is hardware-specific.
+- **Packing is pure overhead when the whole problem is cache-resident.** For a
+  small box where B fits L2, the packed prefill kernel's A/B packing + per-worker
+  buffer alloc + parallelize launch cost more than the matmul itself; routing to
+  the M-parallel no-pack kernel won 1.0–1.6× where the packed path lost 0.65–0.79.
+- **Don't probe the hardware on the hot path.** `l2_cache_size()` issues ~6
+  `cpuid` instructions, which on a KVM guest trap to the hypervisor at **~61 µs
+  per call** — fatal on a few-µs GEMM (it sank sq96 to 0.19× when the dispatch
+  gate queried it live). The small-box gate uses a compile-time L2 constant; the
+  live query stays in the large-M branches where the op is milliseconds.
 
 ### Dead ends (measured, do not re-attempt without new evidence)
 
@@ -114,9 +137,9 @@ Micro-kernel parity with `linalg` on the heaviest GEMMs (square M ≥ 256, now
 ~0.88–0.91 after the KC/TILE_N retune, where both kernels sit at ~50–66% of the
 358 GFLOPS f64 peak). Closing the remaining gap needs `linalg`-style masked
 AVX-512 N-remainder handling and/or pack/compute overlap — substantial and
-unproven on this hardware. A separate follow-up is an
-**M-parallel kernel for thin N** (N ≤ 32), where the N-only parallelism starves
-the cores.
+unproven on this hardware. The thin-N and small-box cache-resident gaps are now
+both handled by the M-parallel no-pack route; its L2-fit cut (512 KB) is a
+Skylake-tuned constant that a smaller-L2 part may want lowered.
 
 > **Methodology note:** ratios from a single `bench_sweep` run swing ±5–10% at
 > M ≥ 128 from turbo/thermal state on shared VMs. Judge micro-kernel changes with

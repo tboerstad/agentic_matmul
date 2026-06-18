@@ -1668,17 +1668,19 @@ def _matmul_small[
 def _thin_n_gemm[
     dtype: DType, MR: Int, NR_VECS: Int
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # M-parallel register-blocked GEMM for thin-N shapes (small N, large M*K).
-    #
-    # The prefill kernel parallelizes only over N (j-tiles), so a thin N starves
-    # the cores: ceildiv(N, TILE_N) < num_workers leaves most of the box idle
-    # (N=16 -> 1 j-tile -> 1 of 4 cores). For these shapes the work is along M,
-    # not N, so this kernel parallelizes over M-row blocks instead — every core
-    # owns a disjoint band of C's rows and sweeps the full (tiny) N. The N is
-    # small enough to stay L1-resident, so like _matmul_small it reads A and B
-    # straight from source with no packing; the only change from the serial
-    # small-shape kernel is the parallelize over MR-blocks. Computes C = A * B
-    # (overwrites C); bit-identical to the serial/parallel paths.
+    # M-parallel register-blocked GEMM with NO packing. Used for two regimes
+    # the N-parallel prefill kernel handles badly (see matmul_dispatch):
+    #   * thin-N (small N, large M*K): the prefill kernel parallelizes only over
+    #     N (j-tiles), so a thin N starves the cores — N=16 -> 1 j-tile -> 1 of 4
+    #     cores busy. Here the work is along M, so NR_VECS is 1-2 (NR=8/16).
+    #   * small box, M-dominant, B fits L2 (the sq96..sq256 gap): the prefill
+    #     kernel's A/B packing + per-worker buffers + parallelize-launch overhead
+    #     dwarfs the compute when the whole problem is cache-resident. Here NR=32
+    #     (NR_VECS=4) covers the wider-but-still-small N.
+    # Either way every core owns a disjoint band of C's rows and sweeps the full
+    # N, reading A and B straight from source — B stays cache-resident across the
+    # M-sweep so explicit packing buys nothing. Computes C = A * B (overwrites C);
+    # bit-identical to the serial/parallel paths.
     comptime NELTS = simd_width_of[dtype]()
     comptime NR = NR_VECS * NELTS
     var m = a.rows
@@ -1773,6 +1775,11 @@ def matmul_dispatch[
     #     MR = M, so the packed B panel is streamed once and reused across all
     #     M rows. The old path sent these to the GEMV, which re-streamed all of
     #     B once *per row* — ~2x slower at M=4. MR=M removes the remainder loop.
+    #   - Small box, M-dominant, B fits L2 (M>=64, M>=N, K*N*8<=512KB): the
+    #     M-parallel no-pack _thin_n_gemm. The packed prefill kernel's packing +
+    #     thread-launch overhead dwarfs the compute on a cache-resident box, so
+    #     the worst general shapes lived here (sq96/sq128 0.65-0.71). Reading
+    #     A/B unpacked flips them to 1.0-1.16. See the branch comment below.
     #   - M >= 6, N <= 192 (narrow N): the kernel parallelizes only over N
     #     (j-tiles), so a narrow N starves the cores (N=64 -> 1 j-tile at the
     #     default TILE_N=64 -> 1 of 4 cores busy). A narrow NR=16/TILE_N=16 tile
@@ -1854,6 +1861,46 @@ def matmul_dispatch[
             _thin_n_gemm[dtype, 6, 1](c, a, b)
         else:
             _thin_n_gemm[dtype, 6, 2](c, a, b)
+    elif (
+        m >= 64
+        and m >= n
+        and k * n * size_of[Scalar[dtype]]() <= (1 << 19)
+    ):
+        # Small box, M-dominant, B fits L2 (the small-square gap). These are the
+        # WORST shapes in the general sweep before this branch: square GEMMs in
+        # the sq96..sq256 band ran 0.65-0.79 vs linalg, and tall small boxes
+        # (e.g. 512x128x512) bottomed at 0.56 — all routed to the packed prefill
+        # kernel (small-N or square-ish), whose A/B packing + per-worker buffer
+        # alloc + parallelize-launch overhead dwarfs the compute when the whole
+        # problem is cache-resident. The M-parallel _thin_n_gemm reads A/B
+        # straight from source with NO packing (same idea that fixed the thin-N
+        # band), so it pays none of that fixed cost; every core owns a band of
+        # C's rows and sweeps the full N. Interleaved A/B vs linalg (peak/40) on
+        # the Skylake 2.80 GHz VM (4c, AVX-512, 1 MB/core L2): sq96 0.70->1.18,
+        # sq128 0.74->1.00, sq192 0.80->0.99, sq256 0.75->0.83, 512x128x512
+        # 0.56->0.84, 256x128x512 0.63->0.90, 512x256x256 0.80->0.84.
+        #
+        # The three gates are exactly the win boundary, measured:
+        #   * B (k*n elements) <= 512 KB: _thin_n re-reads all of B per MR-row
+        #     block, so B must STAY L2-resident across the M-sweep (with room for
+        #     the A micro-panel and C). Past ~half this 1 MB-L2 it thrashes and
+        #     collapses — sq288 (B 648 KB) is a wash, sq320 (B 800 KB) craters to
+        #     0.52, sq384 0.42. The 512 KB cut sits just below that knee (sq256
+        #     B=512 KB wins, sq288 excluded). A COMPILE-TIME constant, not the
+        #     detected L2: l2_cache_size() runs ~6 cpuid instructions, which on a
+        #     virtualized host (KVM) trap to the hypervisor at ~61 us/call —
+        #     ruinous on these few-us ops (it sank sq96 to 0.19 when gated on the
+        #     live query). 512 KB = half the 1 MB Skylake L2 / a quarter of the
+        #     2 MB Xeon L2 — safe on both target machines. Hardware-specific like
+        #     every tile/KC pick here; smaller-L2 parts may want a lower cut.
+        #   * m >= n: _thin_n parallelizes over M, so it needs enough M-rows
+        #     relative to the N each worker sweeps. At m < n it ties or loses
+        #     (128x256x256 0.76 vs the 0.79 packed path) — and, crucially, this
+        #     gate makes the branch UNREACHABLE for every wide/headline shape
+        #     (Qwen up/down proj, all wide-N grid shapes are n >> m), where
+        #     _thin_n is catastrophic (96x11008x2048 0.15, K128 0.37).
+        #   * m >= 64: enough MR=6 row-blocks (>= ~10) to fill the 4 workers.
+        _thin_n_gemm[dtype, 6, 4](c, a, b)
     elif n <= 3 * 64:
         # Small-N (N <= 192). The default TILE_N=64 splits such an N into fewer
         # than 4 j-tiles (N=64 -> 1, N=128 -> 2), and since the kernel only
@@ -1868,6 +1915,12 @@ def matmul_dispatch[
         _prefill_gemm_v3[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS, 64](c, a, b)
     elif n <= m:
         # Square-ish (N <= M, N > 192 so the small-N branch above didn't fire).
+        # NB: the small-box branch above now intercepts the cache-resident corner
+        # (M >= N and B = K*N*8 <= 512 KB, e.g. sq256) into the no-pack M-parallel
+        # kernel, so this branch handles the LARGER square-ish shapes (B > 512 KB:
+        # sq512/1024/2048 and the awkward-N boxes) whose B can't stay L2-resident
+        # unpacked. The sq256 figures below predate that branch — they record how
+        # this packed branch itself was tuned, not the current sq256 route.
         # Both the wide-N (N>=K) and tall-K (N<K) large-M branches below were
         # tuned on the two Qwen aspect ratios (N=2048/11008, always N >> M), and
         # carry their TILE_N=64 / cache-aware-KC picks into these square-ish
