@@ -39,13 +39,13 @@ Intel Xeon @ 2.10 GHz Granite Rapids; both 4 cores, AVX-512, KVM). Your results 
 
 - Import from `std`: `from std.collections import List`
 - Use `SIMD[DType.float64, N]` for fixed-size arrays
-- Declare functions with `def`, variables with `var`. The `fn` keyword has been removed (Mojo 1.0.0b3 errors `'fn' has been removed; use 'def' instead`) — every function, including `@always_inline` helpers and nested closures, is now a `def`
+- Declare functions with `def`, variables with `var`. There is no `fn` keyword — every function, including `@always_inline` helpers and nested closures, is a `def`
 - Return owned `List` values with `^` (e.g. `return result^`); without it the compiler rejects the implicit copy
 - Use `mut` (not `inout`) for mutable function parameters: `def foo(mut x: List[Float64])`
 - Use `comptime if` (not `@parameter if`) for compile-time branching on parameter values
 - Inside a struct, reference its parameters with `Self.` prefix: `List[Scalar[Self.dtype]]`, not `List[Scalar[dtype]]`
 - Use `vectorize[simd_width](size, closure)` from `std.algorithm.functional` to auto-vectorize loops with automatic remainder handling — no manual SIMD + scalar tail loop needed
-- Closures now declare an explicit capture list in braces after the parameters — one `mut <name>` or `read <name>` entry per enclosing variable they touch: `def name[width: Int](i: Int) {mut acc, read a_val, read n}:`. This replaces the old `unified {mut}` / `capturing` keywords (both removed); the per-variable `mut`/`read` annotations make each capture's mutability explicit. The same form is used for both `vectorize` and `parallelize` closures
+- Closures declare an explicit capture list in braces after the parameters — one `mut <name>` or `read <name>` entry per enclosing variable they touch: `def name[width: Int](i: Int) {mut acc, read a_val, read n}:`. The per-variable `mut`/`read` annotations make each capture's mutability explicit. The same form is used for both `vectorize` and `parallelize` closures
 - Use `parallelize[func](num_work_items, num_workers)` from `std.algorithm.functional` to distribute work across threads — the worker closure uses the same brace capture list: `def worker(i: Int) {mut c_ptr, read m, read n, read k}:`
 - Use `InlineArray[T, N]` (from `std.collections`) + `comptime for` to replace hand-numbered variables (e.g. `acc0`–`acc3`). The compiler flattens comptime-indexed `InlineArray` elements into registers, producing identical machine code to manual variables — but the code scales when you change tile sizes like MR/NR/KU
 - Declare hoisted closure-capture bindings type-only (`var c_row: type_of(c_ptr)`, `var kc_h: Int`) rather than with a dummy initializer (`var c_row = c_ptr`). The dummy value is always overwritten before the inner closure reads it, and Mojo 1.0.0b1+ flags it as a dead store (`assignment ... was never used`). `type_of(x)` recovers an `UnsafePointer`'s full type including its `origin` parameter
