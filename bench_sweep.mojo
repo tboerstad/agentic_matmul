@@ -123,6 +123,10 @@ def run_iterate() raises:
         "N-odd  ", "K-odd  ",
         # Small K -> low FLOP/byte, packing overhead dominates.
         "K128   ",
+        # Small box, M-dominant, B fits L2 -> M-parallel no-pack branch. sq128
+        # was the WORST shape in the whole sweep (0.65) before that branch; the
+        # tall box stresses the m >= n / B-fits-L2 gate. Permanent coverage.
+        "sq128  ", "box512 ",
     ]
     var ms = [
         1, 6, 512,
@@ -130,6 +134,7 @@ def run_iterate() raises:
         512, 512,
         512, 512,
         512,
+        128, 512,
     ]
     var ns = [
         4096, 4096, 4096,
@@ -137,6 +142,7 @@ def run_iterate() raises:
         4000, 3072,
         11007, 2048,
         2048,
+        128, 128,
     ]
     var ks = [
         4096, 4096, 4096,
@@ -144,6 +150,7 @@ def run_iterate() raises:
         2048, 2048,
         2048, 2047,
         128,
+        128, 512,
     ]
     run_set("corners & edges", labels, ms, ns, ks, n_runs)
 
@@ -234,6 +241,35 @@ def run_full() raises:
         2048, 512, 512, 2048,
     ]
     run_set("thin-N tall-M grid (M-parallel branch)", tn_l, tn_m, tn_n, tn_k, n_runs)
+
+    # Small-box grid — the M-parallel no-pack _thin_n_gemm[6,4] branch (m >= n,
+    # n > 64, B = k*n*8 <= 512 KB). Before this branch these cache-resident boxes
+    # went to the packed prefill kernel, whose packing + thread-launch overhead
+    # dwarfed the tiny compute: square sq96..sq256 ran 0.65-0.79 and tall boxes
+    # (e.g. 512x128x512) bottomed at 0.56 vs linalg. Kept as permanent coverage
+    # for the route AND its boundary: sq320/sq352 (B > 512 KB) and 128x256x256
+    # (m < n) MUST stay on the packed path (they collapse under _thin_n).
+    var sb_l = [
+        String("sb-sq96 "), "sb-sq128", "sb-sq192", "sb-sq256",
+        "sb-512x128", "sb-256x128", "sb-512x256",
+        "sb!sq320", "sb!sq352", "sb!128x256",
+    ]
+    var sb_m = [
+        96, 128, 192, 256,
+        512, 256, 512,
+        320, 352, 128,
+    ]
+    var sb_n = [
+        96, 128, 192, 256,
+        128, 128, 256,
+        320, 352, 256,
+    ]
+    var sb_k = [
+        96, 128, 192, 256,
+        512, 512, 256,
+        320, 352, 256,
+    ]
+    run_set("small-box grid (M-parallel no-pack branch + boundary guards)", sb_l, sb_m, sb_n, sb_k, n_runs)
 
 
 def main() raises:
