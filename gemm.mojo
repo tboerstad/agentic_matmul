@@ -1578,6 +1578,93 @@ def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
     return min(budget, k)
 
 
+def _matmul_small[
+    dtype: DType, MR: Int, NR_VECS: Int
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # Serial register-blocked GEMM for tiny shapes. No thread spawn, no buffer
+    # allocation, no A/B packing — for a handful-of-FLOPs matmul the prefill
+    # kernel's fixed overhead (parallelize launch + per-worker bp/ap allocs +
+    # packing) dwarfs the compute, so it runs 10-100x SLOWER than a plain
+    # serial loop here (e.g. an 8x8x8 ran 0.16 GFLOPS through the parallel path
+    # vs 14 GFLOPS serial). This kernel holds an MR x (NR_VECS*NELTS) register
+    # tile of C across the K loop, reading A and B straight from their source
+    # buffers (a tiny N/K stays L1-resident, so explicit packing buys nothing).
+    # Computes C = A * B (overwrites C). MR=6, NR_VECS=2 measured best on the
+    # 2.10 GHz Xeon across the captured band; correctness is bit-identical to
+    # the parallel kernels (verify_dispatch / max_err 0.0).
+    comptime NELTS = simd_width_of[dtype]()
+    comptime NR = NR_VECS * NELTS
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+    var c_ptr = c.data.unsafe_ptr()
+    var a_ptr = a.data.unsafe_ptr()
+    var b_ptr = b.data.unsafe_ptr()
+
+    var j = 0
+    while j + NR <= n:
+        # Full MR-row register-blocked panels.
+        var i = 0
+        while i + MR <= m:
+            var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
+                fill=SIMD[dtype, NELTS](0)
+            )
+            for p in range(k):
+                var b_row = b_ptr + p * n + j
+                var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                    fill=SIMD[dtype, NELTS](0)
+                )
+                comptime for nv in range(NR_VECS):
+                    bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
+                comptime for mr in range(MR):
+                    var av = SIMD[dtype, NELTS](a_ptr[(i + mr) * k + p])
+                    comptime for nv in range(NR_VECS):
+                        acc[mr * NR_VECS + nv] = av.fma(
+                            bv[nv], acc[mr * NR_VECS + nv]
+                        )
+            comptime for mr in range(MR):
+                comptime for nv in range(NR_VECS):
+                    (c_ptr + (i + mr) * n + j).store(
+                        offset=nv * NELTS, val=acc[mr * NR_VECS + nv]
+                    )
+            i += MR
+        # M-remainder rows (m % MR): one row at a time, same NR-wide SIMD.
+        while i < m:
+            var acc = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                fill=SIMD[dtype, NELTS](0)
+            )
+            for p in range(k):
+                var b_row = b_ptr + p * n + j
+                var av = SIMD[dtype, NELTS](a_ptr[i * k + p])
+                comptime for nv in range(NR_VECS):
+                    acc[nv] = av.fma(
+                        b_row.load[width=NELTS](offset=nv * NELTS), acc[nv]
+                    )
+            comptime for nv in range(NR_VECS):
+                (c_ptr + i * n + j).store(offset=nv * NELTS, val=acc[nv])
+            i += 1
+        j += NR
+    # N-remainder columns (n % NR): vectorized tail over the full M extent,
+    # with NELTS-wide chunks + an automatic scalar tail.
+    if j < n:
+        var jr = j
+        for i in range(m):
+            var c_row = c_ptr + i * n
+            var a_row = a_ptr + i * k
+
+            def tail[width: Int](jj: Int) {mut c_row, read a_row, read b_ptr, read k, read n, read jr}:
+                var acc = SIMD[dtype, width](0)
+                for p in range(k):
+                    acc = fma(
+                        SIMD[dtype, width](a_row[p]),
+                        (b_ptr + p * n + jr).load[width=width](offset=jj),
+                        acc,
+                    )
+                c_row.store(offset=jr + jj, val=acc)
+
+            vectorize[NELTS](n - jr, tail)
+
+
 def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1587,6 +1674,11 @@ def matmul_dispatch[
     # sweep (M = 1..512, both orientations) and a general (M,N,K) sweep
     # (square / wide-N / tall-K), most recently on the 2.10 GHz Xeon:
     #
+    #   - M*N*K < 2^19 (tiny total work): a serial register-blocked kernel
+    #     (_matmul_small). The parallel kernels' fixed overhead (thread launch +
+    #     per-worker packing buffers) swamps a handful-of-FLOPs matmul, so they
+    #     run 10-100x slower than a plain serial loop here. Flips sq1..sq64 from
+    #     a 0.02-0.81 LOSE to a 1.1-3.4 WIN; cannot fire for any headline shape.
     #   - M == 1 (pure decode GEMV): j-parallel GEMV with L1-resident column
     #     chunks + software prefetch. Streams B exactly once.
     #   - 2 <= M <= 5 (small-batch decode): the v3 GEMM micro-kernel with
@@ -1621,7 +1713,19 @@ def matmul_dispatch[
     var n = c.cols
     var k = a.cols
 
-    if m == 1:
+    # Tiny total work: a serial register-blocked kernel. Below ~2^19 MAC ops
+    # the parallel prefill kernel's fixed overhead (parallelize launch +
+    # per-worker bp/ap buffer allocs + A/B packing) dominates the compute and
+    # it runs an order of magnitude slower than a plain serial loop — e.g. on
+    # the 2.10 GHz Xeon (4c) sq8/16/32 ran 0.03-0.17x linalg through the
+    # parallel path vs 1.2-2.6x serial, and the gain stays positive out to
+    # ~sq80 (wMNK=512000: serial 1.14x the parallel path) before the 4 cores
+    # win again at sq88 (wMNK=681472). The 2^19 cut sits in that gap. This can
+    # never fire for a headline/large shape (decode 1x11008x2048 and every
+    # prefill batch have wMNK in the tens of millions). See _matmul_small.
+    if m * n * k < (1 << 19):
+        _matmul_small[dtype, 6, 2](c, a, b)
+    elif m == 1:
         _decode_gemv(c, a, b)
     elif m == 2:
         _prefill_gemm_v3[dtype, 2, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)

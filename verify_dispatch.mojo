@@ -67,4 +67,17 @@ def main() raises:
         check(ms[i], 96, 512)     # N=96, multiple of 16
     for i in range(len(ms)):
         check(ms[i], 100, 300)    # N=100, NOT a multiple of 16 (NR remainder)
+    # Tiny total work (wMNK < 2^19) -> the serial _matmul_small fast path.
+    # Cover its edges: 1xK/Mx1/1x1 degenerate dims, N below NR (=16) so only
+    # the N-remainder tail runs, N straddling NR, and fully odd dims that hit
+    # the M-remainder, full-panel, and N-tail paths at once.
+    check(1, 1, 1)
+    check(1, 64, 64)
+    check(64, 1, 64)
+    check(8, 8, 8)
+    check(7, 13, 11)
+    check(17, 23, 13)
+    check(33, 47, 51)
+    check(50, 50, 50)
+    check(80, 80, 80)
     print("all passed")
