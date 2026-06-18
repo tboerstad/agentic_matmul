@@ -10,14 +10,20 @@ parameters* leaf (`EAX = 4`); on AMD CPUs with the topology-extensions feature
 the identical layout is exposed via leaf `0x8000001D`. We pick the right leaf
 from the vendor string returned by leaf 0.
 
+`cpuid` is an x86 instruction, so the detailed `query_caches()` enumeration is
+x86-only. On macOS the size accessors fall back to `sysctlbyname`, which works
+on both Intel and Apple Silicon (the latter has no `cpuid` at all).
+
 Usage:
     from cpu_cache import query_caches, l1_data_cache_size
 
-    var caches = query_caches()      # List[CacheInfo], one per cache
+    var caches = query_caches()      # List[CacheInfo], one per cache (x86)
     var l1 = l1_data_cache_size()    # bytes, or 0 if undetectable
 """
 
 from std.collections import List
+from std.ffi import external_call
+from std.memory.unsafe_pointer import alloc
 from std.sys import CompilationTarget
 from std.sys.intrinsics import inlined_assembly
 
@@ -167,6 +173,51 @@ def query_caches() -> List[CacheInfo]:
     return caches^
 
 
+# --- macOS sysctl fallback --------------------------------------------------
+
+
+def _sysctl_size(name: String) -> Int:
+    """Read an integer-valued `sysctl` by name (macOS), in bytes.
+
+    Returns 0 on non-macOS hosts or if the key is missing / not an integer.
+    The whole body is elided at compile time off macOS, so the
+    `sysctlbyname` symbol is never linked on other platforms.
+    """
+    comptime if not CompilationTarget.is_macos():
+        return 0
+
+    var value = alloc[UInt64](1)
+    value[0] = 0
+    var length = alloc[UInt](1)
+    length[0] = 8  # sizeof(UInt64)
+
+    # int sysctlbyname(const char *name, void *oldp, size_t *oldlenp,
+    #                  const void *newp, size_t newlen);
+    var rc = external_call["sysctlbyname", Int32](
+        name.unsafe_ptr(), value, length, Int(0), UInt(0)
+    )
+
+    var result = 0
+    # rc == 0 and a full 8-byte (or 4-byte) integer was written.
+    if rc == 0 and (length[0] == 8 or length[0] == 4):
+        result = Int(value[0])
+
+    value.free()
+    length.free()
+    return result
+
+
+def _macos_cache_size(primary: String, fallback: String) -> Int:
+    """Try the performance-core-specific sysctl key first, then the generic
+    one. On Apple Silicon `hw.perflevel0.*` reports the P-core cache, which is
+    the relevant figure for compute; Intel Macs only have the generic key.
+    """
+    var s = _sysctl_size(primary)
+    if s > 0:
+        return s
+    return _sysctl_size(fallback)
+
+
 # --- convenience accessors --------------------------------------------------
 
 
@@ -193,16 +244,28 @@ def _cache_size(level: Int, prefer_data: Bool) -> Int:
 
 def l1_data_cache_size() -> Int:
     """Per-core L1 data (or unified) cache size in bytes; 0 if undetectable."""
+    comptime if CompilationTarget.is_macos():
+        return _macos_cache_size(
+            "hw.perflevel0.l1dcachesize", "hw.l1dcachesize"
+        )
     return _cache_size(1, prefer_data=True)
 
 
 def l2_cache_size() -> Int:
     """Per-core L2 cache size in bytes; 0 if undetectable."""
+    comptime if CompilationTarget.is_macos():
+        return _macos_cache_size("hw.perflevel0.l2cachesize", "hw.l2cachesize")
     return _cache_size(2, prefer_data=True)
 
 
 def l3_cache_size() -> Int:
-    """L3 (last-level) cache size in bytes; 0 if undetectable."""
+    """L3 (last-level) cache size in bytes; 0 if undetectable.
+
+    Apple Silicon has no per-core L3 (it uses a shared system-level cache that
+    macOS does not surface here), so this typically returns 0 there.
+    """
+    comptime if CompilationTarget.is_macos():
+        return _macos_cache_size("hw.perflevel0.l3cachesize", "hw.l3cachesize")
     return _cache_size(3, prefer_data=True)
 
 
@@ -217,33 +280,36 @@ def _pad(s: String, width: Int) -> String:
 
 
 def main():
-    comptime if not CompilationTarget.is_x86():
-        print("cpuid cache query is only supported on x86 hosts.")
-        return
-
-    print("CPU cache hierarchy (via cpuid):")
-    print(
-        " ",
-        _pad("cache", 6),
-        _pad("type", 12),
-        _pad("size", 10),
-        _pad("line", 6),
-        _pad("ways", 5),
-        "sets",
-    )
-    for c in query_caches():
-        var kib = c.size_bytes // 1024
+    comptime if CompilationTarget.is_x86():
+        print("CPU cache hierarchy (via cpuid):")
         print(
             " ",
-            _pad(c.label(), 6),
-            _pad(c.type_name(), 12),
-            _pad(String(kib) + " KiB", 10),
-            _pad(String(c.line_size) + " B", 6),
-            _pad(String(c.associativity), 5),
-            String(c.sets),
+            _pad("cache", 6),
+            _pad("type", 12),
+            _pad("size", 10),
+            _pad("line", 6),
+            _pad("ways", 5),
+            "sets",
         )
+        for c in query_caches():
+            var kib = c.size_bytes // 1024
+            print(
+                " ",
+                _pad(c.label(), 6),
+                _pad(c.type_name(), 12),
+                _pad(String(kib) + " KiB", 10),
+                _pad(String(c.line_size) + " B", 6),
+                _pad(String(c.associativity), 5),
+                String(c.sets),
+            )
+        print()
+    else:
+        comptime if CompilationTarget.is_macos():
+            print("Detailed cpuid enumeration is x86-only; using sysctl sizes.")
+        else:
+            print("Detailed enumeration unavailable on this platform.")
+        print()
 
-    print()
     print("Quick accessors:")
     print("  L1d:", l1_data_cache_size() // 1024, "KiB")
     print("  L2: ", l2_cache_size() // 1024, "KiB")
