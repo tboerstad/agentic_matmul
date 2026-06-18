@@ -1,24 +1,26 @@
-"""Query CPU cache sizes (L1/L2/L3 ...) via the x86 `cpuid` instruction.
+"""Query CPU cache sizes (L1/L2/L3) and line size for matmul cache blocking.
 
 Matmul performance is dominated by how well the working set fits in cache, so
-the blocking parameters (MC/KC/NC in BLIS terminology) are really functions of
-the L1/L2/L3 sizes of the host CPU. Rather than hard-coding those numbers, this
-module reads them straight from the hardware using the `cpuid` intrinsic.
+the blocking parameters (MC/KC/NC in BLIS terminology) and packing alignment
+are really functions of the host CPU's cache sizes and line size. Rather than
+hard-coding those numbers, this module reads them from the hardware.
 
-On Intel CPUs the cache hierarchy is enumerated via the *deterministic cache
-parameters* leaf (`EAX = 4`); on AMD CPUs with the topology-extensions feature
-the identical layout is exposed via leaf `0x8000001D`. We pick the right leaf
-from the vendor string returned by leaf 0.
+On x86 the values come from the `cpuid` instruction: Intel enumerates the cache
+hierarchy via the *deterministic cache parameters* leaf (`EAX = 4`), and AMD
+mirrors the identical encoding at leaf `0x8000001D`. On macOS (where Apple
+Silicon has no `cpuid` at all) the sizes come from `sysctlbyname`.
 
-`cpuid` is an x86 instruction, so the detailed `query_caches()` enumeration is
-x86-only. On macOS the size accessors fall back to `sysctlbyname`, which works
-on both Intel and Apple Silicon (the latter has no `cpuid` at all).
+Trivial API for the kernels:
 
-Usage:
-    from cpu_cache import query_caches, l1_data_cache_size
+    from cpu_cache import (
+        l1_data_cache_size, l2_cache_size, l3_cache_size, cache_line_size
+    )
 
-    var caches = query_caches()      # List[CacheInfo], one per cache (x86)
-    var l1 = l1_data_cache_size()    # bytes, or 0 if undetectable
+    var l1 = l1_data_cache_size()   # bytes, or 0 if undetectable
+    var line = cache_line_size()    # bytes (64 on x86, 128 on Apple Silicon)
+
+All accessors return 0 when the value can't be determined, so callers should
+fall back to a sensible default in that case.
 """
 
 from std.collections import List
@@ -55,7 +57,7 @@ def cpuid(leaf: UInt32, subleaf: UInt32 = 0) -> CpuidResult:
     ](leaf, subleaf)
 
 
-# --- cache descriptor -------------------------------------------------------
+# --- cpuid cache enumeration (x86) ------------------------------------------
 
 
 # Cache type values reported in EAX[4:0] of the cache-parameter leaf.
@@ -76,10 +78,6 @@ struct CacheInfo(Copyable, Movable):
     """Total size of the cache in bytes."""
     var line_size: Int
     """Coherency line size in bytes (typically 64)."""
-    var associativity: Int
-    """Number of ways of set-associativity."""
-    var sets: Int
-    """Number of sets."""
 
     def __init__(
         out self,
@@ -87,36 +85,11 @@ struct CacheInfo(Copyable, Movable):
         cache_type: Int,
         size_bytes: Int,
         line_size: Int,
-        associativity: Int,
-        sets: Int,
     ):
         self.level = level
         self.cache_type = cache_type
         self.size_bytes = size_bytes
         self.line_size = line_size
-        self.associativity = associativity
-        self.sets = sets
-
-    def type_name(self) -> String:
-        if self.cache_type == CACHE_TYPE_DATA:
-            return String("Data")
-        elif self.cache_type == CACHE_TYPE_INSTRUCTION:
-            return String("Instruction")
-        elif self.cache_type == CACHE_TYPE_UNIFIED:
-            return String("Unified")
-        return String("Unknown")
-
-    def label(self) -> String:
-        """Short label like "L1d", "L1i", "L2", "L3"."""
-        var s = String("L") + String(self.level)
-        if self.cache_type == CACHE_TYPE_DATA:
-            s += "d"
-        elif self.cache_type == CACHE_TYPE_INSTRUCTION:
-            s += "i"
-        return s
-
-
-# --- enumeration ------------------------------------------------------------
 
 
 def _is_amd() -> Bool:
@@ -127,9 +100,8 @@ def _is_amd() -> Bool:
     return r.ebx == 0x68747541 and r.edx == 0x69746E65 and r.ecx == 0x444D4163
 
 
-def query_caches() -> List[CacheInfo]:
-    """Enumerate every CPU cache reported by `cpuid`, ordered as the hardware
-    lists them (L1d, L1i, L2, L3, ...).
+def _query_caches() -> List[CacheInfo]:
+    """Enumerate every CPU cache reported by `cpuid` (L1d, L1i, L2, L3, ...).
 
     Returns an empty list on non-x86 hosts or when the cache-parameter leaf is
     unsupported.
@@ -158,19 +130,36 @@ def query_caches() -> List[CacheInfo]:
         var sets = Int(r.ecx) + 1
         var size_bytes = ways * partitions * line_size * sets
 
-        caches.append(
-            CacheInfo(
-                level=level,
-                cache_type=ctype,
-                size_bytes=size_bytes,
-                line_size=line_size,
-                associativity=ways,
-                sets=sets,
-            )
-        )
+        caches.append(CacheInfo(level, ctype, size_bytes, line_size))
         idx += 1
 
     return caches^
+
+
+def _cpuid_cache_size(level: Int) -> Int:
+    """Size in bytes of the data/unified cache at `level` (x86), or 0."""
+    var best = 0
+    var best_is_data = False
+    for c in _query_caches():
+        if c.level != level:
+            continue
+        var is_data = (
+            c.cache_type == CACHE_TYPE_DATA
+            or c.cache_type == CACHE_TYPE_UNIFIED
+        )
+        # Prefer a data/unified cache over the split instruction cache at L1.
+        if best == 0 or (is_data and not best_is_data):
+            best = c.size_bytes
+            best_is_data = is_data
+    return best
+
+
+def _cpuid_line_size() -> Int:
+    """Coherency line size in bytes from the first reported cache (x86), or 0."""
+    for c in _query_caches():
+        if c.line_size > 0:
+            return c.line_size
+    return 0
 
 
 # --- macOS sysctl fallback --------------------------------------------------
@@ -180,8 +169,8 @@ def _sysctl_size(name: String) -> Int:
     """Read an integer-valued `sysctl` by name (macOS), in bytes.
 
     Returns 0 on non-macOS hosts or if the key is missing / not an integer.
-    The whole body is elided at compile time off macOS, so the
-    `sysctlbyname` symbol is never linked on other platforms.
+    The whole body is elided at compile time off macOS, so the `sysctlbyname`
+    symbol is never linked on other platforms.
     """
     comptime if not CompilationTarget.is_macos():
         return 0
@@ -198,7 +187,6 @@ def _sysctl_size(name: String) -> Int:
     )
 
     var result = 0
-    # rc == 0 and a full 8-byte (or 4-byte) integer was written.
     if rc == 0 and (length[0] == 8 or length[0] == 4):
         result = Int(value[0])
 
@@ -218,44 +206,21 @@ def _macos_cache_size(primary: String, fallback: String) -> Int:
     return _sysctl_size(fallback)
 
 
-# --- convenience accessors --------------------------------------------------
-
-
-def _cache_size(level: Int, prefer_data: Bool) -> Int:
-    """Size in bytes of the cache at `level`, or 0 if none was found.
-
-    When `prefer_data` is True a data/unified cache is preferred over an
-    instruction cache at the same level (relevant only for split L1).
-    """
-    var best = 0
-    var best_is_data = False
-    for c in query_caches():
-        if c.level != level:
-            continue
-        var is_data = (
-            c.cache_type == CACHE_TYPE_DATA
-            or c.cache_type == CACHE_TYPE_UNIFIED
-        )
-        if best == 0 or (prefer_data and is_data and not best_is_data):
-            best = c.size_bytes
-            best_is_data = is_data
-    return best
+# --- public API -------------------------------------------------------------
 
 
 def l1_data_cache_size() -> Int:
     """Per-core L1 data (or unified) cache size in bytes; 0 if undetectable."""
     comptime if CompilationTarget.is_macos():
-        return _macos_cache_size(
-            "hw.perflevel0.l1dcachesize", "hw.l1dcachesize"
-        )
-    return _cache_size(1, prefer_data=True)
+        return _macos_cache_size("hw.perflevel0.l1dcachesize", "hw.l1dcachesize")
+    return _cpuid_cache_size(1)
 
 
 def l2_cache_size() -> Int:
     """Per-core L2 cache size in bytes; 0 if undetectable."""
     comptime if CompilationTarget.is_macos():
         return _macos_cache_size("hw.perflevel0.l2cachesize", "hw.l2cachesize")
-    return _cache_size(2, prefer_data=True)
+    return _cpuid_cache_size(2)
 
 
 def l3_cache_size() -> Int:
@@ -266,51 +231,15 @@ def l3_cache_size() -> Int:
     """
     comptime if CompilationTarget.is_macos():
         return _macos_cache_size("hw.perflevel0.l3cachesize", "hw.l3cachesize")
-    return _cache_size(3, prefer_data=True)
+    return _cpuid_cache_size(3)
 
 
-# --- demo -------------------------------------------------------------------
+def cache_line_size() -> Int:
+    """Cache line size in bytes; 0 if undetectable.
 
-
-def _pad(s: String, width: Int) -> String:
-    var out = s
-    while out.byte_length() < width:
-        out += " "
-    return out
-
-
-def main():
-    comptime if CompilationTarget.is_x86():
-        print("CPU cache hierarchy (via cpuid):")
-        print(
-            " ",
-            _pad("cache", 6),
-            _pad("type", 12),
-            _pad("size", 10),
-            _pad("line", 6),
-            _pad("ways", 5),
-            "sets",
-        )
-        for c in query_caches():
-            var kib = c.size_bytes // 1024
-            print(
-                " ",
-                _pad(c.label(), 6),
-                _pad(c.type_name(), 12),
-                _pad(String(kib) + " KiB", 10),
-                _pad(String(c.line_size) + " B", 6),
-                _pad(String(c.associativity), 5),
-                String(c.sets),
-            )
-        print()
-    else:
-        comptime if CompilationTarget.is_macos():
-            print("Detailed cpuid enumeration is x86-only; using sysctl sizes.")
-        else:
-            print("Detailed enumeration unavailable on this platform.")
-        print()
-
-    print("Quick accessors:")
-    print("  L1d:", l1_data_cache_size() // 1024, "KiB")
-    print("  L2: ", l2_cache_size() // 1024, "KiB")
-    print("  L3: ", l3_cache_size() // 1024, "KiB")
+    Typically 64 on x86 and 128 on Apple Silicon. Useful for choosing packing
+    alignment and the inner-kernel stride in the matmul.
+    """
+    comptime if CompilationTarget.is_macos():
+        return _sysctl_size("hw.cachelinesize")
+    return _cpuid_line_size()
