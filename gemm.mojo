@@ -1778,6 +1778,12 @@ def matmul_dispatch[
     #     default TILE_N=64 -> 1 of 4 cores busy). A narrow NR=16/TILE_N=16 tile
     #     splits N into >= num_workers j-tiles, recovering the small-square shapes
     #     (sq64 0.44->0.83). See the branch comment below.
+    #   - M >= 6, 192 < N <= M (square-ish): a 6x32 tile with TILE_N=32 (4*NELTS)
+    #     and a small fixed KC=512. The wide-N/tall-K branches below carry TILE_N=64
+    #     + cache-aware big-KC picks that fit a box-shaped C badly; the narrower
+    #     tile + small KC keep the M*KC packed-A L2-resident and double the j-tile
+    #     count. Flips the square-ish band (sq512 0.74->0.88, 512x256x512 0.51->
+    #     0.73) on the Skylake 2.80 GHz VM. N <= M never holds for a headline shape.
     #   - M >= 6, N > 192 (prefill GEMM): a 6x32 register tile (TILE_N=8*NELTS=64,
     #     32 even j-tiles on N=2048), KC stepping 256 (small M) -> 512 -> a
     #     cache-aware large KC. The register-blocked masked M-remainder tail (see
@@ -1860,6 +1866,31 @@ def matmul_dispatch[
         # keeps the wider tile below. (Cannot affect the Qwen MLP shapes, whose
         # N is 2048 or 11008 — this branch only fires for narrow N.)
         _prefill_gemm_v3[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS, 64](c, a, b)
+    elif n <= m:
+        # Square-ish (N <= M, N > 192 so the small-N branch above didn't fire).
+        # Both the wide-N (N>=K) and tall-K (N<K) large-M branches below were
+        # tuned on the two Qwen aspect ratios (N=2048/11008, always N >> M), and
+        # carry their TILE_N=64 / cache-aware-KC picks into these square-ish
+        # shapes where they fit badly: the box-shaped C is small, so the big KC
+        # the cache-aware rule grows (KC=1024/2048 on this L2) inflates the M*KC
+        # packed-A panel without buying any C-traffic saving, and TILE_N=64
+        # leaves only a few coarse j-tiles to parallelize over (N=512 -> 8). On
+        # the Skylake 2.80 GHz VM (4c, AVX-512, 1 MB/core L2) these were the
+        # worst losses in the general sweep — square M=N=K ran 0.58-0.79x linalg
+        # and the narrow-N-tall-M corner (e.g. 512x256x512) bottomed at 0.51x.
+        #
+        # A narrower TILE_N=32 (4*NELTS) + a small fixed KC=512 fixes both: it
+        # doubles the j-tile count (N=512 -> 16 even tiles, 4/4/4/4) and keeps the
+        # packed-B tile (32xKC) and packed-A panel (M*KC) L2-resident. Interleaved
+        # A/B vs linalg (peak/30, the blessed methodology) flips the whole band up:
+        #   sq256 0.72->0.73, sq512 0.73->0.88, sq1024 0.70->0.82, sq2048 0.70->0.85,
+        #   512x256x512 0.51->0.73, 512x384x2048 0.57->0.78, 300x256x256 0.58->0.88.
+        # KC=512 beat KC=1024/2048 at every square-ish size measured (a single
+        # huge k-panel over-grows the M*KC packed-A here). The N<=M gate keeps
+        # this clear of every headline/wide shape: the Qwen up/down proj and all
+        # wide-N grid shapes have N > M (N=2048..11008, M<=512), so they never
+        # reach here and keep their tuned branches below untouched.
+        _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 4 * NELTS, 64](c, a, b)
     elif n >= k:
         # wide-N (up-proj-like). The small-M band uses the N-balanced 6x32 tile
         # (TILE_N = 2*NR = 8*NELTS = 64), same as the large-M band below.

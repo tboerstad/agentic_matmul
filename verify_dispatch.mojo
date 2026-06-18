@@ -79,6 +79,17 @@ def main() raises:
         check(ms[i], 50, 512)     # N=50, NOT a multiple of 16 (NR remainder)
     check(64, 13, 700)            # M tail (64%6) + N remainder + NR_VECS=1
     check(128, 40, 1024)          # N=40 (2 panels + 8-col remainder)
+    # Square-ish branch (N > 192 AND N <= M -> 6x32 TILE_N=32 KC=512 tile).
+    # Cover square M=N=K, a narrow-N-tall-M corner, an N that is NOT a multiple
+    # of TILE_N=32 (N-remainder), and M values (257/300/513) that hit the MR=6
+    # M-tail, all with K big enough to span multiple KC=512 k-panels.
+    check(256, 256, 256)
+    check(512, 512, 512)
+    check(512, 256, 512)
+    check(300, 256, 256)          # M tail (300%6) + square-ish
+    check(257, 256, 1100)         # M tail + 3 k-panels (512+512+76)
+    check(512, 200, 768)          # N=200, NOT a multiple of 32 (N remainder)
+    check(513, 224, 600)          # M tail + N=224 + multi-k-panel
     # Tiny total work (wMNK < 2^19) -> the serial _matmul_small fast path.
     # Cover its edges: 1xK/Mx1/1x1 degenerate dims, N below NR (=16) so only
     # the N-remainder tail runs, N straddling NR, and fully odd dims that hit

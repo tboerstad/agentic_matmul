@@ -450,6 +450,47 @@ wide-N, tall-K, both Qwen orientations, and the general grid — is byte-for-byt
 unchanged. A `thin-N tall-M` probe grid was added to `bench_sweep --full` as
 permanent regression coverage.
 
+### Square-ish branch (Jun 18 2026, 2.80 GHz Skylake): N ≤ M shapes 0.51–0.79 → 0.73–0.88
+
+Re-running the general sweep on the **Skylake 2.80 GHz** VM (4c, AVX-512, 1 MB/
+core L2, 33 MB L3 — half the L2 of the 2.10 GHz Xeon the recent retunes were
+tuned on) exposed that the **square-ish** shapes (N ≤ M, N > 192) were the worst
+losses left here: square M=N=K ran 0.58–0.79× `linalg` (sq128 **0.58**, sq256
+0.70, sq512 0.74, sq1024 0.70, sq2048 0.70) and the narrow-N-tall-M corner
+bottomed at **0.51** (512×256×512). These were never the Qwen focus (the two MLP
+orientations are always N ≫ M, N = 2048/11008), so they fell into the wide-N
+(N≥K) and tall-K (N<K) large-M branches and inherited their `TILE_N=64` +
+cache-aware-KC picks — both wrong for a box-shaped C: the big KC the cache rule
+grows (KC=1024/2048) inflates the `M×KC` packed-A without the wide C that would
+amortize it, and `TILE_N=64` leaves only a few coarse j-tiles (N=512 → 8) for
+the N-only parallelism.
+
+The fix is a single `N ≤ M` branch ahead of the N/K split routing square-ish
+shapes to a **6×32 tile with `TILE_N=32` (4·NELTS) and a small fixed KC=512**:
+the narrower tile doubles the j-tile count (N=512 → 16 even tiles, 4/4/4/4) and
+the small KC keeps the packed-B (32×KC) and packed-A (`M×KC`) panels
+L2-resident. KC=512 beat KC=1024/2048 at every square-ish size measured (the big
+single k-panel over-grows the packed-A here). Verified bit-identical
+(`verify_dispatch` max_err 0.0, incl. N-remainder N=200/224 and the MR M-tail
+M=257/300/513). Warm interleaved A/B vs `linalg` (peak/30):
+
+| Shape | before | after |
+|---|---|---|
+| sq256        | 0.72 | **0.73** |
+| sq512        | 0.73 | **0.88** |
+| sq1024       | 0.70 | **0.82** |
+| sq2048       | 0.70 | **0.85** |
+| 512×256×512  | 0.51 | **0.73** |
+| 512×384×2048 | 0.57 | **0.78** |
+| 300×256×256  | 0.58 | **0.88** |
+
+The `N ≤ M` gate is strictly disjoint from every headline/wide shape: the Qwen
+up/down proj and all wide-N grid shapes have N > M (N = 2048..11008, M ≤ 512),
+so they never reach the branch and keep their tuned paths byte-for-byte — the
+full-sweep up-proj (WIN through M=128), down-proj, decode (2.3× WIN), and the
+general N>M grid are all unchanged. (KC=512 is HW-conservative; a larger-L2
+machine may want the square-ish KC re-swept, like every cache pick in this file.)
+
 ## Future work: how to close the remaining large-M gap
 
 > Superseded on the 2.10 GHz Xeon by the retune above — the four large-M losses
