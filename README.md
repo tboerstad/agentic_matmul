@@ -81,13 +81,15 @@ kernels see the same turbo/thermal state:
 - General-shape `--full` sweep: a clear majority WIN after the small-N /
   wide-N-small-M / square-large-M / small-box fixes (the exact tally swings
   ±several with VM turbo/thermal, so judge per-shape via interleaved A/B, not the
-  single-run count). Two recent levers: (1) the square-ish KC/TILE_N retune for
-  the 2 MB/core L2 (KC 512→1024, load-balance-aware TILE_N) closed the large
-  squares to ~0.88–0.91 (sq1024/sq2048 +3–5%); (2) the small-box M-parallel
-  route flipped the two worst shapes in the whole sweep — square sq96/sq128,
-  which interleaved-A/B (peak/40) lifts 0.65–0.71 → 1.0–1.16 — plus the tall
+  single-run count). Two recent levers: (1) the square-ish branch now picks KC
+  by detected L2 (KC=512 on the 1 MB Skylake, KC=1024 on the 2 MB Xeon — each
+  the measured best on its machine; a single hardcoded KC=1024 had sunk Skylake
+  sq2048 to ~0.72) plus a load-balance-aware TILE_N, holding the large squares at
+  ~0.84 on Skylake / ~0.88–0.91 on the Xeon; (2) the small-box M-parallel route
+  flipped the two worst shapes in the whole sweep — square sq96/sq128, which
+  interleaved-A/B (peak/40) lifts 0.65–0.71 → 1.0–1.16 — plus the tall
   cache-resident boxes (512×128×512 0.56→0.84, 256×128×512 0.63→0.90). Residual
-  losses are the mid/large squares (sq256 ~0.80, sq512 ~0.90) and low-arithmetic-
+  losses are the mid/large squares (sq256 ~0.80, sq512 ~0.81) and low-arithmetic-
   intensity corners (K=128, odd N/K) where `linalg`'s masked AVX-512 remainder
   handling wins.
 
@@ -108,7 +110,10 @@ it:
   (`verify_dispatch` max_err 0.0).
 - **KC is cache-size-dependent.** On the 1 MB-L2 Skylake, KC=512 is best; on the
   2 MB-L2 Xeon, KC=2048 (fewer k-panels, less C re-traffic) wins large-M — the
-  *opposite* conclusion. Every KC/tile pick in the file is hardware-specific.
+  *opposite* conclusion. Every KC/tile pick in the file is hardware-specific; the
+  large-M and square-ish branches resolve the split at runtime from the detected
+  L2 (a hardcoded square-ish KC=1024 that helped the Xeon cost the Skylake ~15%
+  on sq2048), reserving the cpuid probe for shapes big enough to absorb its cost.
 - **Packing is pure overhead when the whole problem is cache-resident.** For a
   small box where B fits L2, the packed prefill kernel's A/B packing + per-worker
   buffer alloc + parallelize launch cost more than the matmul itself; routing to

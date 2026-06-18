@@ -1578,6 +1578,28 @@ def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
     return min(budget, k)
 
 
+def _square_ish_kc(m: Int, n: Int, k: Int) -> Int:
+    # Per-L2-adaptive KC for the square-ish branch (n <= m). Square-ish wants
+    # HALF the BLIS half-L2 KC the wide/tall branches use, because here the M*KC
+    # packed-A competes with the packed-B tile for L2 (a box-shaped C is small,
+    # so a bigger KC buys little C-traffic saving while inflating packed-A). That
+    # works out to KC=512 on a 1 MB/core L2 and KC=1024 on a 2 MB/core L2 — and
+    # each is the measured best ON its machine, the opposite conclusions a single
+    # hardcoded KC can't satisfy: interleaved A/B (peak/25) gives Skylake (1 MB)
+    # KC512 > KC1024 (sq2048 0.84 vs 0.72, sq1024 0.84 vs 0.80), while the Xeon
+    # (2 MB) measured KC1024 > KC512 (sq768..2048 +3-6%).
+    #
+    # KC only matters when k > 512 (a smaller k is one <=512-wide panel either
+    # way), and a square-ish shape with k > 512 and M*N*K >= 2^28 is a multi-ms
+    # op where the l2_cache_size() probe (~6 cpuid -> ~61 us VM-exit on a KVM
+    # guest) is < 2.5%. Smaller shapes skip the probe entirely and take KC=512
+    # (the single-panel / small-L2-optimal pick) — keeping cpuid off the hot path
+    # for the few-us shapes, the lesson from the small-box gate.
+    if k <= 512 or m * n * k < (1 << 28):
+        return 512
+    return 1024 if l2_cache_size() >= (3 << 19) else 512
+
+
 def _matmul_small[
     dtype: DType, MR: Int, NR_VECS: Int
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1943,30 +1965,43 @@ def matmul_dispatch[
         # up/down proj and all wide-N grid shapes have N > M (N=2048..11008,
         # M<=512), so they never reach here and keep their tuned branches below.
         #
-        # KC + TILE_N retune (2.10 GHz Xeon, 2 MB/core L2 — 2x the Skylake VM).
-        # KC is cache-size-dependent (see the file-level note): with the bigger
-        # L2 a KC=1024 packed-B tile (64xKC) + the M*KC packed-A still fits, and
-        # the fewer k-panels mean C is written fewer times. Round-robin A/B of the
-        # variants (peak/80, our-kernel vs our-kernel under one thermal state)
-        # found KC=1024 beats the old KC=512 at every square size here:
-        #   sq512 +0.8%, sq768 +6.5%, sq1024 +4.4%, sq1536 +3.1%, sq2048 +4.6%.
-        # TILE_N then splits on load balance — the repo's #1 win lever. The fatter
-        # TILE_N=64 (fewer, fatter j-tiles -> less packing/loop overhead) is best
-        # ONLY when N tiles evenly across the workers; when ceildiv(N,64) is not a
-        # multiple of num_workers it idles a core and collapses (512x384x2048 TN64
-        # 0.79, 384x320x1024 0.81, vs TN32 ~1.0). So use TN64 when N gives an even,
-        # >=2-per-worker tiling (the M=N power-of-2 squares: 512..2048 all hit it)
-        # and the finer TN32 otherwise (the awkward-N square-ish shapes), each at
-        # its measured best. sq256 (njt=4 -> 1 tile/worker) keeps TN32, where KC is
-        # capped at K=256 anyway so this is identical to the old pick.
+        # KC + TILE_N retune. KC is cache-size-dependent (see the file-level
+        # note) and, for square-ish, the two target machines reach OPPOSITE picks
+        # a single constant can't satisfy — so KC is now chosen by detected L2
+        # (see _square_ish_kc): KC=512 on the 1 MB/core Skylake, KC=1024 on the
+        # 2 MB/core Xeon. Measured per machine (interleaved A/B):
+        #   * Skylake 1 MB (peak/25): KC512 beats KC1024 — sq1024 0.84 vs 0.80,
+        #     sq2048 0.84 vs 0.72 (a single big k-panel over-grows the M*KC
+        #     packed-A on the small L2). A hardcoded KC=1024 sank sq2048 to ~0.72.
+        #   * Xeon 2 MB (peak/80, our-kernel A/B): KC1024 beats KC512 — sq512
+        #     +0.8%, sq768 +6.5%, sq1024 +4.4%, sq1536 +3.1%, sq2048 +4.6% (the
+        #     bigger L2 fits the 64xKC tile + M*KC packed-A, fewer k-panels mean
+        #     C is written fewer times). _square_ish_kc probes L2 only for the
+        #     large k>512 shapes where the choice bites and the cpuid is < 2.5%.
+        # TILE_N then splits on load balance — the repo's #1 win lever, and HW-
+        # agnostic. The fatter TILE_N=64 (fewer, fatter j-tiles -> less packing/
+        # loop overhead) is best ONLY when N tiles evenly across the workers; when
+        # ceildiv(N,64) is not a multiple of num_workers it idles a core and
+        # collapses (512x384x2048 TN64 0.63, vs TN32 0.73). So use TN64 when N
+        # gives an even, >=2-per-worker tiling (the M=N power-of-2 squares
+        # 512..2048 all hit it) and the finer TN32 otherwise (the awkward-N
+        # square-ish shapes), each at its measured best. sq256 no longer reaches
+        # here (small-box branch above); were it to, k<=512 keeps KC=512 / TN32.
         comptime TN_WIDE = 8 * NELTS  # 64 on f64: fatter j-tile, even split only
         comptime TN_FINE = 4 * NELTS  # 32 on f64: finer j-tile, robust balance
         var njt_wide = ceildiv(n, TN_WIDE)
         var num_workers = num_physical_cores()
-        if njt_wide % num_workers == 0 and njt_wide // num_workers >= 2:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_WIDE, 64](c, a, b)
+        var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 2
+        if _square_ish_kc(m, n, k) >= 1024:
+            if use_wide:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_WIDE, 64](c, a, b)
+            else:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_FINE, 64](c, a, b)
         else:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_FINE, 64](c, a, b)
+            if use_wide:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, TN_WIDE, 64](c, a, b)
+            else:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, TN_FINE, 64](c, a, b)
     elif n >= k:
         # wide-N (up-proj-like). The small-M band uses the N-balanced 6x32 tile
         # (TILE_N = 2*NR = 8*NELTS = 64), same as the large-M band below.
