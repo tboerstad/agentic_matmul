@@ -409,6 +409,47 @@ a wash, N=64 the parallel path already wins), so it was left out to keep the
 guard a clean, zero-risk total-work cut; an M-parallel thin-N kernel is the
 follow-up.
 
+### M-parallel thin-N kernel (Jun 18 2026, 2.10 GHz Xeon): N ≤ 64 tall-M 0.10–0.58 → 0.80–1.27
+
+The deferred follow-up above, now built. Thin-N tall-M shapes were the worst
+band left in the sweep: with the kernel parallelizing only over N, a thin N
+leaves most of the 4-core box idle no matter the tile width (N=16 → a single
+j-tile), and the narrow `NR=16` small-N path packs + streams all of B from one
+core. Measured vs `linalg`: `8192×16×512` **0.10**, `2048×16×2048` 0.14,
+`4096×32×1024` 0.18, `128×16×512` 0.28, `512×32×512` 0.41, `512×48×512` 0.58 —
+i.e. 2–10× *slower* than the reference on shapes where all the work is along M.
+
+The fix is `_thin_n_gemm`, a kernel that **parallelizes over M-row blocks**
+instead of N: every core owns a disjoint band of C's rows and sweeps the full
+(tiny) N, reading A and B straight from source with no packing (a thin N stays
+cache-resident, so packing buys nothing — same insight as the serial
+`_matmul_small`, just parallel over the `MR`-blocks). The dispatch routes
+`N ≤ 64 ∧ M ≥ 64` here (`NR_VECS=1` for `N < 2·NELTS` so a sub-16-wide N still
+fills a full SIMD panel rather than dropping to the scalar tail; `NR_VECS=2`
+otherwise). Verified bit-identical to the reference (`verify_dispatch`,
+max_err 0.0, incl. NR-remainder N and the MR M-tail). Warm interleaved sweep:
+
+| Shape | before | after |
+|---|---|---|
+| 8192×16×512   | 0.10 | **0.98** |
+| 2048×16×2048  | 0.14 | **0.89** |
+| 4096×32×1024  | 0.18 | **0.98** |
+| 128×16×512    | 0.28 | **1.27 WIN** |
+| 512×32×512    | 0.41 | **1.05 WIN** |
+| 512×48×512    | 0.58 | **1.05 WIN** |
+| 64×32×2048    | 0.50 | **1.27 WIN** |
+| 512×8×512     | 0.05 | **0.96** |
+
+The route caps at **N = 64**: above it a large-K B no longer fits cache without
+packing, so the unpacked stream collapses (`2048×128×2048` measured **0.38**
+unpacked vs the packed narrow path) and the existing small-N branch keeps those.
+The `N ≤ 64 ∧ M ≥ 64` window is strictly disjoint from every headline shape
+(Qwen N = 2048/11008) and from the small-square narrow path (those have
+`M·N·K < 2^19` and hit `_matmul_small` first), so the full sweep — squares,
+wide-N, tall-K, both Qwen orientations, and the general grid — is byte-for-byte
+unchanged. A `thin-N tall-M` probe grid was added to `bench_sweep --full` as
+permanent regression coverage.
+
 ## Future work: how to close the remaining large-M gap
 
 > Superseded on the 2.10 GHz Xeon by the retune above — the four large-M losses

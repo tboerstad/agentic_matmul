@@ -213,6 +213,28 @@ def run_full() raises:
     ]
     run_set("general (M,N,K) grid", g_l, g_m, g_n, g_k, n_runs)
 
+    # Thin-N, tall-M grid — the M-parallel _thin_n_gemm branch (N <= 64, M >= 64).
+    # The prefill kernel only parallelizes over N, so before this kernel these
+    # ran the worst ratios in the whole sweep (0.10-0.58 vs linalg). Kept here as
+    # permanent regression coverage for the M-parallel route.
+    var tn_l = [
+        String("tn-N16  "), "tn-N32  ", "tn-N48  ", "tn-N64  ",
+        "tn-tallK", "tn-bigM ", "tn-N8   ", "tn-mid  ",
+    ]
+    var tn_m = [
+        512, 512, 512, 512,
+        2048, 8192, 512, 128,
+    ]
+    var tn_n = [
+        16, 32, 48, 64,
+        16, 16, 8, 32,
+    ]
+    var tn_k = [
+        512, 512, 512, 512,
+        2048, 512, 512, 2048,
+    ]
+    run_set("thin-N tall-M grid (M-parallel branch)", tn_l, tn_m, tn_n, tn_k, n_runs)
+
 
 def main() raises:
     var args = argv()
