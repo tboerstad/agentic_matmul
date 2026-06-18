@@ -1,10 +1,11 @@
+from cpu_cache import l2_cache_size
 from matrix import Matrix
 from std.algorithm.functional import parallelize, vectorize
 from std.collections import InlineArray
 from std.math import ceildiv, fma
 from std.memory import memset_zero
 from std.memory.unsafe_pointer import alloc
-from std.sys import num_physical_cores, simd_width_of
+from std.sys import num_physical_cores, simd_width_of, size_of
 from std.sys.intrinsics import prefetch, PrefetchOptions
 
 
@@ -1556,6 +1557,27 @@ def matmul_decode[
     _decode_gemv(c, a, b)
 
 
+def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
+    # Cache-aware KC for the prefill GEMM's large-M band.
+    #
+    # The L2-resident working set is the packed-B tile (TILE_N x KC elements),
+    # reused across every i-panel of a j-tile. Sizing that block at ~half of
+    # the per-core L2 (the BLIS rule of thumb) leaves the other half for the
+    # streaming packed-A micro-panel and the C accumulators.
+    #
+    # Driving KC from the detected L2 keeps the pick correct across machines:
+    # a 1 MB/core L2 yields KC=1024, a 2 MB/core L2 yields KC=2048. The caller
+    # snaps this budget to the kernel's KC ladder.
+    comptime elem = size_of[Scalar[dtype]]()
+    var l2 = l2_cache_size()
+    if l2 == 0:
+        # L2 undetectable (e.g. non-x86 without sysctl): pick a KC that fits a
+        # small (1 MB) L2.
+        return min(512, k)
+    var budget = (l2 // 2) // (tile_n * elem)
+    return min(budget, k)
+
+
 def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1632,7 +1654,17 @@ def matmul_dispatch[
         elif m <= 288:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
         else:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
+            # Cache-aware KC: size the resident packed-B tile (TILE_N x KC) to
+            # half of the detected per-core L2 so the packed-A panel and C keep
+            # the other half. This is KC=1024 on a 1 MB/core L2 and KC=2048 on a
+            # 2 MB/core L2; a KC large enough to fill the whole L2 thrashes A/C.
+            var kc = _l2_resident_kc[dtype](64, k)
+            if kc >= 2048:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
+            elif kc >= 1024:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64](c, a, b)
+            else:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
     else:
         # tall-K (down-proj-like): uniform 6x32 tile, TILE_N = 2*NR = 8*NELTS =
         # 64, KC=256 (M<=64) / 512 (M>64). TILE_N=64 splits N=2048 into 32 even
@@ -1658,7 +1690,15 @@ def matmul_dispatch[
         elif m <= 256:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
         else:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
+            # Cache-aware KC (see wide-N branch): half-L2 resident packed-B
+            # tile, i.e. KC=1024 on a 1 MB/core L2, KC=2048 on a 2 MB/core L2.
+            var kc = _l2_resident_kc[dtype](64, k)
+            if kc >= 2048:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
+            elif kc >= 1024:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64](c, a, b)
+            else:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
 
 
 # Default matmul points to the tiled version
