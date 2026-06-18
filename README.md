@@ -73,6 +73,9 @@ residual capture-list / hoisted-binding overhead from the syntax migration.
 11. **decode** — j-parallel GEMV with L1-resident column chunks for decode shapes
 12. **dispatch** — Shape-adaptive auto-selection (see the comment in
     `matmul_dispatch`):
+    - `M·N·K < 2^19` (tiny): serial register-blocked `_matmul_small` — skips the
+      thread launch + packing overhead that makes the parallel kernels 10–100×
+      slower on a handful-of-FLOPs matmul
     - `M == 1`: decode GEMV (streams B once)
     - `2 ≤ M ≤ 5`: v3 micro-kernel with `MR = M` — packs B once and reuses it
       across all rows (the old path routed M<6 to the GEMV, which re-streamed
@@ -358,6 +361,53 @@ The remaining general-shape losses are the same micro-kernel-maturity tail as
 the Qwen shapes (large square M=256/512 ≈ 0.75–0.89, the heaviest GEMMs), plus
 low-arithmetic-intensity corners (K=128, odd N/K) where `linalg`'s masked
 remainder handling still wins.
+
+### Tiny-shape serial fast path (Jun 18 2026, 2.10 GHz Xeon): sq1..sq64 0.02–0.81 → WIN
+
+The general sweep above exposed a regime the Qwen-shaped tuning had never
+touched: **tiny GEMMs**. On the 2.10 GHz Xeon the dispatch ran the worst ratios
+in the entire sweep on small square shapes — `sq8` at **0.03×** linalg, `sq16`
+**0.05×**, `sq32` **0.14×**, `sq64` **0.81×** — i.e. 7–30× *slower* than the
+reference on a handful-of-FLOPs matmul. The cause is pure overhead: every branch
+of `matmul_dispatch` routed to a parallel kernel (`_decode_gemv` /
+`_prefill_gemm_v3`), each of which spawns 4 workers and allocates + fills
+per-worker packing buffers before doing any arithmetic. For an 8×8×8 product
+(1 K of MACs) that fixed cost dwarfs the compute.
+
+The fix is a `M*N*K < 2^19` guard at the very top of the dispatch that routes
+tiny total-work shapes to a new **serial register-blocked kernel**
+(`_matmul_small`): no thread launch, no allocation, no A/B packing — it holds an
+`MR × NR` C tile (MR=6, NR=16, measured best) in registers across the K loop and
+reads A/B straight from source (a tiny N/K stays L1-resident, so packing buys
+nothing). Verified bit-identical to the parallel path (`verify_dispatch`
+max_err 0.0, incl. degenerate 1×1×1 / 1×N / M×1 and fully-odd dims). Warm
+interleaved sweep vs `linalg`:
+
+| Shape | before | after |
+|---|---|---|
+| sq1 / sq2 / sq4   | 0.02 / 0.02 / 0.03 | **1.95 / 3.43 / 2.18 WIN** |
+| sq8 / sq16        | 0.03 / 0.05        | **2.37 / 1.78 WIN** |
+| sq32 / sq64       | 0.14 / 0.81        | **1.13 / 1.56 WIN** |
+
+The `2^19` cut was placed empirically: serial still beats the parallel path at
+`sq80` (wMNK=512000, ~1.14×) and the 4 cores retake the lead at `sq88`
+(wMNK=681472), so the threshold sits in that gap. Everything from `sq96` up is
+untouched (it stays the tuning-resistant micro-kernel-maturity tail), and the
+guard can **never** fire for a headline/large shape — decode (1×11008×2048) and
+every prefill batch have wMNK in the tens of millions — so all 21/22 Qwen-shape
+WINs and the general mid/large grid are byte-for-byte unchanged. Net: 7 tiny
+squares flipped from a 0.02–0.81 LOSE to a 1.1–3.4 WIN at zero cost elsewhere.
+
+**Measured but deferred — large thin-N (N ≤ 32, big K).** Shapes like
+512×16×512 or 2048×32×2048 also lose badly (≈0.12–0.39×) because the kernel
+parallelizes only over N: `ceildiv(N, TILE_N)` is < 4 j-tiles, so the box
+starves. Routing them to the serial kernel *improves* on the current dispatch
+(e.g. 512×16×512 0.39 → 0.91; 2048×16×2048 0.12 → 0.33) but still trails
+`linalg` by a wide margin — the genuine fix is an **M-parallel** kernel for thin
+N, not a serial one. The serial route here also has a delicate boundary (N=48 is
+a wash, N=64 the parallel path already wins), so it was left out to keep the
+guard a clean, zero-risk total-work cut; an M-parallel thin-N kernel is the
+follow-up.
 
 ## Future work: how to close the remaining large-M gap
 
