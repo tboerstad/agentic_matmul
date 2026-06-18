@@ -59,4 +59,12 @@ def main() raises:
     # accumulation (2 panels: 1024 + partial) + N remainder + M tail together.
     check(300, 1100, 1100)
     check(384, 1100, 1100)
+    # Small-N branch (N <= 192 -> narrow NR=16/TILE_N=16 tile). Cover N values
+    # both divisible and not divisible by 16 (NR remainder) across the M tail.
+    for i in range(len(ms)):
+        check(ms[i], 64, 256)     # N=64, multiple of 16
+    for i in range(len(ms)):
+        check(ms[i], 96, 512)     # N=96, multiple of 16
+    for i in range(len(ms)):
+        check(ms[i], 100, 300)    # N=100, NOT a multiple of 16 (NR remainder)
     print("all passed")

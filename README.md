@@ -313,6 +313,52 @@ flips WIN/LOSE between runs). The four clear large-M losses are gone with no
 micro-kernel rewrite — they were a stale tile/KC table carried over from a
 smaller-cache machine.
 
+### General-shape generalization (Jun 18 2026, 2.10 GHz Xeon): the dispatch was overfit to the Qwen aspect ratios
+
+The retunes above all chased the two Qwen MLP shapes (N=11008 K=2048 and
+N=2048 K=11008). Running the broader `bench_sweep` (`square`, `wide-N`,
+`tall-K` aspect-ratio sweeps + a general (M,N,K) grid) exposed how much that
+focus had **overfit the dispatch to those two aspect ratios** — on this same
+2.10 GHz Xeon, general shapes lost across the board: square GEMMs ran 0.4–0.9×
+`linalg` (sq64 **0.44**, sq96 0.48, sq128 0.42, sq256 0.78, sq2048 0.87), and
+moderate-width wide-N small-M (e.g. 6×4096×4096) lost at ~0.81. Three
+shape-selection fixes, each validated by interleaved A/B (the blessed
+methodology), close most of that gap **without touching any headline shape**
+(all are gated on regimes the Qwen shapes never hit). Net `--full` WIN count
+28 → 32; headline preserved (interleaved peak/30: up-proj WINs through M=128,
+down-proj through M=64, the M≥256 tail unchanged).
+
+- **Small-N branch (N ≤ 192) → narrow NR=16/TILE_N=16 tile.** The kernel only
+  parallelizes over N (j-tiles), so a narrow N starves the cores: at the default
+  TILE_N=64, N=64 makes **one** j-tile (1 of 4 cores busy), N=128 makes two.
+  That alone explained the catastrophic small-square ratios (~core-count-limited).
+  A narrow NR=16 tile splits such an N into ≥ `num_workers` j-tiles (N=64→4,
+  N=96→6, N=128→8), filling the box: **sq64 0.44→0.83, sq96 0.48→0.75,
+  sq128 0.42→0.64**. N≥256 already yields ≥4 tiles and keeps the wider tile.
+  (Qwen N is 2048/11008 — this branch can never fire for them.)
+- **Wide-N small-M band: 8×24 → 6×32, except very-wide-N small-M.** The old
+  uniform 8×24 small-M pick was tuned only on the Qwen up-proj (N=11008). A
+  direct 8×24-vs-6×32 A/B across N widths (peak/25, K=2048) found a clean
+  crossover: 6×32 wins everywhere for N ≤ 4096 (up to +15%) and for all N at
+  M ≥ 64, while 8×24 still edges 6×32 by ~2–4% only in one corner — **very wide
+  N (≈11008) AND M ≤ 32** (the Qwen up-proj small batch). Keeping 8×24 in just
+  that corner and 6×32 elsewhere flips the moderate-/square-N small-M band from
+  LOSE to WIN (e.g. 6×4096×4096 0.81→1.43, wide-N N=8192 M=64..128 ~0.95→~1.0)
+  with **zero** up-proj regression.
+- **Square-ish large-M KC guard (`n ≤ m` → cap KC at 1024).** The cache-aware
+  large-M KC picks the biggest L2-resident KC (KC=2048 here), which assumes a
+  wide N whose large C amortizes the resulting big packed-A panel (M×KC). When N
+  is *not* wider than M (square-ish), C is small, so the single huge k-panel buys
+  almost no C-traffic saving while its M×KC packed-A thrashes cache:
+  **sq2048 KC=2048 0.87 → KC=1024 0.93**, whereas a genuinely wide M=2048 N=8192
+  still prefers KC=2048. Gating on `n ≤ m` caps only square-ish M>288 shapes and
+  can never touch a Qwen/headline shape (all M≤512, all N wider than M).
+
+The remaining general-shape losses are the same micro-kernel-maturity tail as
+the Qwen shapes (large square M=256/512 ≈ 0.75–0.89, the heaviest GEMMs), plus
+low-arithmetic-intensity corners (K=128, odd N/K) where `linalg`'s masked
+remainder handling still wins.
+
 ## Future work: how to close the remaining large-M gap
 
 > Superseded on the 2.10 GHz Xeon by the retune above — the four large-M losses
