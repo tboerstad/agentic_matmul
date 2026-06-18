@@ -67,6 +67,18 @@ def main() raises:
         check(ms[i], 96, 512)     # N=96, multiple of 16
     for i in range(len(ms)):
         check(ms[i], 100, 300)    # N=100, NOT a multiple of 16 (NR remainder)
+    # Thin-N, tall-M branch (N <= 64, M >= 64 -> M-parallel _thin_n_gemm). Cover
+    # the NR_VECS=1 path (N < 2*NELTS), N at/over a multiple of 16, an N that is
+    # NOT a multiple of NR (scalar N-remainder strip), and M values that exercise
+    # the MR=6 M-tail block — all across a K big enough to clear the wMNK cutoff.
+    for i in range(len(ms)):
+        check(ms[i], 16, 512)     # N=16, exactly one NR=16 panel
+    for i in range(len(ms)):
+        check(ms[i], 8, 512)      # N=8 < 2*NELTS -> NR_VECS=1 (NR=8) panel
+    for i in range(len(ms)):
+        check(ms[i], 50, 512)     # N=50, NOT a multiple of 16 (NR remainder)
+    check(64, 13, 700)            # M tail (64%6) + N remainder + NR_VECS=1
+    check(128, 40, 1024)          # N=40 (2 panels + 8-col remainder)
     # Tiny total work (wMNK < 2^19) -> the serial _matmul_small fast path.
     # Cover its edges: 1xK/Mx1/1x1 degenerate dims, N below NR (=16) so only
     # the N-remainder tail runs, N straddling NR, and fully odd dims that hit

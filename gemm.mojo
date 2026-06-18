@@ -1665,6 +1665,94 @@ def _matmul_small[
             vectorize[NELTS](n - jr, tail)
 
 
+def _thin_n_gemm[
+    dtype: DType, MR: Int, NR_VECS: Int
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    # M-parallel register-blocked GEMM for thin-N shapes (small N, large M*K).
+    #
+    # The prefill kernel parallelizes only over N (j-tiles), so a thin N starves
+    # the cores: ceildiv(N, TILE_N) < num_workers leaves most of the box idle
+    # (N=16 -> 1 j-tile -> 1 of 4 cores). For these shapes the work is along M,
+    # not N, so this kernel parallelizes over M-row blocks instead — every core
+    # owns a disjoint band of C's rows and sweeps the full (tiny) N. The N is
+    # small enough to stay L1-resident, so like _matmul_small it reads A and B
+    # straight from source with no packing; the only change from the serial
+    # small-shape kernel is the parallelize over MR-blocks. Computes C = A * B
+    # (overwrites C); bit-identical to the serial/parallel paths.
+    comptime NELTS = simd_width_of[dtype]()
+    comptime NR = NR_VECS * NELTS
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+    var c_ptr = c.data.unsafe_ptr().as_noalias_ptr()
+    var a_ptr = a.data.unsafe_ptr().as_noalias_ptr()
+    var b_ptr = b.data.unsafe_ptr().as_noalias_ptr()
+    var nw = num_physical_cores()
+    var num_blocks = ceildiv(m, MR)
+
+    def worker(blk: Int) {mut c_ptr, mut a_ptr, mut b_ptr, read m, read n, read k}:
+        var i = blk * MR
+        var r = min(MR, m - i)
+        # NR-wide register-blocked panels over the N tiles. A full MR-row block
+        # uses the comptime-unrolled MR path (each B-load reused across MR rows);
+        # a tail M-block (m % MR) falls back to one row at a time.
+        if r == MR:
+            var j = 0
+            while j + NR <= n:
+                var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
+                    fill=SIMD[dtype, NELTS](0)
+                )
+                for p in range(k):
+                    var b_row = b_ptr + p * n + j
+                    var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                        fill=SIMD[dtype, NELTS](0)
+                    )
+                    comptime for nv in range(NR_VECS):
+                        bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
+                    comptime for mr in range(MR):
+                        var av = SIMD[dtype, NELTS](a_ptr[(i + mr) * k + p])
+                        comptime for nv in range(NR_VECS):
+                            acc[mr * NR_VECS + nv] = av.fma(
+                                bv[nv], acc[mr * NR_VECS + nv]
+                            )
+                comptime for mr in range(MR):
+                    comptime for nv in range(NR_VECS):
+                        (c_ptr + (i + mr) * n + j).store(
+                            offset=nv * NELTS, val=acc[mr * NR_VECS + nv]
+                        )
+                j += NR
+        else:
+            for ii in range(i, i + r):
+                var j2 = 0
+                while j2 + NR <= n:
+                    var acc = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                        fill=SIMD[dtype, NELTS](0)
+                    )
+                    for p in range(k):
+                        var b_row = b_ptr + p * n + j2
+                        var av = SIMD[dtype, NELTS](a_ptr[ii * k + p])
+                        comptime for nv in range(NR_VECS):
+                            acc[nv] = av.fma(
+                                b_row.load[width=NELTS](offset=nv * NELTS), acc[nv]
+                            )
+                    comptime for nv in range(NR_VECS):
+                        (c_ptr + ii * n + j2).store(offset=nv * NELTS, val=acc[nv])
+                    j2 += NR
+
+        # N-remainder columns (n % NR < NR): scalar dot per (row, col). This is a
+        # tiny strip (NR is at most 16 cols) so a scalar tail costs nothing.
+        var jr = (n // NR) * NR
+        for ii in range(i, i + r):
+            var a_row = a_ptr + ii * k
+            for jj in range(jr, n):
+                var acc = Scalar[dtype](0)
+                for p in range(k):
+                    acc = fma(a_row[p], b_ptr[p * n + jj], acc)
+                c_ptr[ii * n + jj] = acc
+
+    parallelize(worker, num_blocks, nw)
+
+
 def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1735,6 +1823,31 @@ def matmul_dispatch[
         _prefill_gemm_v3[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
     elif m == 5:
         _prefill_gemm_v3[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif n <= NELTS * 8 and m >= 64:
+        # Thin-N, tall-M (N <= 64 on f64, the work is along M not N). The prefill
+        # kernel parallelizes only over N (j-tiles), so a thin N starves the box
+        # even with the narrow NR=16 tile below: at N=16 -> 1 j-tile, and the
+        # remaining cores idle while one streams + packs all of B. These shapes
+        # ran the worst ratios in the whole sweep — 8192x16x512 0.10, 2048x16x2048
+        # 0.14, 4096x32x1024 0.18, 128x16x512 0.28 vs linalg — the deferred
+        # "M-parallel thin-N kernel" follow-up. _thin_n_gemm parallelizes over
+        # M-row blocks instead: every core owns a band of C's rows and sweeps the
+        # full (tiny) N, reading A/B straight from source with no packing (a thin
+        # N stays cache-resident, so packing buys nothing). Measured on the
+        # 2.10 GHz Xeon (4c) it lifts the entire band from a 0.10-0.58 LOSE to
+        # 0.80-1.27 — e.g. 8192x16x512 0.10->0.98, 2048x16x2048 0.14->0.89,
+        # 128x16x512 0.28->1.27, 512x32x512 0.41->1.05 WIN, 64x32x2048 0.50->1.27
+        # WIN. Above N=64 a large-K B no longer fits cache without packing and the
+        # narrow packed path wins (2048x128x2048 dropped to 0.38 unpacked), so the
+        # route caps at N=64. NR_VECS=1 (NR=NELTS) for N < 2*NELTS so a sub-16-wide
+        # N still fills a full SIMD panel instead of falling to the scalar tail
+        # (512x8x512 0.05->0.96); NR_VECS=2 (NR=16) otherwise. The N <= 64 cap and
+        # the m >= 64 floor (mid-M is where it wins biggest) keep this clear of the
+        # Qwen MLP shapes (N=2048/11008) entirely.
+        if n < 2 * NELTS:
+            _thin_n_gemm[dtype, 6, 1](c, a, b)
+        else:
+            _thin_n_gemm[dtype, 6, 2](c, a, b)
     elif n <= 3 * 64:
         # Small-N (N <= 192). The default TILE_N=64 splits such an N into fewer
         # than 4 j-tiles (N=64 -> 1, N=128 -> 2), and since the kernel only
