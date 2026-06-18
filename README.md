@@ -71,9 +71,11 @@ kernels see the same turbo/thermal state:
   1.05–3.4×; the lone exception is down-proj M=512 at ~0.99 (parity).
 - Beats NumPy (OpenBLAS) and SciPy dgemm on all 22 shapes.
 - General-shape `--full` sweep: 32 WINs after the small-N / wide-N-small-M /
-  square-large-M fixes. Residual losses are large square M=256/512 (~0.75–0.89)
-  and low-arithmetic-intensity corners (K=128, odd N/K) where `linalg`'s masked
-  remainder handling wins.
+  square-large-M fixes. After the square-ish KC/TILE_N retune for this 2 MB/core
+  L2 (KC 512→1024, load-balance-aware TILE_N), the large squares closed to
+  ~0.88–0.91 (sq1024/sq2048 +3–5%). Residual losses are the small squares
+  (M≤512) and low-arithmetic-intensity corners (K=128, odd N/K) where `linalg`'s
+  masked remainder handling wins.
 
 ### Key findings from tuning
 
@@ -108,10 +110,11 @@ it:
 
 ### Still open
 
-Micro-kernel parity with `linalg` on the heaviest GEMMs (large square M=256/512,
-where both kernels sit at ~50–66% of the 358 GFLOPS f64 peak). Closing it needs
-`linalg`-style masked AVX-512 N-remainder handling and/or pack/compute overlap —
-substantial and unproven on this hardware. A separate follow-up is an
+Micro-kernel parity with `linalg` on the heaviest GEMMs (square M ≥ 256, now
+~0.88–0.91 after the KC/TILE_N retune, where both kernels sit at ~50–66% of the
+358 GFLOPS f64 peak). Closing the remaining gap needs `linalg`-style masked
+AVX-512 N-remainder handling and/or pack/compute overlap — substantial and
+unproven on this hardware. A separate follow-up is an
 **M-parallel kernel for thin N** (N ≤ 32), where the N-only parallelism starves
 the cores.
 

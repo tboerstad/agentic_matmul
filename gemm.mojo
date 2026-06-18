@@ -1879,18 +1879,41 @@ def matmul_dispatch[
         # worst losses in the general sweep — square M=N=K ran 0.58-0.79x linalg
         # and the narrow-N-tall-M corner (e.g. 512x256x512) bottomed at 0.51x.
         #
-        # A narrower TILE_N=32 (4*NELTS) + a small fixed KC=512 fixes both: it
-        # doubles the j-tile count (N=512 -> 16 even tiles, 4/4/4/4) and keeps the
-        # packed-B tile (32xKC) and packed-A panel (M*KC) L2-resident. Interleaved
-        # A/B vs linalg (peak/30, the blessed methodology) flips the whole band up:
+        # A narrower TILE_N=32 (4*NELTS) + KC fixes both: it doubles the j-tile
+        # count (N=512 -> 16 even tiles, 4/4/4/4) and keeps the packed-B tile
+        # (32xKC) and packed-A panel (M*KC) L2-resident. Interleaved A/B vs linalg
+        # (peak/30) on the small-L2 Skylake 2.80 GHz VM (1 MB/core) flipped the
+        # whole band up with KC=512:
         #   sq256 0.72->0.73, sq512 0.73->0.88, sq1024 0.70->0.82, sq2048 0.70->0.85,
         #   512x256x512 0.51->0.73, 512x384x2048 0.57->0.78, 300x256x256 0.58->0.88.
-        # KC=512 beat KC=1024/2048 at every square-ish size measured (a single
-        # huge k-panel over-grows the M*KC packed-A here). The N<=M gate keeps
-        # this clear of every headline/wide shape: the Qwen up/down proj and all
-        # wide-N grid shapes have N > M (N=2048..11008, M<=512), so they never
-        # reach here and keep their tuned branches below untouched.
-        _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 4 * NELTS, 64](c, a, b)
+        # The N<=M gate keeps this clear of every headline/wide shape: the Qwen
+        # up/down proj and all wide-N grid shapes have N > M (N=2048..11008,
+        # M<=512), so they never reach here and keep their tuned branches below.
+        #
+        # KC + TILE_N retune (2.10 GHz Xeon, 2 MB/core L2 — 2x the Skylake VM).
+        # KC is cache-size-dependent (see the file-level note): with the bigger
+        # L2 a KC=1024 packed-B tile (64xKC) + the M*KC packed-A still fits, and
+        # the fewer k-panels mean C is written fewer times. Round-robin A/B of the
+        # variants (peak/80, our-kernel vs our-kernel under one thermal state)
+        # found KC=1024 beats the old KC=512 at every square size here:
+        #   sq512 +0.8%, sq768 +6.5%, sq1024 +4.4%, sq1536 +3.1%, sq2048 +4.6%.
+        # TILE_N then splits on load balance — the repo's #1 win lever. The fatter
+        # TILE_N=64 (fewer, fatter j-tiles -> less packing/loop overhead) is best
+        # ONLY when N tiles evenly across the workers; when ceildiv(N,64) is not a
+        # multiple of num_workers it idles a core and collapses (512x384x2048 TN64
+        # 0.79, 384x320x1024 0.81, vs TN32 ~1.0). So use TN64 when N gives an even,
+        # >=2-per-worker tiling (the M=N power-of-2 squares: 512..2048 all hit it)
+        # and the finer TN32 otherwise (the awkward-N square-ish shapes), each at
+        # its measured best. sq256 (njt=4 -> 1 tile/worker) keeps TN32, where KC is
+        # capped at K=256 anyway so this is identical to the old pick.
+        comptime TN_WIDE = 8 * NELTS  # 64 on f64: fatter j-tile, even split only
+        comptime TN_FINE = 4 * NELTS  # 32 on f64: finer j-tile, robust balance
+        var njt_wide = ceildiv(n, TN_WIDE)
+        var num_workers = num_physical_cores()
+        if njt_wide % num_workers == 0 and njt_wide // num_workers >= 2:
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_WIDE, 64](c, a, b)
+        else:
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_FINE, 64](c, a, b)
     elif n >= k:
         # wide-N (up-proj-like). The small-M band uses the N-balanced 6x32 tile
         # (TILE_N = 2*NR = 8*NELTS = 64), same as the large-M band below.
