@@ -420,7 +420,8 @@ bash setup.sh
 source .venv/bin/activate
 mojo bench_matmul.mojo        # All 12 kernels on both shapes
 mojo bench_linalg.mojo        # Mojo stdlib linalg.matmul baseline
-mojo bench_sweep.mojo         # dispatch vs linalg, per-M, both orientations (finds losing dims)
+mojo bench_sweep.mojo --iterate  # FAST: dispatch vs linalg on the corner/edge shapes (default)
+mojo bench_sweep.mojo --full     # SLOW: full per-M sweep over many aspect ratios + general grid
 python bench_sota.py           # NumPy/SciPy/MKL benchmarks
 mojo test_gemm.mojo           # Correctness tests
 mojo verify_dispatch.mojo     # dispatch correctness vs naive (all branches + edge cases)
