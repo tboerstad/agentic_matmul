@@ -13,8 +13,8 @@ from std.sys import simd_width_of
 #
 # Every method is `@always_inline` and does only the add/multiply the kernel
 # would write by hand, so a Tile is a zero-cost rename, the same bet `RegisterTile`
-# makes for the accumulator. Build kernel Tiles from the `as_noalias_ptr()` local
-# (not `Matrix.view()`) so the noalias the hot loops rely on is preserved.
+# makes for the accumulator. The kernels get theirs from `Matrix.noalias_view()`
+# once at the top and work from that — no raw pointers, no re-wrapping in loops.
 # ===========================================================================
 
 

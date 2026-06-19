@@ -45,8 +45,10 @@ Every kernel is built on two shared, zero-cost abstractions:
   and the writable C target. Its accessors (`sub`, `tile`, `row`, `addr`) are all
   `@always_inline` over the same offset arithmetic the kernels would write by
   hand, so it is a zero-cost rename of `ptr + i*stride + j` — the kernels speak in
-  tiles instead of raw pointer math. (`Matrix.view()` returns one; the hot loops
-  build theirs from the `as_noalias_ptr()` local to preserve noalias.)
+  tiles instead of raw pointer math. Each kernel gets its operands from
+  `Matrix.noalias_view()` once at the top and threads those views (not raw
+  pointers) through its workers; `Matrix.view()` is the plain (non-noalias)
+  variant for callers off the hot path.
 
 The four kernels:
 
