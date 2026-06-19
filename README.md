@@ -53,14 +53,23 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
 - `M == 1`: decode GEMV (streams B once).
 - `2 ≤ M ≤ 5`: v3 micro-kernel with `MR = M` — packs B once and reuses it across
   all rows (vs the GEMV re-streaming all of B per row, ~2× slower at M=4).
-- **Small box, M-dominant, B fits L2** (`M ≥ 64`, `M ≥ N`, `K·N·8 ≤ 512 KB`):
+- **Small box, M-dominant, B fits L2** (`M ≥ 64`, `M ≥ N`, B = `K·N·8` fits L2):
   M-parallel, no-packing `_thin_n_gemm` — each core owns a band of C's rows and
   sweeps the full N, reading A/B straight from source (B stays L2-resident, so
   packing buys nothing). The packed prefill kernel's packing + thread-launch
   overhead dwarfs the tiny compute on these cache-resident shapes; this branch
   pays none of it. Fixes the worst shapes in the general sweep — sq128 0.65→1.0,
-  sq96 0.71→1.16, 512×128×512 0.56→0.84. The `M ≥ N` gate keeps it unreachable
-  for every wide/headline shape (Qwen up/down proj are `N ≫ M`).
+  sq96 0.71→1.16, 512×128×512 0.56→0.84. The B-fits-L2 test is **L2-adaptive**:
+  a compile-time 512 KB tier (kept cpuid-free for the few-µs tiny boxes) plus a
+  `B ≤ (2·L2)/3` tier (`_box_l2_budget`, only reached once B > 512 KB, where the
+  op is large enough that the one-time memoized cpuid is free). On the 2 MB-L2
+  Xeon that second tier extends the route up to B ≈ 1.35 MB, flipping the whole
+  mid-square band off the slow packed path — interleaved A/B vs the packed
+  square-ish path: sq288 1.38×, sq320 1.35×, sq352 1.16×, sq384 1.03×,
+  sq416 1.11×, 640×256×512 1.14× (≈ parity-to-win vs linalg, e.g. sq320
+  0.76→1.01) — while the same rule = 682 KB on a 1 MB-L2 part keeps sq320
+  (no-pack 0.52 there) safely on the packed path. The `M ≥ N` gate keeps it
+  unreachable for every wide/headline shape (Qwen up/down proj are `N ≫ M`).
 - `M ≥ 6`: parallel `_prefill_gemm_v3` (N-parallel: each worker owns a band of
   j-tiles, reading the dominant B matrix from DRAM once into private L2). Tile and
   KC are selected per regime — narrow NR=16 for `N ≤ 192` (so a small N still
@@ -152,8 +161,11 @@ Micro-kernel parity with `linalg` on the heaviest GEMMs (square M ≥ 256, now
 of the 358 GFLOPS f64 peak). Closing the remaining gap needs `linalg`-style
 masked AVX-512 N-remainder handling and/or pack/compute overlap — substantial
 and unproven on this hardware. The thin-N and small-box cache-resident gaps are
-now both handled by the M-parallel no-pack route; its L2-fit cut (512 KB) is a
-Skylake-tuned constant that a smaller-L2 part may want lowered.
+now both handled by the M-parallel no-pack route; its L2-fit cut is now
+L2-adaptive (compile-time 512 KB tier + a `B ≤ (2·L2)/3` tier), so a larger-L2
+part automatically extends the no-pack route up the B range (the 2 MB Xeon
+gained the whole sq288–sq416 mid-square band, ≈ +30% on sq320) while a 1 MB
+part keeps the tighter cut.
 
 > **Methodology note:** ratios from a single `bench_sweep` run swing ±5–10% at
 > M ≥ 128 from turbo/thermal state on shared VMs. Judge micro-kernel changes with

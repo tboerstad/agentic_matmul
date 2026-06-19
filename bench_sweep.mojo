@@ -243,16 +243,21 @@ def run_full() raises:
     run_set("thin-N tall-M grid (M-parallel branch)", tn_l, tn_m, tn_n, tn_k, n_runs)
 
     # Small-box grid — the M-parallel no-pack _thin_n_gemm[6,4] branch (m >= n,
-    # n > 64, B = k*n*8 <= 512 KB). Before this branch these cache-resident boxes
+    # n > 64, B = k*n*8 fits L2). Before this branch these cache-resident boxes
     # went to the packed prefill kernel, whose packing + thread-launch overhead
     # dwarfed the tiny compute: square sq96..sq256 ran 0.65-0.79 and tall boxes
-    # (e.g. 512x128x512) bottomed at 0.56 vs linalg. Kept as permanent coverage
-    # for the route AND its boundary: sq320/sq352 (B > 512 KB) and 128x256x256
-    # (m < n) MUST stay on the packed path (they collapse under _thin_n).
+    # (e.g. 512x128x512) bottomed at 0.56 vs linalg. The B-fits-L2 cut is two
+    # tiered: a compile-time 512 KB tier (always) plus an L2-adaptive B<=(2*L2)/3
+    # tier (see _box_l2_budget). sq320 (B 800 KB) / sq352 (B 968 KB) therefore
+    # route by L2: on a 1 MB/core L2 (e.g. Skylake) they stay PACKED (no-pack
+    # collapses there — sq320 0.52); on a 2 MB/core L2 (this Xeon) they take the
+    # no-pack route and WIN (interleaved A/B vs the packed path: sq320 1.35x,
+    # sq352 1.16x; vs linalg ~1.0-1.02). 128x256x256 (m < n) MUST always stay on
+    # the packed path — _thin_n needs m >= n and collapses here (0.75-0.82).
     var sb_l = [
         String("sb-sq96 "), "sb-sq128", "sb-sq192", "sb-sq256",
         "sb-512x128", "sb-256x128", "sb-512x256",
-        "sb!sq320", "sb!sq352", "sb!128x256",
+        "sb~sq320", "sb~sq352", "sb!128x256",
     ]
     var sb_m = [
         96, 128, 192, 256,
