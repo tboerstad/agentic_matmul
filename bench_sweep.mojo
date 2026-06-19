@@ -220,7 +220,7 @@ def run_full() raises:
     ]
     run_set("general (M,N,K) grid", g_l, g_m, g_n, g_k, n_runs)
 
-    # Thin-N, tall-M grid — the M-parallel _thin_n_gemm branch (N <= 64, M >= 64).
+    # Thin-N, tall-M grid — the M-parallel _nopack_gemm branch (N <= 64, M >= 64).
     # The prefill kernel only parallelizes over N, so before this kernel these
     # ran the worst ratios in the whole sweep (0.10-0.58 vs linalg). Kept here as
     # permanent regression coverage for the M-parallel route.
@@ -242,7 +242,7 @@ def run_full() raises:
     ]
     run_set("thin-N tall-M grid (M-parallel branch)", tn_l, tn_m, tn_n, tn_k, n_runs)
 
-    # Small-box grid — the M-parallel no-pack _thin_n_gemm[6,4] branch (m >= n,
+    # Small-box grid — the M-parallel no-pack _nopack_gemm[6,4] branch (m >= n,
     # n > 64, B = k*n*8 fits L2). Before this branch these cache-resident boxes
     # went to the packed prefill kernel, whose packing + thread-launch overhead
     # dwarfed the tiny compute: square sq96..sq256 ran 0.65-0.79 and tall boxes
