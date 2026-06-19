@@ -134,16 +134,25 @@ it:
   prefetcher already hide the L2→L1 latency.
 - **Masked-SIMD / zero-edge tiles** — a zero-edge 4×32 lost at every M, so the
   scalar M-remainder is not the bottleneck.
-- **`SHARED_A`** (pack A once, share across N-workers) — a wash; A fits in L3.
+- **`SHARED_A`** (pack A once, share across N-workers) — a wash on the **wide/tall
+  headline shapes** (N ≫ M): A is small relative to the N-sweep, so the default
+  per-worker re-pack is cheap L3 traffic. **But it's a clear win on the big
+  squares** (`SHARED_A=True` flag on `_prefill_gemm_v3`, enabled from the
+  square-ish branch only): there A is as large as B/C and the 4× per-worker
+  re-pack is a real cost, so packing the full A once up front lifted sq512
+  ~0.85→0.90 and sq2048 ~0.86→0.92 vs `linalg` (≈ +5–10% dispatch GFLOPS),
+  interleaved A/B on the 2.10 GHz Xeon. The wide/tall branches keep the default
+  per-worker path (`SHARED_A=False`), so the headline shapes are byte-for-byte
+  unchanged.
 
 ### Still open
 
 Micro-kernel parity with `linalg` on the heaviest GEMMs (square M ≥ 256, now
-~0.88–0.91 after the KC/TILE_N retune, where both kernels sit at ~50–66% of the
-358 GFLOPS f64 peak). Closing the remaining gap needs `linalg`-style masked
-AVX-512 N-remainder handling and/or pack/compute overlap — substantial and
-unproven on this hardware. The thin-N and small-box cache-resident gaps are now
-both handled by the M-parallel no-pack route; its L2-fit cut (512 KB) is a
+~0.90–0.94 after the square-ish shared-A pack, where both kernels sit at ~55–66%
+of the 358 GFLOPS f64 peak). Closing the remaining gap needs `linalg`-style
+masked AVX-512 N-remainder handling and/or pack/compute overlap — substantial
+and unproven on this hardware. The thin-N and small-box cache-resident gaps are
+now both handled by the M-parallel no-pack route; its L2-fit cut (512 KB) is a
 Skylake-tuned constant that a smaller-L2 part may want lowered.
 
 > **Methodology note:** ratios from a single `bench_sweep` run swing ±5–10% at
