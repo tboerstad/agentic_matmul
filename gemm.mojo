@@ -1114,9 +1114,21 @@ def _prefill_gemm[
 
 def _prefill_gemm_v3[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
-    NC_TILES: Int,
+    NC_TILES: Int, SHARED_A: Bool = False,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     # Prefill GEMM with explicit B-load hoisting in the microkernel.
+    #
+    # SHARED_A (square-ish only): by default every worker re-packs the FULL A
+    # (all i-panels) for each k-panel into its own buffer — num_workers
+    # redundant copies. On a wide/tall headline shape A is small relative to the
+    # N-sweep, so that redundancy is cheap L3 traffic (measured a wash; the
+    # default keeps it). On a big SQUARE, A is as large as B/C and the 4x
+    # re-pack is a real cost (sq2048: ~134 MB of redundant pack traffic/call).
+    # With SHARED_A the full A is packed ONCE up front (parallelized over
+    # i-panels) into a single shared buffer keyed [i-panel][k][MR]; every worker
+    # then reads that buffer. Halves the packed-A footprint and removes the
+    # redundant packing. Enabled from the square-ish branch only, so every
+    # headline shape keeps the byte-for-byte original path.
     # The NR_VECS SIMD loads of B per K-step are stored in an InlineArray
     # and reused across the MR broadcast-FMA inner loop, so the compiler
     # cannot accidentally re-issue them per `mr` iteration. Pointers are
@@ -1142,9 +1154,32 @@ def _prefill_gemm_v3[
     var bp_total = num_workers * bp_per_worker
     var bp_buf = alloc[Scalar[dtype]](bp_total)
 
-    var ap_per_worker = num_i_panels * MR * KC
-    var ap_total = num_workers * ap_per_worker
+    var num_full_panels = m // MR
+    var ap_per_worker: Int
+    var ap_total: Int
+    if SHARED_A:
+        # One shared copy of packed A, laid out [i-panel][k][MR]. ap_per_worker
+        # = 0 so every worker indexes the same buffer (ap_worker == ap_buf).
+        ap_per_worker = 0
+        ap_total = num_i_panels * MR * k
+    else:
+        ap_per_worker = num_i_panels * MR * KC
+        ap_total = num_workers * ap_per_worker
     var ap_buf = alloc[Scalar[dtype]](ap_total)
+
+    if SHARED_A:
+        # Pre-pack the full A once, in parallel over full MR-row i-panels. Each
+        # panel block is MR*k contiguous, organized [k][MR] so the microkernel's
+        # ap_panel + pk*MR + mr indexing matches the per-worker layout (just with
+        # a full-k stride + pc offset instead of a per-panel kc stride).
+        def pack_a_panel(ip: Int) {mut ap_buf, mut a_ptr, read k}:
+            var i0 = ip * MR
+            var ap_panel = ap_buf + ip * MR * k
+            for pk in range(k):
+                var dst = ap_panel + pk * MR
+                comptime for mr in range(MR):
+                    dst[mr] = a_ptr[(i0 + mr) * k + pk]
+        parallelize(pack_a_panel, num_full_panels, num_workers)
 
     def process_worker(worker_id: Int) {mut c_ptr, mut a_ptr, mut b_ptr, mut bp_buf, mut ap_buf, read m, read n, read k, read num_j_tiles, read num_workers, read bp_per_worker, read ap_per_worker}:
         var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
@@ -1175,17 +1210,20 @@ def _prefill_gemm_v3[
                 kc_h = kc
                 pc_h = pc
 
-                # Pack A: KC outer, MR inner so each pk gives MR contiguous doubles
+                # Pack A: KC outer, MR inner so each pk gives MR contiguous
+                # doubles. Skipped under SHARED_A — the full A was packed once up
+                # front into the shared buffer before the parallel region.
                 var i = 0
                 var ip = 0
-                while i + MR <= m:
-                    var ap_panel = ap_worker + ip * MR * kc
-                    for pk in range(kc):
-                        var dst = ap_panel + pk * MR
-                        comptime for mr in range(MR):
-                            dst[mr] = a_ptr[(i + mr) * k + pc + pk]
-                    i += MR
-                    ip += 1
+                if not SHARED_A:
+                    while i + MR <= m:
+                        var ap_panel = ap_worker + ip * MR * kc
+                        for pk in range(kc):
+                            var dst = ap_panel + pk * MR
+                            comptime for mr in range(MR):
+                                dst[mr] = a_ptr[(i + mr) * k + pc + pk]
+                        i += MR
+                        ip += 1
 
                 for j_tile_idx in range(jt, jt_batch_end):
                     var j0 = j_tile_idx * TILE_N
@@ -1275,7 +1313,11 @@ def _prefill_gemm_v3[
                         i = 0
                         ip = 0
                         while i + MR <= m:
-                            var ap_panel = ap_worker + ip * MR * kc
+                            # SHARED_A: full-k stride per i-panel + pc offset into
+                            # the one shared pack; else per-worker per-kc layout.
+                            var ap_panel = (
+                                ap_worker + ip * MR * k + pc * MR
+                            ) if SHARED_A else (ap_worker + ip * MR * kc)
 
                             comptime for mr in range(MR):
                                 prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
@@ -1992,16 +2034,20 @@ def matmul_dispatch[
         var njt_wide = ceildiv(n, TN_WIDE)
         var num_workers = num_physical_cores()
         var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 2
+        # SHARED_A=True: pack the full A once instead of per-worker. On these
+        # square-ish shapes A is as large as B/C, so the default per-worker
+        # 4x A re-pack is a real cost (unlike the wide/tall headline shapes,
+        # where A is small and SHARED_A measured a wash).
         if _square_ish_kc(m, n, k) >= 1024:
             if use_wide:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_WIDE, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_WIDE, 64, True](c, a, b)
             else:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_FINE, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, TN_FINE, 64, True](c, a, b)
         else:
             if use_wide:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, TN_WIDE, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, TN_WIDE, 64, True](c, a, b)
             else:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, TN_FINE, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, TN_FINE, 64, True](c, a, b)
     elif n >= k:
         # wide-N (up-proj-like). The small-M band uses the N-balanced 6x32 tile
         # (TILE_N = 2*NR = 8*NELTS = 64), same as the large-M band below.
