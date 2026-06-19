@@ -34,11 +34,21 @@ steps (naive, tiled, simd, parallel, register-blocked, packed, comptime, goto,
 and the v2 prefill kernel) have been removed. `matmul_dispatch` routes each
 shape to the fastest of these four:
 
-Every kernel is built on one shared abstraction, **`RegisterTile`** — an
-MR×(NR_VECS·NELTS) block of C held in SIMD registers and swept over K with
-`rank1_update`. The compiler flattens its `InlineArray` accumulator into
-registers, so the abstraction is zero-cost: the FMA/load/store it emits is
-byte-for-byte identical to a hand-numbered register nest. The four kernels:
+Every kernel is built on two shared, zero-cost abstractions:
+
+- **`RegisterTile`** (`gemm.mojo`) — an MR×(NR_VECS·NELTS) block of C held in
+  SIMD registers and swept over K with `rank1_update`. The compiler flattens its
+  `InlineArray` accumulator into registers, so the FMA/load/store it emits is
+  byte-for-byte identical to a hand-numbered register nest.
+- **`Tile`** (`tile.mojo`) — a rows×cols window into a row-major buffer (rows
+  `stride` apart), generic over origin so one type names both read-only operands
+  and the writable C target. Its accessors (`sub`, `tile`, `row`, `addr`) are all
+  `@always_inline` over the same offset arithmetic the kernels would write by
+  hand, so it is a zero-cost rename of `ptr + i*stride + j` — the kernels speak in
+  tiles instead of raw pointer math. (`Matrix.view()` returns one; the hot loops
+  build theirs from the `as_noalias_ptr()` local to preserve noalias.)
+
+The four kernels:
 
 - **`_packed_gemm`** — the workhorse packed GEMM: per-worker A/B-panel
   packing, the `RegisterTile` micro-kernel with hoisted B-loads + noalias,

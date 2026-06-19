@@ -177,3 +177,24 @@ Independent of the big choice, three changes are pure upside:
 
 Every step is gated by `verify_dispatch` (max_err 0.0) and, for anything on a hot
 loop, an interleaved A/B peak-GFLOPS check per the methodology note in README.md.
+
+---
+
+## Status: D + B landed
+
+The chosen direction (D + B) is implemented:
+
+- **`tile.mojo`** — the `Tile` view (Option B), `origin`-generic, every accessor
+  `@always_inline`.
+- **`Matrix`** — keyword-only `fill=` constructor, `from_rows` builder, `view()`.
+- **`RegisterTile.load/store`** take a `Tile` instead of `(ptr, stride)`; the
+  serial, no-pack, and packed full-panel call sites address through
+  `sub`/`addr`/`row` instead of raw offsets.
+- **`_pack_b_slab`** — the packed worker's B-slab packing extracted to a named
+  helper (Option D's de-monolith).
+
+Each landed behind `verify_dispatch` (max_err 0.0) with `--iterate` sweep ratios
+unchanged within VM noise. **Next** per the recommendation: Option C's `classify`
+for the dispatch tower, then an Option A `LayoutTensor` spike — the `Tile` call
+sites (`sub`/`tile`/`row`/`addr`) are shaped to map onto `LayoutTensor` so that
+swap stays mechanical.
