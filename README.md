@@ -75,6 +75,8 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
   KC are selected per regime — narrow NR=16 for `N ≤ 192` (so a small N still
   splits into ≥ num_workers j-tiles), 8×24 only for very-wide-N small-M (Qwen
   up-proj small batch), 6×32 elsewhere; KC scaled up where the L2 allows it.
+  For `M ≥ 192` this branch also packs A **once** (`SHARED_A`, see Dead ends)
+  instead of once per N-worker — a +3–10% win across the whole large-M band.
 
 Tunable parameters (tile MR×NR, KC, KU) are hardware-specific — see notes below.
 
@@ -143,24 +145,35 @@ it:
   prefetcher already hide the L2→L1 latency.
 - **Masked-SIMD / zero-edge tiles** — a zero-edge 4×32 lost at every M, so the
   scalar M-remainder is not the bottleneck.
-- **`SHARED_A`** (pack A once, share across N-workers) — a wash on the **wide/tall
-  headline shapes** (N ≫ M): A is small relative to the N-sweep, so the default
-  per-worker re-pack is cheap L3 traffic. **But it's a clear win on the big
-  squares** (`SHARED_A=True` flag on `_prefill_gemm_v3`, enabled from the
-  square-ish branch only): there A is as large as B/C and the 4× per-worker
-  re-pack is a real cost, so packing the full A once up front lifted sq512
-  ~0.85→0.90 and sq2048 ~0.86→0.92 vs `linalg` (≈ +5–10% dispatch GFLOPS),
-  interleaved A/B on the 2.10 GHz Xeon. The wide/tall branches keep the default
-  per-worker path (`SHARED_A=False`), so the headline shapes are byte-for-byte
-  unchanged.
+- **`SHARED_A`** (pack A once, share across N-workers) — by default every
+  N-worker re-packs the full A (M·KC per k-panel), `num_workers` redundant
+  copies. This was long held to be **a wash on the wide/tall headline shapes**
+  (N ≫ M) — true, but only because the headline is M=96, where A is tiny next
+  to the N-sweep so the per-worker re-pack is cheap L3 traffic. The reasoning
+  does **not** extend up the M axis: once M grows, A is no longer small and the
+  `num_workers`× re-pack is a real cost. Interleaved A/B (peak/30) on the
+  2.10 GHz Xeon found a clean crossover at **M ≈ 192** on *every* orientation:
+  M ≤ 128 a wash (up-proj M=96 +0.6%, down-proj M=96 −1% — so the headlines
+  stay on the per-worker path), M ≥ 192 a clean **+3–10%** that flips the whole
+  large-M band LOSE→WIN — up-proj M=512 0.96→0.99 (`ShA/cur` 1.03), h4k-m512
+  (512×4096×4096) 0.99→1.04, N4000 0.91→1.01, ffn-up8k 0.98→1.03, down-proj
+  M=512 0.93→0.97. `SHARED_A=True` is therefore now enabled from the **square-ish,
+  wide-N, AND tall-K branches for M ≥ 192** (previously square-ish only); the
+  small-M bands and both Qwen headline shapes keep the byte-for-byte per-worker
+  path. Bit-identical (`verify_dispatch` max_err 0.0 across both orientations
+  and the gate boundary). On the big squares it had already lifted sq512
+  ~0.85→0.90 and sq2048 ~0.86→0.92.
 
 ### Still open
 
 Micro-kernel parity with `linalg` on the heaviest GEMMs (square M ≥ 256, now
 ~0.90–0.94 after the square-ish shared-A pack, where both kernels sit at ~55–66%
-of the 358 GFLOPS f64 peak). Closing the remaining gap needs `linalg`-style
-masked AVX-512 N-remainder handling and/or pack/compute overlap — substantial
-and unproven on this hardware. The thin-N and small-box cache-resident gaps are
+of the 358 GFLOPS f64 peak). The large-M wide-N/tall-K band has now closed to
+~0.94–1.04 after extending `SHARED_A` to M ≥ 192 there (it was a wide-margin
+LOSE before), so the residual is mostly the big squares and the odd-N remainder
+(N=11007 ~0.88, where `linalg`'s masked AVX-512 tail still wins). Closing the
+last gap needs `linalg`-style masked AVX-512 N-remainder handling and/or
+pack/compute overlap — substantial and unproven on this hardware. The thin-N and small-box cache-resident gaps are
 now both handled by the M-parallel no-pack route; its L2-fit cut is now
 L2-adaptive (compile-time 512 KB tier + a `B ≤ (2·L2)/3` tier), so a larger-L2
 part automatically extends the no-pack route up the B range (the 2 MB Xeon
