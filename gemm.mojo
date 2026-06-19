@@ -2134,9 +2134,26 @@ def matmul_dispatch[
         if n >= 9 * 1024 and m <= 32:
             _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
         elif m <= 192:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 256, 4, 8 * NELTS, 64](c, a, b)
+            # SHARED_A large-M gate. By default every worker re-packs the full A
+            # (M*KC per k-panel), so on a wide-N shape A is re-packed num_workers
+            # times. The README long held that to be "a wash on wide/tall
+            # headline shapes (N >> M)" — but that was reasoned at the headline
+            # M=96, where A is tiny next to the N-sweep. Once M grows, the 4x
+            # A re-pack is a real cost. Interleaved A/B (peak/30) on the 2.10 GHz
+            # Xeon found a clean crossover at M~192: M<=128 a wash (M=96 +0.6%,
+            # so NO headline regression), M>=192 a clean +3% (e.g. up-proj M=256
+            # 0.976->1.006, M=512 0.962->0.993; flips LOSE->WIN). Gate at m>=192
+            # so the headline prefill (M=96) and the small-M band keep the exact
+            # per-worker path. SHARED_A is bit-identical (same FMAs, A packed
+            # once instead of num_workers times); verify_dispatch confirms it.
+            if m >= 192:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 256, 4, 8 * NELTS, 64, True](c, a, b)
+            else:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 256, 4, 8 * NELTS, 64](c, a, b)
         elif m <= 288:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
+            # M in 193..288: past the SHARED_A crossover (see above), so pack A
+            # once. +3% (up-proj M=256 0.976->1.006).
+            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64, True](c, a, b)
         else:
             # Cache-aware KC: size the resident packed-B tile (TILE_N x KC) to
             # half of the detected per-core L2 so the packed-A panel and C keep
@@ -2154,12 +2171,14 @@ def matmul_dispatch[
             # touch a Qwen/headline shape (all M<=512, all N wider than M).
             if n <= m:
                 kc = min(kc, 1024)
+            # M>288: always past the SHARED_A crossover (see m<=192 branch).
+            # up-proj M=512 0.962->0.993, h4k-m512 0.989->1.040 (peak/30).
             if kc >= 2048:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64, True](c, a, b)
             elif kc >= 1024:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64, True](c, a, b)
             else:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64, True](c, a, b)
     else:
         # tall-K (down-proj-like): uniform 6x32 tile, TILE_N = 2*NR = 8*NELTS =
         # 64, KC=256 (M<=64) / 512 (M>64). TILE_N=64 splits N=2048 into 32 even
@@ -2183,17 +2202,26 @@ def matmul_dispatch[
         if m <= 64:
             _prefill_gemm_v3[dtype, 6, 4 * NELTS, 256, 4, 8 * NELTS, 64](c, a, b)
         elif m <= 256:
-            _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
+            # SHARED_A large-M gate (see wide-N branch for the rationale). The
+            # tall-K crossover is the same M~192: M<=128 a wash-to-slight-loss
+            # INCLUDING the down-proj headline M=96 (-1%), M>=192 a +1-4% win
+            # (down-proj M=256 0.956->0.966, M=512 0.931->0.965; peak/30). Gate
+            # at m>=192 so the down-proj headline keeps the per-worker path.
+            if m >= 192:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64, True](c, a, b)
+            else:
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
         else:
             # Cache-aware KC (see wide-N branch): half-L2 resident packed-B
             # tile, i.e. KC=1024 on a 1 MB/core L2, KC=2048 on a 2 MB/core L2.
+            # M>256: always past the SHARED_A crossover, so pack A once.
             var kc = _l2_resident_kc[dtype](64, k)
             if kc >= 2048:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 2048, 4, 8 * NELTS, 64, True](c, a, b)
             elif kc >= 1024:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 1024, 4, 8 * NELTS, 64, True](c, a, b)
             else:
-                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64](c, a, b)
+                _prefill_gemm_v3[dtype, 6, 4 * NELTS, 512, 4, 8 * NELTS, 64, True](c, a, b)
 
 
 # Default matmul points to the tiled version

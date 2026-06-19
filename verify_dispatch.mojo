@@ -90,6 +90,18 @@ def main() raises:
     check(257, 256, 1100)         # M tail + 3 k-panels (512+512+76)
     check(512, 200, 768)          # N=200, NOT a multiple of 32 (N remainder)
     check(513, 224, 600)          # M tail + N=224 + multi-k-panel
+    # SHARED_A large-M gate (m>=192 packs A once) on the wide-N (N>K) and tall-K
+    # (N<K) branches. Cover the gate boundary (191 off / 192 on) and large M on
+    # both orientations, with K spanning multiple k-panels so the shared single
+    # pack-of-A's [i-panel][k][MR] layout + pc offset is exercised across panels.
+    check(191, 2048, 1100)        # wide-N, just BELOW gate (per-worker pack)
+    check(192, 2048, 1100)        # wide-N, AT gate (SHARED_A on)
+    check(256, 2048, 1100)        # wide-N, SHARED_A, multi-k-panel + M tail
+    check(512, 4096, 2048)        # wide-N, SHARED_A, cache-aware big-KC panel
+    check(191, 512, 2048)         # tall-K (N<K), just BELOW gate
+    check(192, 512, 2048)         # tall-K, AT gate (SHARED_A on)
+    check(257, 512, 2048)         # tall-K, SHARED_A, M tail + multi-k-panel
+    check(512, 512, 2048)         # tall-K, SHARED_A, cache-aware big-KC panel
     # Tiny total work (wMNK < 2^19) -> the serial _matmul_small fast path.
     # Cover its edges: 1xK/Mx1/1x1 degenerate dims, N below NR (=16) so only
     # the N-remainder tail runs, N straddling NR, and fully odd dims that hit
