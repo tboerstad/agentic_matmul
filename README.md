@@ -61,15 +61,21 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
   pays none of it. Fixes the worst shapes in the general sweep — sq128 0.65→1.0,
   sq96 0.71→1.16, 512×128×512 0.56→0.84. The B-fits-L2 test is **L2-adaptive**:
   a compile-time 512 KB tier (kept cpuid-free for the few-µs tiny boxes) plus a
-  `B ≤ (2·L2)/3` tier (`_box_l2_budget`, only reached once B > 512 KB, where the
-  op is large enough that the one-time memoized cpuid is free). On the 2 MB-L2
-  Xeon that second tier extends the route up to B ≈ 1.35 MB, flipping the whole
-  mid-square band off the slow packed path — interleaved A/B vs the packed
-  square-ish path: sq288 1.38×, sq320 1.35×, sq352 1.16×, sq384 1.03×,
-  sq416 1.11×, 640×256×512 1.14× (≈ parity-to-win vs linalg, e.g. sq320
-  0.76→1.01) — while the same rule = 682 KB on a 1 MB-L2 part keeps sq320
-  (no-pack 0.52 there) safely on the packed path. The `M ≥ N` gate keeps it
-  unreachable for every wide/headline shape (Qwen up/down proj are `N ≫ M`).
+  `B ≤ L2/3` tier (`_box_l2_budget`, only reached once B > 512 KB, where the op
+  is large enough that the one-time memoized cpuid is free). The no-pack route
+  re-reads all of B per MR-row block, so B must stay L2-resident *alongside* the
+  packed-A micro-panel + C + prefetch headroom across the whole M-sweep — which
+  holds only to ~1/3 of L2. On the 2 MB-L2 Xeon that admits up to sq288
+  (B≈648 KB) and **excludes** sq320+ (B≥800 KB): re-measured interleaved A/B vs
+  the packed square-ish path, no-pack wins only to sq288 (~0.92–1.00) and loses
+  badly above it (sq320 ~0.67, sq352 ~0.56, sq384 ~0.42, 640×256×512 ~0.47),
+  where the packed path runs 0.78–0.95. (An earlier, more generous `(2·L2)/3`
+  ≈ 1.35 MB cut sent sq320–sq416 + tall boxes to no-pack — they were then the
+  worst losses in the whole sweep; the old no-pack "wins" there were measured on
+  an older Mojo nightly whose `linalg.matmul` was slower and have since flipped.)
+  On a 1 MB-L2 part L2/3 = 341 KB sits below the 512 KB tier-1, so it keeps
+  no-pack only for B ≤ 512 KB. The `M ≥ N` gate keeps it unreachable for every
+  wide/headline shape (Qwen up/down proj are `N ≫ M`).
 - `M ≥ 6`: parallel `_prefill_gemm_v3` (N-parallel: each worker owns a band of
   j-tiles, reading the dominant B matrix from DRAM once into private L2). Tile and
   KC are selected per regime — narrow NR=16 for `N ≤ 192` (so a small N still
@@ -190,11 +196,14 @@ microkernel (see *Masked N-remainder* above): the partial tile runs at full
 microkernel throughput and the shape holds parity (1.01). Closing the square gap
 likely needs pack/compute overlap — substantial and unproven on this hardware.
 The thin-N and small-box cache-resident gaps are
-now both handled by the M-parallel no-pack route; its L2-fit cut is now
-L2-adaptive (compile-time 512 KB tier + a `B ≤ (2·L2)/3` tier), so a larger-L2
-part automatically extends the no-pack route up the B range (the 2 MB Xeon
-gained the whole sq288–sq416 mid-square band, ≈ +30% on sq320) while a 1 MB
-part keeps the tighter cut.
+handled by the M-parallel no-pack route; its L2-fit cut is L2-adaptive
+(compile-time 512 KB tier + a `B ≤ L2/3` tier). The no-pack route only wins
+while B stays well inside L2 (≈ up to sq288 on the 2 MB Xeon); past that B
+spills mid-M-sweep and the packed square-ish path wins, so the cut excludes
+sq320+ and the tall boxes. (An earlier `(2·L2)/3` ≈ 1.35 MB cut admitted that
+whole band to no-pack — once `linalg.matmul` improved in a newer nightly those
+shapes flipped to the *worst* losses in the sweep, sq384 0.42; re-routing them
+back to packed lifts them to 0.78–0.95.)
 
 > **Methodology note:** ratios from a single `bench_sweep` run swing ±5–10% at
 > M ≥ 128 from turbo/thermal state on shared VMs. Judge micro-kernel changes with
