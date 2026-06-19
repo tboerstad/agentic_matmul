@@ -122,13 +122,9 @@ def _masked_microkernel[
     dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int, NR: Int,
     c_org: MutOrigin, a_org: ImmutOrigin, b_org: MutOrigin,
 ](
-    c_ptr: UnsafePointer[Scalar[dtype], c_org],
-    a_ptr: UnsafePointer[Scalar[dtype], a_org],
+    c_block: Tile[dtype, c_org],
+    a_block: Tile[dtype, a_org],
     bp_panel: UnsafePointer[Scalar[dtype], b_org],
-    c_base: Int,
-    a_base: Int,
-    n: Int,
-    k: Int,
     kc: Int,
     r: Int,
     jj_limit: Int,
@@ -143,16 +139,18 @@ def _masked_microkernel[
     the unmasked full kernel, so this one function also serves the full-panel
     M-remainder.
 
-    c_base = i*n + j0 + jr  (top-left of the block in C);
-    a_base = i*k + pc       (top-left of the block's rows in A).
+    `c_block` is the block's view into C (its top-left is the (i, j0+jr) corner,
+    rows c_block.stride == n apart); `a_block` is the matching view into A (corner
+    (i, pc), rows k apart) — both `sub`-views, so the kernel speaks in tiles
+    instead of `c_ptr + i*n + j0 + jr` pointer math.
     """
     var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
     if not is_first_k:
         comptime for mr in range(MR):
             if mr < r:
+                var cr = c_block.row(mr)
                 comptime for nr in range(NR_VECS):
                     var col0 = nr * NELTS
-                    var cr = c_ptr + c_base + mr * n
                     if col0 + NELTS <= jj_limit:
                         tile.acc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
                     elif col0 < jj_limit:
@@ -168,13 +166,13 @@ def _masked_microkernel[
         var a_col = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
         comptime for mr in range(MR):
             if mr < r:
-                a_col[mr] = a_ptr[a_base + mr * k + pk]
+                a_col[mr] = a_block.row(mr)[pk]
         tile.rank1_update(a_col, b_row)
     comptime for mr in range(MR):
         if mr < r:
+            var cr = c_block.row(mr)
             comptime for nr in range(NR_VECS):
                 var col0 = nr * NELTS
-                var cr = c_ptr + c_base + mr * n
                 if col0 + NELTS <= jj_limit:
                     cr.store(offset=col0, val=tile.acc[mr * NR_VECS + nr])
                 elif col0 < jj_limit:
@@ -367,16 +365,14 @@ def _packed_gemm[
                             i = 0
                             while i + MR <= m:
                                 _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
-                                    c_view.ptr, a_view.ptr, bp_panel,
-                                    i * n + j0 + jr, i * k + pc,
-                                    n, k, kc, MR, jj_limit, is_first_k,
+                                    c_view.sub(i, j0 + jr), a_view.sub(i, pc),
+                                    bp_panel, kc, MR, jj_limit, is_first_k,
                                 )
                                 i += MR
                             if i < m:
                                 _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
-                                    c_view.ptr, a_view.ptr, bp_panel,
-                                    i * n + j0 + jr, i * k + pc,
-                                    n, k, kc, m - i, jj_limit, is_first_k,
+                                    c_view.sub(i, j0 + jr), a_view.sub(i, pc),
+                                    bp_panel, kc, m - i, jj_limit, is_first_k,
                                 )
                             continue
 
@@ -434,9 +430,8 @@ def _packed_gemm[
                         # partial-tile case already `continue`d above).
                         if i < m:
                             _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
-                                c_view.ptr, a_view.ptr, bp_panel,
-                                i * n + j0 + jr, i * k + pc,
-                                n, k, kc, m - i, NR, is_first_k,
+                                c_view.sub(i, j0 + jr), a_view.sub(i, pc),
+                                bp_panel, kc, m - i, NR, is_first_k,
                             )
 
             jt += NC_TILES
