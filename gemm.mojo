@@ -188,6 +188,48 @@ def _masked_microkernel[
 # ===========================================================================
 
 
+@always_inline
+def _pack_b_slab[
+    dtype: DType, NR: Int, NR_VECS: Int, NELTS: Int, PREFETCH_B_DIST: Int,
+    b_org: ImmutOrigin, bp_org: MutOrigin,
+](
+    b_ptr: UnsafePointer[Scalar[dtype], b_org],
+    bp_worker: UnsafePointer[Scalar[dtype], bp_org],
+    pc: Int,
+    j0: Int,
+    n: Int,
+    kc: Int,
+    last_full_panel: Int,
+    has_remainder: Bool,
+    nr_actual: Int,
+):
+    """Pack one j-tile's slab of B into the worker buffer as [panel][k][NR],
+    software-prefetching the next k-row. A partial trailing panel is padded out
+    to full NR with zeros, so the micro-kernel can run it as a full panel (the
+    zero columns contribute nothing and the masked store keeps only the valid
+    ones). Pulled out of the worker so the K-panel loop reads as pack-then-compute."""
+    for pk in range(kc):
+        var row_base = b_ptr + (pc + pk) * n + j0
+        prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
+            b_ptr + (pc + pk + PREFETCH_B_DIST) * n + j0
+        )
+        for jp in range(last_full_panel):
+            var src = row_base + jp * NR
+            var dst = bp_worker + jp * kc * NR + pk * NR
+            comptime for nv in range(NR_VECS):
+                dst.store[width=NELTS](
+                    offset=nv * NELTS,
+                    val=src.load[width=NELTS](offset=nv * NELTS),
+                )
+        if has_remainder:
+            var src = row_base + last_full_panel * NR
+            var dst = bp_worker + last_full_panel * kc * NR + pk * NR
+            for nr in range(nr_actual):
+                dst[nr] = src[nr]
+            for nr in range(nr_actual, NR):
+                dst[nr] = Scalar[dtype](0)
+
+
 def _packed_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
     NC_TILES: Int, SHARED_A: Bool = False,
@@ -302,31 +344,12 @@ def _packed_gemm[
                             has_remainder = True
                             nr_actual = tile_n - last_jr
 
-                    # Pack this j-tile's slab of B into [panel][k][NR], padding a
-                    # partial trailing panel out to full NR with zeros so the
-                    # micro-kernel can run it as a full panel (see below).
-                    for pk in range(kc):
-                        var row_base = b_ptr + (pc + pk) * n + j0
-                        prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-                            b_ptr + (pc + pk + PREFETCH_B_DIST) * n + j0
-                        )
-                        for jp in range(last_full_panel):
-                            var jr = jp * NR
-                            var src = row_base + jr
-                            var dst = bp_worker + jp * kc * NR + pk * NR
-                            comptime for nv in range(NR_VECS):
-                                dst.store[width=NELTS](
-                                    offset=nv * NELTS,
-                                    val=src.load[width=NELTS](offset=nv * NELTS),
-                                )
-                        if has_remainder:
-                            var jr = last_full_panel * NR
-                            var src = row_base + jr
-                            var dst = bp_worker + last_full_panel * kc * NR + pk * NR
-                            for nr in range(nr_actual):
-                                dst[nr] = src[nr]
-                            for nr in range(nr_actual, NR):
-                                dst[nr] = Scalar[dtype](0)
+                    # Pack this j-tile's slab of B into [panel][k][NR] (a partial
+                    # trailing panel is zero-padded to full NR — see _pack_b_slab).
+                    _pack_b_slab[dtype, NR, NR_VECS, NELTS, PREFETCH_B_DIST](
+                        b_ptr, bp_worker, pc, j0, n, kc,
+                        last_full_panel, has_remainder, nr_actual,
+                    )
 
                     for jp in range(num_panels):
                         var jr = jp * NR
