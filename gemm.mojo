@@ -1722,21 +1722,31 @@ def _box_l2_budget() -> Int:
     # newly-eligible boxes (B > 512 KB, so m*n*k in the tens of millions) are big
     # enough that the one-time memoized cpuid is amortized to noise.
     #
-    # Cut at (2*L2)/3, the measured crossover (interleaved A/B vs linalg on this
-    # 2.10 GHz Xeon, 2 MB/core L2, peak/30): no-pack WINS the whole band up to
-    # ~2/3 L2 (sq288 0.74->1.00, sq320 0.76->1.02, sq352 0.87->1.05, sq384
-    # 0.87->0.97, sq416 0.81->0.90, 384x384x384 0.85->0.96, 640x256x512
-    # 0.83->0.91, 512x320x512 0.76->0.85) and the packed path retakes it above
-    # (sq448 B=1.5MB thinN 0.76 < packed 0.85, sq512 B=2MB 0.52 < 0.92). On the
-    # 1 MB Skylake (2*L2)/3 = 682 KB correctly keeps sq320 (B=800KB, which
-    # craters to 0.52 under no-pack on that smaller L2) on the packed path while
-    # still admitting sq288 (648KB, a wash there) — the L2-adaptive cut is what
-    # lets one rule be right on both machines. Falls back to the compile-time
-    # 512 KB tier (i.e. no extension) when L2 is undetectable.
+    # Cut at L2/3, the re-measured crossover (interleaved A/B vs linalg on this
+    # 2.10 GHz Xeon, 2 MB/core L2, peak over 50 runs x3). The no-pack route
+    # re-reads ALL of B once per MR-row block, so B must stay L2-resident
+    # *alongside* the packed-A micro-panel, the C output, and the HW prefetcher's
+    # headroom across the whole M-sweep — that holds only while B occupies about
+    # a third of L2. Past that, B spills mid-sweep and the route collapses:
+    #   sq288 (B=648KB) nopack ~0.92-1.00 vs packed ~0.92  -> nopack (admit)
+    #   sq320 (B=800KB) nopack ~0.64-0.71 vs packed ~0.82-0.86 -> PACKED
+    #   sq352 (B=968KB) nopack ~0.55-0.58 vs packed ~0.77-0.95 -> PACKED
+    #   sq384 (B=1.15M) nopack ~0.42      vs packed ~0.89-0.92 -> PACKED
+    #   640x256x512 (B=1MB)   nopack 0.47 vs packed 0.86-0.91  -> PACKED
+    #   512x320x512 (B=1.28M) nopack 0.46-0.50 vs packed 0.83-0.87 -> PACKED
+    # The previous (2*L2)/3 = 1.33MB cut admitted sq320..sq416 and those tall
+    # boxes to no-pack, where they were the worst losses in the whole sweep
+    # (sq384 0.42); their earlier no-pack "wins" were measured on an older Mojo
+    # nightly whose linalg.matmul was slower — the current stdlib kernel retakes
+    # them, so the cut must tighten to L2/3 (= 682 KB here; admits sq288 at
+    # 648 KB, excludes sq320 at 800 KB). On the 1 MB Skylake L2/3 = 341 KB sits
+    # below the compile-time 512 KB tier-1 cut, so that part simply keeps no-pack
+    # for B <= 512 KB (sq288/sq320 there already preferred packed). Falls back to
+    # the compile-time 512 KB tier (no extension) when L2 is undetectable.
     var l2 = l2_cache_size()
     if l2 == 0:
         return (1 << 19)
-    return (2 * l2) // 3
+    return l2 // 3
 
 
 def _matmul_small[
@@ -1941,9 +1951,9 @@ def matmul_dispatch[
     #     packing + thread-launch overhead dwarfs the compute on a cache-resident
     #     box, so the worst general shapes lived here (sq96/sq128 0.65-0.71).
     #     Reading A/B unpacked flips them to 1.0-1.16. The L2-fit test is two
-    #     tiered (compile-time 512 KB + L2-adaptive B<=(2*L2)/3); on the 2 MB-L2
-    #     Xeon the second tier also lifts the mid-square band (sq320 0.76->1.01,
-    #     sq352 0.90->1.02). See the branch comment below.
+    #     tiered (compile-time 512 KB + L2-adaptive B<=L2/3); the route admits
+    #     only B that fits ~1/3 of L2 (up to sq288 on the 2 MB Xeon), past which
+    #     B spills mid-M-sweep and the packed path wins. See the branch comment.
     #   - M >= 6, N <= 192 (narrow N): the kernel parallelizes only over N
     #     (j-tiles), so a narrow N starves the cores (N=64 -> 1 j-tile at the
     #     default TILE_N=64 -> 1 of 4 cores busy). A narrow NR=16/TILE_N=16 tile
@@ -2058,20 +2068,23 @@ def matmul_dispatch[
         #         ~61 us/call — ruinous on a few-us op (it sank sq96 to 0.19 when
         #         the gate queried it live). 512 KB = a quarter of this 2 MB-L2
         #         part / half the 1 MB Skylake.
-        #       - An L2-ADAPTIVE second tier, B <= (2*L2)/3 (_box_l2_budget),
-        #         extends the route up the B range on a larger L2. It is only
+        #       - An L2-ADAPTIVE second tier, B <= L2/3 (_box_l2_budget),
+        #         extends the route a little past 512 KB on a larger L2. It is only
         #         reached when the 512 KB tier already failed (B > 512 KB), so the
         #         newly-eligible boxes are tens-of-millions-of-MAC ops where the
-        #         one-time memoized cpuid is amortized to noise. (2*L2)/3 is the
-        #         measured crossover: on this 2 MB Xeon it admits the whole band
-        #         up to ~1.35 MB (sq288 0.74->1.00, sq320 0.76->1.02, sq352
-        #         0.87->1.05, sq384 0.87->0.97, sq416 0.81->0.90, 384x384x384
-        #         0.85->0.96, 640x256x512 0.83->0.91) while excluding where the
-        #         packed path retakes it (sq448 B=1.5MB 0.76<0.85, sq512 0.52);
-        #         on the 1 MB Skylake the same rule = 682 KB, which keeps sq320
-        #         (B=800KB, no-pack 0.52 there) on the packed path. One adaptive
-        #         rule, correct on both machines. Hardware-specific like every
-        #         tile/KC pick here; smaller-L2 parts inherit a lower cut.
+        #         one-time memoized cpuid is amortized to noise. L2/3 is the
+        #         re-measured crossover: B must stay L2-resident *alongside* the
+        #         packed-A micro-panel + C + prefetch headroom across the whole
+        #         M-sweep, which holds only to ~1/3 L2. On this 2 MB Xeon it admits
+        #         sq288 (B=648KB, no-pack ~0.92-1.00 > packed) and EXCLUDES sq320
+        #         (B=800KB, no-pack ~0.64-0.71 < packed ~0.82-0.86), sq352 (0.56 <
+        #         0.95), sq384 (0.42 < 0.90), 640x256x512 (0.47 < 0.88) and the
+        #         rest of the mid-square/tall-box band — all now packed. (The prior
+        #         (2*L2)/3 = 1.35MB cut sent those to no-pack, where they were the
+        #         worst losses in the sweep; their old no-pack "wins" were measured
+        #         on an older nightly whose linalg was slower.) On the 1 MB Skylake
+        #         L2/3 = 341 KB < the 512 KB tier-1, so that part keeps no-pack only
+        #         for B <= 512 KB. Hardware-specific like every tile/KC pick here.
         #   * m >= n: _thin_n parallelizes over M, so it needs enough M-rows
         #     relative to the N each worker sweeps. At m < n it ties or loses
         #     (128x256x256 0.76 vs the 0.79 packed path) — and, crucially, this
@@ -2096,7 +2109,7 @@ def matmul_dispatch[
         # Square-ish (N <= M, N > 192 so the small-N branch above didn't fire).
         # NB: the small-box branch above now intercepts the cache-resident corner
         # (M >= N and B = K*N*8 fitting L2 — a compile-time 512 KB tier plus an
-        # L2-adaptive B<=(2*L2)/3 tier, so up to ~1.35 MB on this 2 MB-L2 part)
+        # L2-adaptive B<=L2/3 tier, ~682 KB on this 2 MB-L2 part, i.e. up to sq288)
         # into the no-pack M-parallel kernel, so this branch handles only the
         # LARGER square-ish shapes (B above that cut: sq512/1024/2048 and the
         # awkward-N boxes) whose B can't stay L2-resident unpacked. The sq256
