@@ -80,6 +80,45 @@ struct RegisterTile[dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int](
                 )
 
 
+# --- The two operands of one K-step ----------------------------------------
+#
+# Every K-step in every kernel feeds `rank1_update` the same pair: NR_VECS
+# contiguous B vectors and MR A scalars. These two `@always_inline` loaders name
+# that gather once. Like the tile itself they are zero-cost — the comptime loop
+# over a register-flattened `InlineArray` lowers to the exact vmovupd nest you'd
+# hand-write, so every kernel's inner loop collapses to a single readable line:
+#
+#     tile.rank1_update(load_a_col[MR](a, stride), load_b_row[NR_VECS, NELTS](b))
+
+
+@always_inline
+def load_b_row[
+    dtype: DType, org: ImmutOrigin, //, NR_VECS: Int, NELTS: Int
+](bp_k: UnsafePointer[Scalar[dtype], org]) -> InlineArray[
+    SIMD[dtype, NELTS], NR_VECS
+]:
+    """The B operand of one K-step: NR_VECS contiguous NELTS-wide vectors."""
+    var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](uninitialized=True)
+    comptime for nr in range(NR_VECS):
+        bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
+    return bv^
+
+
+@always_inline
+def load_a_col[
+    dtype: DType, org: ImmutOrigin, //, MR: Int
+](a_base: UnsafePointer[Scalar[dtype], org], stride: Int) -> InlineArray[
+    Scalar[dtype], MR
+]:
+    """The A operand of one K-step: MR scalars at `stride` apart. `stride == 1`
+    reads a packed-A column; `stride == k` gathers a column straight from a
+    row-major A (the no-pack kernels)."""
+    var a_col = InlineArray[Scalar[dtype], MR](uninitialized=True)
+    comptime for mr in range(MR):
+        a_col[mr] = a_base[mr * stride]
+    return a_col^
+
+
 @always_inline
 def _masked_microkernel[
     dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int, NR: Int,
@@ -124,14 +163,10 @@ def _masked_microkernel[
                             tmp[e] = cr[col0 + e]
                         tile.acc[mr * NR_VECS + nr] = tmp
     for pk in range(kc):
-        var bp_k = bp_panel + pk * NR
-        var b_row = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-            fill=SIMD[dtype, NELTS](0)
-        )
-        comptime for nr in range(NR_VECS):
-            b_row[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
-        # Gather A guarded by mr < r: rows past the M-remainder are out of
-        # bounds, so leave them zero (their acc lanes are never stored).
+        var b_row = load_b_row[NR_VECS, NELTS](bp_panel + pk * NR)
+        # A is gathered here (not via load_a_col) because the gather is guarded
+        # by mr < r: rows past the M-remainder are out of bounds, so leave them
+        # zero (their acc lanes are never stored).
         var a_col = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
         comptime for mr in range(MR):
             if mr < r:
@@ -170,7 +205,7 @@ def _packed_gemm[
     re-pack it per K-panel. Off the headline wide/tall shapes A is tiny next to
     the N-sweep, so the redundant per-worker pack is cheap and SHARED_A is left
     off; on a big square A is as large as B/C and packing it once is a real win
-    (see the design notes at the foot of this file)."""
+    (see DESIGN.md)."""
     comptime NELTS = simd_width_of[dtype]()
     comptime NR_VECS = NR // NELTS
     comptime PREFETCH_B_DIST = 8
@@ -354,35 +389,18 @@ def _packed_gemm[
                             var pk_end = kc - (kc % KU)
                             while pk < pk_end:
                                 comptime for ku in range(KU):
-                                    var bp_k = bp_panel + (pk + ku) * NR
-                                    var ap_k = ap_panel + (pk + ku) * MR
-                                    var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                                        fill=SIMD[dtype, NELTS](0)
+                                    var step = pk + ku
+                                    tile.rank1_update(
+                                        load_a_col[MR](ap_panel + step * MR, 1),
+                                        load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
                                     )
-                                    comptime for nr in range(NR_VECS):
-                                        bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
-                                    var a_vals = InlineArray[Scalar[dtype], MR](
-                                        fill=Scalar[dtype](0)
-                                    )
-                                    comptime for mr in range(MR):
-                                        a_vals[mr] = ap_k[mr]
-                                    tile.rank1_update(a_vals, bv)
                                 pk += KU
 
                             while pk < kc:
-                                var bp_k = bp_panel + pk * NR
-                                var ap_k = ap_panel + pk * MR
-                                var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                                    fill=SIMD[dtype, NELTS](0)
+                                tile.rank1_update(
+                                    load_a_col[MR](ap_panel + pk * MR, 1),
+                                    load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
                                 )
-                                comptime for nr in range(NR_VECS):
-                                    bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
-                                var a_vals = InlineArray[Scalar[dtype], MR](
-                                    fill=Scalar[dtype](0)
-                                )
-                                comptime for mr in range(MR):
-                                    a_vals[mr] = ap_k[mr]
-                                tile.rank1_update(a_vals, bv)
                                 pk += 1
 
                             tile.store(c_block, n)
@@ -564,30 +582,20 @@ def _serial_gemm[
         while i + MR <= m:
             var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
             for p in range(k):
-                var b_row = b_ptr + p * n + j
-                var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                    fill=SIMD[dtype, NELTS](0)
+                tile.rank1_update(
+                    load_a_col[MR](a_ptr + i * k + p, k),
+                    load_b_row[NR_VECS, NELTS](b_ptr + p * n + j),
                 )
-                comptime for nv in range(NR_VECS):
-                    bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
-                var a_vals = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
-                comptime for mr in range(MR):
-                    a_vals[mr] = a_ptr[(i + mr) * k + p]
-                tile.rank1_update(a_vals, bv)
             tile.store(c_ptr + i * n + j, n)
             i += MR
         # M-remainder rows (m % MR): one row at a time, same NR-wide SIMD.
         while i < m:
             var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
             for p in range(k):
-                var b_row = b_ptr + p * n + j
-                var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                    fill=SIMD[dtype, NELTS](0)
+                tile.rank1_update(
+                    load_a_col[1](a_ptr + i * k + p, k),
+                    load_b_row[NR_VECS, NELTS](b_ptr + p * n + j),
                 )
-                comptime for nv in range(NR_VECS):
-                    bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
-                var a_vals = InlineArray[Scalar[dtype], 1](fill=a_ptr[i * k + p])
-                tile.rank1_update(a_vals, bv)
             tile.store(c_ptr + i * n + j, n)
             i += 1
         j += NR
@@ -649,18 +657,10 @@ def _nopack_gemm[
             while j + NR <= n:
                 var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
                 for p in range(k):
-                    var b_row = b_ptr + p * n + j
-                    var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                        fill=SIMD[dtype, NELTS](0)
+                    tile.rank1_update(
+                        load_a_col[MR](a_ptr + i * k + p, k),
+                        load_b_row[NR_VECS, NELTS](b_ptr + p * n + j),
                     )
-                    comptime for nv in range(NR_VECS):
-                        bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
-                    var a_vals = InlineArray[Scalar[dtype], MR](
-                        fill=Scalar[dtype](0)
-                    )
-                    comptime for mr in range(MR):
-                        a_vals[mr] = a_ptr[(i + mr) * k + p]
-                    tile.rank1_update(a_vals, bv)
                 tile.store(c_ptr + i * n + j, n)
                 j += NR
         else:
@@ -669,16 +669,10 @@ def _nopack_gemm[
                 while j2 + NR <= n:
                     var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
                     for p in range(k):
-                        var b_row = b_ptr + p * n + j2
-                        var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                            fill=SIMD[dtype, NELTS](0)
+                        tile.rank1_update(
+                            load_a_col[1](a_ptr + ii * k + p, k),
+                            load_b_row[NR_VECS, NELTS](b_ptr + p * n + j2),
                         )
-                        comptime for nv in range(NR_VECS):
-                            bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
-                        var a_vals = InlineArray[Scalar[dtype], 1](
-                            fill=a_ptr[ii * k + p]
-                        )
-                        tile.rank1_update(a_vals, bv)
                     tile.store(c_ptr + ii * n + j2, n)
                     j2 += NR
 
@@ -701,7 +695,7 @@ def _nopack_gemm[
 #
 # Each picks a KC (K-panel depth) or a routing budget from the detected L2 so
 # the working set stays cache-resident across machines. The measurement tables
-# behind these numbers live in the design notes at the foot of this file.
+# behind these numbers live in DESIGN.md.
 # ===========================================================================
 
 
@@ -755,8 +749,8 @@ def _box_l2_budget() -> Int:
 def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """C = A * B, routed to the kernel + tile that measured fastest for the shape
-    on a 4-core AVX-512 Xeon (f64):
+    """Compute C = A * B, routed to the kernel + tile that measured fastest for
+    the shape on a 4-core AVX-512 Xeon (f64).
 
         tiny  M*N*K < 2^19          _serial_gemm   serial, no threads/packing
         M == 1                      _decode_gemv   j-parallel GEMV, streams B once
@@ -769,8 +763,8 @@ def matmul_dispatch[
         tall-K  N < K               packed 6x32    cache-aware KC by M band
 
     Every KC/TILE_N/tile pick is hardware-specific; the full per-branch rationale
-    and measurements live in README.md and the design notes at the foot of this
-    file. The N<=M and M>=N gates keep the square-ish and no-pack routes off every
+    and measurements live in README.md and DESIGN.md. The N<=M and M>=N gates keep
+    the square-ish and no-pack routes off every
     wide headline shape (the Qwen up/down projections are N >> M), where those
     kernels are catastrophic."""
     comptime NELTS = simd_width_of[dtype]()
@@ -909,62 +903,10 @@ def matmul_dispatch[
 
 
 # ===========================================================================
-# Design notes & benchmark rationale
+# Design notes
 #
-# Relocated here from the function bodies so the kernels read cleanly. Numbers
-# are peak GFLOPS ratios vs Mojo's stdlib `linalg.matmul`, measured on the two
-# headline machines (Machine A: Intel Xeon Skylake 2.80 GHz, 1 MB/core L2;
-# Machine B: Intel Xeon 2.10 GHz, 2 MB/core L2; both 4 cores, AVX-512, KVM, f64).
-# Your numbers WILL differ — see AGENTS.md.
-#
-# --- _packed_gemm / SHARED_A ----------------------------------------------
-# By default every worker re-packs the FULL A (all i-panels) per k-panel into
-# its own buffer: num_workers redundant copies. On a wide/tall headline shape A
-# is small next to the N-sweep, so that redundancy is cheap L3 traffic (measured
-# a wash; the default keeps it). On a big SQUARE, A is as large as B/C and the
-# 4x re-pack is a real cost (sq2048: ~134 MB of redundant pack traffic/call).
-# SHARED_A packs A once up front (parallelized over i-panels) into a single
-# buffer keyed [i-panel][k][MR]; halves the packed-A footprint and removes the
-# redundant packing. Enabled from the square-ish branch (and large-M wide/tall),
-# so every byte-for-byte headline path is preserved.
-#
-# --- KU=2 (not 4) on the 6x32 tile ----------------------------------------
-# The 6x32 tile holds MR*NR_VECS = 24 SIMD accumulators, and the comptime
-# k-unroll keeps KU*NR_VECS B-vectors live per step. KU=2 needs 24 + 8 = 32 zmm
-# registers — exactly the AVX-512 file — while KU=4 needs 24 + 16 = 40 and
-# spills. KU=2 measured a uniform +2-6% across the heavy-GEMM band, flipping the
-# Qwen up-proj M>=256, down-proj M=256 and h4k/ffn-up8k M=512 from LOSE to WIN.
-#
-# --- masked partial-N panel (the old row-by-row tail) ---------------------
-# The partial NR-panel and the M-remainder both used to run a row-by-row
-# `vectorize` tail, sweeping K once per row with only NR_VECS-deep ILP — far too
-# shallow to hide FMA latency. N=11007 (rem=31) ran 0.86 vs linalg while the
-# multiple-of-NR N=11008 hit parity. Running the full-width register tile
-# (`_masked_microkernel`) and storing only the valid columns keeps any N (odd /
-# not a multiple of NR) at ~parity, and removed the MR-not-dividing-M tax (e.g.
-# 6x32 at M=256).
-#
-# --- _box_l2_budget: the L2/3 no-pack cut ---------------------------------
-# The no-pack route re-reads ALL of B once per MR-row block, so B must stay
-# L2-resident across the whole M-sweep — which holds only to ~1/3 of L2 (re-
-# measured interleaved A/B vs linalg, Machine B, peak over 50 runs x3):
-#   sq288 (B=648KB) nopack ~0.92-1.00 vs packed ~0.92  -> nopack (admit)
-#   sq320 (B=800KB) nopack ~0.64-0.71 vs packed ~0.82-0.86 -> PACKED
-#   sq352 (B=968KB) nopack ~0.55-0.58 vs packed ~0.77-0.95 -> PACKED
-#   sq384 (B=1.15M) nopack ~0.42      vs packed ~0.89-0.92 -> PACKED
-#   640x256x512 (B=1MB)   nopack 0.47 vs packed 0.86-0.91  -> PACKED
-#   512x320x512 (B=1.28M) nopack 0.46-0.50 vs packed 0.83-0.87 -> PACKED
-# A previous (2*L2)/3 ~= 1.33MB cut admitted sq320..sq416 + tall boxes to
-# no-pack, where they were the worst losses in the whole sweep (sq384 0.42);
-# their earlier no-pack "wins" were on an older Mojo nightly whose linalg was
-# slower and have since flipped. On the 1 MB Skylake, L2/3 = 341 KB sits below
-# the compile-time 512 KB tier-1 cut, so that part simply keeps no-pack for
-# B <= 512 KB (sq288/sq320 there already preferred packed).
-#
-# --- _square_ish_kc: opposite picks per machine ---------------------------
-# Interleaved A/B (peak/25) gives Machine A (1 MB) KC512 > KC1024 (sq2048 0.84
-# vs 0.72, sq1024 0.84 vs 0.80), while Machine B (2 MB) measured KC1024 > KC512
-# (sq768..2048 +3-6%) — opposite conclusions a single hardcoded KC can't satisfy.
-# The l2_cache_size() probe is ~6 cpuid -> ~61 us VM-exit on a KVM guest, < 2.5%
-# of a multi-ms square-ish op; smaller shapes skip it entirely.
+# The "why" behind every tuning constant above — SHARED_A, KU=2, the masked
+# partial-N panel, the L2/3 no-pack cut, and the per-machine KC picks — lives in
+# DESIGN.md, kept out of the source so the kernels read as code. README.md has
+# the per-branch dispatch table and the full benchmark results.
 # ===========================================================================
