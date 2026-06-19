@@ -193,11 +193,10 @@ def _pack_b_slab[
     dtype: DType, NR: Int, NR_VECS: Int, NELTS: Int, PREFETCH_B_DIST: Int,
     b_org: ImmutOrigin, bp_org: MutOrigin,
 ](
-    b_ptr: UnsafePointer[Scalar[dtype], b_org],
+    b: Tile[dtype, b_org],
     bp_worker: UnsafePointer[Scalar[dtype], bp_org],
     pc: Int,
     j0: Int,
-    n: Int,
     kc: Int,
     last_full_panel: Int,
     has_remainder: Bool,
@@ -209,9 +208,9 @@ def _pack_b_slab[
     zero columns contribute nothing and the masked store keeps only the valid
     ones). Pulled out of the worker so the K-panel loop reads as pack-then-compute."""
     for pk in range(kc):
-        var row_base = b_ptr + (pc + pk) * n + j0
+        var row_base = b.addr(pc + pk, j0)
         prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-            b_ptr + (pc + pk + PREFETCH_B_DIST) * n + j0
+            b.addr(pc + pk + PREFETCH_B_DIST, j0)
         )
         for jp in range(last_full_panel):
             var src = row_base + jp * NR
@@ -250,12 +249,12 @@ def _packed_gemm[
     comptime NR_VECS = NR // NELTS
     comptime PREFETCH_B_DIST = 8
 
-    var m = a.rows
-    var n = c.cols
-    var k = a.cols
-    var c_ptr = c.data.unsafe_ptr().as_noalias_ptr()
-    var a_ptr = a.data.unsafe_ptr().as_noalias_ptr()
-    var b_ptr = b.data.unsafe_ptr().as_noalias_ptr()
+    var c_view = c.noalias_view()
+    var a_view = a.noalias_view()
+    var b_view = b.noalias_view()
+    var m = a_view.rows
+    var n = c_view.cols
+    var k = a_view.cols
 
     var num_j_tiles = ceildiv(n, TILE_N)
     var num_i_panels = ceildiv(m, MR)
@@ -284,16 +283,16 @@ def _packed_gemm[
         # panel block is MR*k contiguous, organized [k][MR] so the micro-kernel's
         # ap_panel + pk*MR + mr indexing matches the per-worker layout (just with
         # a full-k stride + pc offset instead of a per-panel kc stride).
-        def pack_a_panel(ip: Int) {mut ap_buf, mut a_ptr, read k}:
+        def pack_a_panel(ip: Int) {mut ap_buf, read a_view, read k}:
             var i0 = ip * MR
             var ap_panel = ap_buf + ip * MR * k
             for pk in range(k):
                 var dst = ap_panel + pk * MR
                 comptime for mr in range(MR):
-                    dst[mr] = a_ptr[(i0 + mr) * k + pk]
+                    dst[mr] = a_view.row(i0 + mr)[pk]
         parallelize(pack_a_panel, num_full_panels, num_workers)
 
-    def process_worker(worker_id: Int) {mut c_ptr, mut a_ptr, mut b_ptr, mut bp_buf, mut ap_buf, read m, read n, read k, read num_j_tiles, read num_workers, read bp_per_worker, read ap_per_worker}:
+    def process_worker(worker_id: Int) {read c_view, read a_view, read b_view, mut bp_buf, mut ap_buf, read m, read n, read k, read num_j_tiles, read num_workers, read bp_per_worker, read ap_per_worker}:
         var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
         var j_tile_start = worker_id * tiles_per_worker
         var j_tile_end = min(j_tile_start + tiles_per_worker, num_j_tiles)
@@ -325,7 +324,7 @@ def _packed_gemm[
                         for pk in range(kc):
                             var dst = ap_panel + pk * MR
                             comptime for mr in range(MR):
-                                dst[mr] = a_ptr[(i + mr) * k + pc + pk]
+                                dst[mr] = a_view.row(i + mr)[pc + pk]
                         i += MR
                         ip += 1
 
@@ -347,7 +346,7 @@ def _packed_gemm[
                     # Pack this j-tile's slab of B into [panel][k][NR] (a partial
                     # trailing panel is zero-padded to full NR — see _pack_b_slab).
                     _pack_b_slab[dtype, NR, NR_VECS, NELTS, PREFETCH_B_DIST](
-                        b_ptr, bp_worker, pc, j0, n, kc,
+                        b_view, bp_worker, pc, j0, kc,
                         last_full_panel, has_remainder, nr_actual,
                     )
 
@@ -368,14 +367,14 @@ def _packed_gemm[
                             i = 0
                             while i + MR <= m:
                                 _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
-                                    c_ptr, a_ptr, bp_panel,
+                                    c_view.ptr, a_view.ptr, bp_panel,
                                     i * n + j0 + jr, i * k + pc,
                                     n, k, kc, MR, jj_limit, is_first_k,
                                 )
                                 i += MR
                             if i < m:
                                 _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
-                                    c_ptr, a_ptr, bp_panel,
+                                    c_view.ptr, a_view.ptr, bp_panel,
                                     i * n + j0 + jr, i * k + pc,
                                     n, k, kc, m - i, jj_limit, is_first_k,
                                 )
@@ -390,7 +389,7 @@ def _packed_gemm[
                             var ap_panel = (
                                 ap_worker + ip * MR * k + pc * MR
                             ) if SHARED_A else (ap_worker + ip * MR * kc)
-                            var c_block = Tile(c_ptr, m, n, n).sub(i, j0 + jr)
+                            var c_block = c_view.sub(i, j0 + jr)
 
                             comptime for mr in range(MR):
                                 prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
@@ -435,7 +434,7 @@ def _packed_gemm[
                         # partial-tile case already `continue`d above).
                         if i < m:
                             _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
-                                c_ptr, a_ptr, bp_panel,
+                                c_view.ptr, a_view.ptr, bp_panel,
                                 i * n + j0 + jr, i * k + pc,
                                 n, k, kc, m - i, NR, is_first_k,
                             )
@@ -530,17 +529,17 @@ def _decode_gemv[
     comptime assert dtype.is_floating_point(), "GEMV requires floating-point dtype"
     comptime NELTS = simd_width_of[dtype]()
 
-    var m = a.rows
-    var n = c.cols
-    var k = a.cols
-    var c_ptr = c.data.unsafe_ptr().as_noalias_ptr()
-    var a_ptr = a.data.unsafe_ptr().as_noalias_ptr()
-    var b_ptr = b.data.unsafe_ptr().as_noalias_ptr()
+    var c_view = c.noalias_view()
+    var a_view = a.noalias_view()
+    var b_view = b.noalias_view()
+    var m = a_view.rows
+    var n = c_view.cols
+    var k = a_view.cols
     var nw = num_physical_cores()
 
-    memset_zero(c_ptr, m * n)
+    memset_zero(c_view.ptr, m * n)
 
-    def worker(wid: Int) {mut c_ptr, mut a_ptr, mut b_ptr, read m, read n, read k, read nw}:
+    def worker(wid: Int) {read c_view, read a_view, read b_view, read m, read n, read k, read nw}:
         var cols_per = ceildiv(n, nw)
         var j0 = wid * cols_per
         var j1 = min(j0 + cols_per, n)
@@ -548,12 +547,12 @@ def _decode_gemv[
         if chunk <= 0:
             return
 
-        var b_col = b_ptr + j0  # base pointer into worker's column chunk
+        var b_col = b_view.addr(0, j0)  # base pointer into worker's column chunk
         var k_main = (k // KU) * KU
 
         for i in range(m):
-            var ci = c_ptr + i * n + j0
-            var ai = a_ptr + i * k
+            var ci = c_view.addr(i, j0)
+            var ai = a_view.row(i)
             var p = 0
 
             while p < k_main:
@@ -589,13 +588,12 @@ def _serial_gemm[
     identical to the parallel kernels. MR=6, NR_VECS=2 measured best."""
     comptime NELTS = simd_width_of[dtype]()
     comptime NR = NR_VECS * NELTS
-    var m = a.rows
-    var n = c.cols
-    var k = a.cols
-    var c_view = Tile(c.data.unsafe_ptr(), m, n, n)
-    var a_view = Tile(a.data.unsafe_ptr(), m, k, k)
-    var b_view = Tile(b.data.unsafe_ptr(), k, n, n)
-    var b_ptr = b_view.ptr
+    var c_view = c.view()
+    var a_view = a.view()
+    var b_view = b.view()
+    var m = a_view.rows
+    var n = c_view.cols
+    var k = a_view.cols
 
     var j = 0
     while j + NR <= n:
@@ -629,12 +627,12 @@ def _serial_gemm[
             var c_row = c_view.row(i)
             var a_row = a_view.row(i)
 
-            def tail[width: Int](jj: Int) {mut c_row, read a_row, read b_ptr, read k, read n, read jr}:
+            def tail[width: Int](jj: Int) {mut c_row, read a_row, read b_view, read k, read jr}:
                 var acc = SIMD[dtype, width](0)
                 for p in range(k):
                     acc = fma(
                         SIMD[dtype, width](a_row[p]),
-                        (b_ptr + p * n + jr).load[width=width](offset=jj),
+                        b_view.addr(p, jr).load[width=width](offset=jj),
                         acc,
                     )
                 c_row.store(offset=jr + jj, val=acc)
@@ -660,19 +658,16 @@ def _nopack_gemm[
     paths."""
     comptime NELTS = simd_width_of[dtype]()
     comptime NR = NR_VECS * NELTS
-    var m = a.rows
-    var n = c.cols
-    var k = a.cols
-    var c_ptr = c.data.unsafe_ptr().as_noalias_ptr()
-    var a_ptr = a.data.unsafe_ptr().as_noalias_ptr()
-    var b_ptr = b.data.unsafe_ptr().as_noalias_ptr()
+    var c_view = c.noalias_view()
+    var a_view = a.noalias_view()
+    var b_view = b.noalias_view()
+    var m = a_view.rows
+    var n = c_view.cols
+    var k = a_view.cols
     var nw = num_physical_cores()
     var num_blocks = ceildiv(m, MR)
 
-    def worker(blk: Int) {mut c_ptr, mut a_ptr, mut b_ptr, read m, read n, read k}:
-        var c_view = Tile(c_ptr, m, n, n)
-        var a_view = Tile(a_ptr, m, k, k)
-        var b_view = Tile(b_ptr, k, n, n)
+    def worker(blk: Int) {read c_view, read a_view, read b_view, read m, read n, read k}:
         var i = blk * MR
         var r = min(MR, m - i)
         # A full MR-row block uses the comptime-unrolled MR tile (each B-load

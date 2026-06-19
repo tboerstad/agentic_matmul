@@ -61,10 +61,17 @@ struct Matrix[dtype: DType = DType.float64](Movable):
     # --- views ------------------------------------------------------------------
 
     def view(ref self) -> Tile[Self.dtype, origin_of(self.data)]:
-        """The whole matrix as a `Tile` (row-major, stride = cols). A convenience
-        for callers outside the hot path; the kernels build their Tiles from the
-        `as_noalias_ptr()` local instead, to keep the noalias the loops rely on."""
+        """The whole matrix as a `Tile` (row-major, stride = cols)."""
         return Tile(self.data.unsafe_ptr(), self.rows, self.cols, self.cols)
+
+    def noalias_view(ref self) -> Tile[Self.dtype, origin_of(self.data)]:
+        """The whole matrix as a `Tile` over a *noalias* pointer — the handle the
+        kernels work from. Each GEMM operand is a distinct matrix viewed once, so
+        the noalias contract (nothing else writes through an aliasing pointer)
+        holds, and it widens LLVM's hoisting across the hot loops."""
+        return Tile(
+            self.data.unsafe_ptr().as_noalias_ptr(), self.rows, self.cols, self.cols
+        )
 
     # --- properties -------------------------------------------------------------
 
