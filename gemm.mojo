@@ -1112,6 +1112,107 @@ def _prefill_gemm[
     ap_buf.free()
 
 
+# ---------------------------------------------------------------------------
+# Register-tile micro-kernel building blocks
+#
+# Every register-blocked kernel in this file (the packed prefill kernel, the
+# serial small-shape kernel, the no-pack thin-N kernel) computes an MR x NR
+# block of C as a register-resident accumulator tile swept over K. These two
+# helpers factor out that shared inner step so each kernel expresses only its
+# own packing / loop scaffolding. Both are @always_inline, so after inlining
+# they emit the same machine code as the hand-written nests they replace —
+# `_fma_tile` takes SIMD values only (no pointers), so it cannot perturb the
+# noalias B-load hoisting the hot loop depends on.
+# ---------------------------------------------------------------------------
+
+
+@always_inline
+def _fma_tile[
+    dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int,
+](
+    mut acc: InlineArray[SIMD[dtype, NELTS], MR * NR_VECS],
+    a_vals: InlineArray[Scalar[dtype], MR],
+    bv: InlineArray[SIMD[dtype, NELTS], NR_VECS],
+):
+    """Broadcast each of the MR A scalars across the NR_VECS B vectors and FMA
+    into the MR x NR_VECS register-tile accumulator. The one inner step shared
+    by every register-blocked micro-kernel here."""
+    comptime for mr in range(MR):
+        var a_bc = SIMD[dtype, NELTS](a_vals[mr])
+        comptime for nr in range(NR_VECS):
+            acc[mr * NR_VECS + nr] = a_bc.fma(bv[nr], acc[mr * NR_VECS + nr])
+
+
+@always_inline
+def _micro_masked[
+    dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int, NR: Int,
+    c_org: MutOrigin, a_org: ImmutOrigin, b_org: MutOrigin,
+](
+    c_ptr: UnsafePointer[Scalar[dtype], c_org],
+    a_ptr: UnsafePointer[Scalar[dtype], a_org],
+    bp_panel: UnsafePointer[Scalar[dtype], b_org],
+    c_base: Int,
+    a_base: Int,
+    n: Int,
+    k: Int,
+    kc: Int,
+    r: Int,
+    jj_limit: Int,
+    is_first_k: Bool,
+):
+    """Cold-path MR x NR_VECS micro-kernel: the leftover blocks the hot loop
+    can't take. Handles an M-remainder (only `r` of MR rows active) and/or a
+    partial NR-panel (only `jj_limit` of NR columns valid) by masking the C
+    load and store; reads A unpacked (so it works for the un-packed remainder
+    rows too) and B from the zero-padded packed panel. With r == MR and
+    jj_limit == NR it degenerates to the unmasked full kernel, so this one
+    function also covers the full-panel M-remainder.
+
+    c_base = i*n + j0 + jr  (top-left of the block in C);
+    a_base = i*k + pc       (top-left of the block's rows in A)."""
+    var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
+        fill=SIMD[dtype, NELTS](0)
+    )
+    if not is_first_k:
+        comptime for mr in range(MR):
+            if mr < r:
+                comptime for nr in range(NR_VECS):
+                    var col0 = nr * NELTS
+                    var cr = c_ptr + c_base + mr * n
+                    if col0 + NELTS <= jj_limit:
+                        acc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
+                    elif col0 < jj_limit:
+                        var tmp = SIMD[dtype, NELTS](0)
+                        for e in range(jj_limit - col0):
+                            tmp[e] = cr[col0 + e]
+                        acc[mr * NR_VECS + nr] = tmp
+    for pk in range(kc):
+        var bp_k = bp_panel + pk * NR
+        var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+            fill=SIMD[dtype, NELTS](0)
+        )
+        comptime for nr in range(NR_VECS):
+            bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
+        # Gather A guarded by mr < r: rows past the M-remainder are out of
+        # bounds, so leave them zero (their acc lanes are never stored).
+        var a_vals = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
+        comptime for mr in range(MR):
+            if mr < r:
+                a_vals[mr] = a_ptr[a_base + mr * k + pk]
+        _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
+    comptime for mr in range(MR):
+        if mr < r:
+            comptime for nr in range(NR_VECS):
+                var col0 = nr * NELTS
+                var cr = c_ptr + c_base + mr * n
+                if col0 + NELTS <= jj_limit:
+                    cr.store(offset=col0, val=acc[mr * NR_VECS + nr])
+                elif col0 < jj_limit:
+                    var v = acc[mr * NR_VECS + nr]
+                    for e in range(jj_limit - col0):
+                        cr[col0 + e] = v[e]
+
+
 def _prefill_gemm_v3[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
     NC_TILES: Int, SHARED_A: Bool = False,
@@ -1279,103 +1380,25 @@ def _prefill_gemm_v3[
                             # while the multiple-of-NR N=11008 hit parity. With the
                             # full-ILP microkernel the partial tile keeps pace, so
                             # any N (odd / not a multiple of NR) holds ~parity.
+                            # _micro_masked runs that full-width kernel and stores
+                            # only the jj_limit valid columns: full MR-row i-panels
+                            # first, then the m % MR remainder rows (r = MR vs
+                            # r = m - i).
                             var jj_limit = tile_n - jr
                             i = 0
-                            ip = 0
                             while i + MR <= m:
-                                var ap_panel = (
-                                    ap_worker + ip * MR * k + pc * MR
-                                ) if SHARED_A else (ap_worker + ip * MR * kc)
-
-                                var racc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
-                                    fill=SIMD[dtype, NELTS](0)
+                                _micro_masked[dtype, MR, NR_VECS, NELTS, NR](
+                                    c_ptr, a_ptr, bp_panel,
+                                    i * n + j0 + jr, i * k + pc,
+                                    n, k, kc, MR, jj_limit, is_first_k,
                                 )
-                                if not is_first_k:
-                                    comptime for mr in range(MR):
-                                        comptime for nr in range(NR_VECS):
-                                            var col0 = nr * NELTS
-                                            var cr = c_ptr + (i + mr) * n + j0 + jr
-                                            if col0 + NELTS <= jj_limit:
-                                                racc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
-                                            elif col0 < jj_limit:
-                                                var tmp = SIMD[dtype, NELTS](0)
-                                                for e in range(jj_limit - col0):
-                                                    tmp[e] = cr[col0 + e]
-                                                racc[mr * NR_VECS + nr] = tmp
-                                for pk in range(kc):
-                                    var bp_k = bp_panel + pk * NR
-                                    var ap_k = ap_panel + pk * MR
-                                    var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                                        fill=SIMD[dtype, NELTS](0)
-                                    )
-                                    comptime for nr in range(NR_VECS):
-                                        bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
-                                    comptime for mr in range(MR):
-                                        var a_bc = SIMD[dtype, NELTS](ap_k[mr])
-                                        comptime for nr in range(NR_VECS):
-                                            racc[mr * NR_VECS + nr] = a_bc.fma(
-                                                bv[nr], racc[mr * NR_VECS + nr]
-                                            )
-                                comptime for mr in range(MR):
-                                    comptime for nr in range(NR_VECS):
-                                        var col0 = nr * NELTS
-                                        var cr = c_ptr + (i + mr) * n + j0 + jr
-                                        if col0 + NELTS <= jj_limit:
-                                            cr.store(offset=col0, val=racc[mr * NR_VECS + nr])
-                                        elif col0 < jj_limit:
-                                            var v = racc[mr * NR_VECS + nr]
-                                            for e in range(jj_limit - col0):
-                                                cr[col0 + e] = v[e]
                                 i += MR
-                                ip += 1
-                            # M-remainder rows (m % MR) of the partial panel: same
-                            # masked-N microkernel, reading unpacked A (these rows
-                            # are past the packed full-MR i-panels).
                             if i < m:
-                                var r = m - i
-                                var racc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
-                                    fill=SIMD[dtype, NELTS](0)
+                                _micro_masked[dtype, MR, NR_VECS, NELTS, NR](
+                                    c_ptr, a_ptr, bp_panel,
+                                    i * n + j0 + jr, i * k + pc,
+                                    n, k, kc, m - i, jj_limit, is_first_k,
                                 )
-                                if not is_first_k:
-                                    comptime for mr in range(MR):
-                                        if mr < r:
-                                            comptime for nr in range(NR_VECS):
-                                                var col0 = nr * NELTS
-                                                var cr = c_ptr + (i + mr) * n + j0 + jr
-                                                if col0 + NELTS <= jj_limit:
-                                                    racc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
-                                                elif col0 < jj_limit:
-                                                    var tmp = SIMD[dtype, NELTS](0)
-                                                    for e in range(jj_limit - col0):
-                                                        tmp[e] = cr[col0 + e]
-                                                    racc[mr * NR_VECS + nr] = tmp
-                                for pk in range(kc):
-                                    var bp_k = bp_panel + pk * NR
-                                    var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                                        fill=SIMD[dtype, NELTS](0)
-                                    )
-                                    comptime for nr in range(NR_VECS):
-                                        bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
-                                    comptime for mr in range(MR):
-                                        if mr < r:
-                                            var a_bc = SIMD[dtype, NELTS](
-                                                a_ptr[(i + mr) * k + pc + pk]
-                                            )
-                                            comptime for nr in range(NR_VECS):
-                                                racc[mr * NR_VECS + nr] = a_bc.fma(
-                                                    bv[nr], racc[mr * NR_VECS + nr]
-                                                )
-                                comptime for mr in range(MR):
-                                    if mr < r:
-                                        comptime for nr in range(NR_VECS):
-                                            var col0 = nr * NELTS
-                                            var cr = c_ptr + (i + mr) * n + j0 + jr
-                                            if col0 + NELTS <= jj_limit:
-                                                cr.store(offset=col0, val=racc[mr * NR_VECS + nr])
-                                            elif col0 < jj_limit:
-                                                var v = racc[mr * NR_VECS + nr]
-                                                for e in range(jj_limit - col0):
-                                                    cr[col0 + e] = v[e]
                             continue
 
                         # ---- Full NR-panel: hoisted-load microkernel ----
@@ -1410,20 +1433,21 @@ def _prefill_gemm_v3[
                                     var bp_k = bp_panel + (pk + ku) * NR
                                     var ap_k = ap_panel + (pk + ku) * MR
 
-                                    # Load B once per ku-step (NR_VECS SIMD loads)
+                                    # Load B once per ku-step (NR_VECS SIMD loads,
+                                    # kept inline so the noalias hoist holds),
+                                    # gather the MR packed-A scalars, then FMA the
+                                    # tile via the shared inner step.
                                     var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
                                         fill=SIMD[dtype, NELTS](0)
                                     )
                                     comptime for nr in range(NR_VECS):
                                         bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
-
-                                    # Broadcast each A scalar and FMA into NR_VECS accumulators
+                                    var a_vals = InlineArray[Scalar[dtype], MR](
+                                        fill=Scalar[dtype](0)
+                                    )
                                     comptime for mr in range(MR):
-                                        var a_bc = SIMD[dtype, NELTS](ap_k[mr])
-                                        comptime for nr in range(NR_VECS):
-                                            acc[mr * NR_VECS + nr] = a_bc.fma(
-                                                bv[nr], acc[mr * NR_VECS + nr]
-                                            )
+                                        a_vals[mr] = ap_k[mr]
+                                    _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
                                 pk += KU
 
                             while pk < kc:
@@ -1435,13 +1459,12 @@ def _prefill_gemm_v3[
                                 )
                                 comptime for nr in range(NR_VECS):
                                     bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
-
+                                var a_vals = InlineArray[Scalar[dtype], MR](
+                                    fill=Scalar[dtype](0)
+                                )
                                 comptime for mr in range(MR):
-                                    var a_bc = SIMD[dtype, NELTS](ap_k[mr])
-                                    comptime for nr in range(NR_VECS):
-                                        acc[mr * NR_VECS + nr] = a_bc.fma(
-                                            bv[nr], acc[mr * NR_VECS + nr]
-                                        )
+                                    a_vals[mr] = ap_k[mr]
+                                _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
                                 pk += 1
 
                             comptime for mr in range(MR):
@@ -1457,46 +1480,18 @@ def _prefill_gemm_v3[
                         # leftover rows as ONE register-blocked block — a single
                         # K-sweep with r×NR_VECS accumulators, reusing the packed
                         # B panel, full NR-width SIMD. (jr+NR <= tile_n here: the
-                        # partial-tile case already `continue`d above.) Replaces
-                        # the old row-by-row `vectorize` tail, which swept K once
-                        # per row with only NR_VECS-deep ILP — too shallow to hide
-                        # FMA latency, the tax that made MR-not-dividing-M tiles
-                        # (e.g. 6x32 at M=256) lose to remainder-free ones.
+                        # partial-tile case already `continue`d above, so the full
+                        # NR width is valid — jj_limit = NR, no column masking.)
+                        # Replaces the old row-by-row `vectorize` tail, which swept
+                        # K once per row with only NR_VECS-deep ILP — too shallow
+                        # to hide FMA latency, the tax that made MR-not-dividing-M
+                        # tiles (e.g. 6x32 at M=256) lose to remainder-free ones.
                         if i < m:
-                            var r = m - i
-                            var racc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
-                                fill=SIMD[dtype, NELTS](0)
+                            _micro_masked[dtype, MR, NR_VECS, NELTS, NR](
+                                c_ptr, a_ptr, bp_panel,
+                                i * n + j0 + jr, i * k + pc,
+                                n, k, kc, m - i, NR, is_first_k,
                             )
-                            if not is_first_k:
-                                comptime for mr in range(MR):
-                                    if mr < r:
-                                        comptime for nr in range(NR_VECS):
-                                            racc[mr * NR_VECS + nr] = (
-                                                c_ptr + (i + mr) * n + j0 + jr
-                                            ).load[width=NELTS](offset=nr * NELTS)
-                            for pk in range(kc):
-                                var bp_k = bp_panel + pk * NR
-                                var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                                    fill=SIMD[dtype, NELTS](0)
-                                )
-                                comptime for nr in range(NR_VECS):
-                                    bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
-                                comptime for mr in range(MR):
-                                    if mr < r:
-                                        var a_bc = SIMD[dtype, NELTS](
-                                            a_ptr[(i + mr) * k + pc + pk]
-                                        )
-                                        comptime for nr in range(NR_VECS):
-                                            racc[mr * NR_VECS + nr] = a_bc.fma(
-                                                bv[nr], racc[mr * NR_VECS + nr]
-                                            )
-                            comptime for mr in range(MR):
-                                if mr < r:
-                                    comptime for nr in range(NR_VECS):
-                                        (c_ptr + (i + mr) * n + j0 + jr).store(
-                                            offset=nr * NELTS,
-                                            val=racc[mr * NR_VECS + nr],
-                                        )
 
             jt += NC_TILES
 
@@ -1787,12 +1782,10 @@ def _matmul_small[
                 )
                 comptime for nv in range(NR_VECS):
                     bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
+                var a_vals = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
                 comptime for mr in range(MR):
-                    var av = SIMD[dtype, NELTS](a_ptr[(i + mr) * k + p])
-                    comptime for nv in range(NR_VECS):
-                        acc[mr * NR_VECS + nv] = av.fma(
-                            bv[nv], acc[mr * NR_VECS + nv]
-                        )
+                    a_vals[mr] = a_ptr[(i + mr) * k + p]
+                _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
             comptime for mr in range(MR):
                 comptime for nv in range(NR_VECS):
                     (c_ptr + (i + mr) * n + j).store(
@@ -1882,12 +1875,12 @@ def _thin_n_gemm[
                     )
                     comptime for nv in range(NR_VECS):
                         bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
+                    var a_vals = InlineArray[Scalar[dtype], MR](
+                        fill=Scalar[dtype](0)
+                    )
                     comptime for mr in range(MR):
-                        var av = SIMD[dtype, NELTS](a_ptr[(i + mr) * k + p])
-                        comptime for nv in range(NR_VECS):
-                            acc[mr * NR_VECS + nv] = av.fma(
-                                bv[nv], acc[mr * NR_VECS + nv]
-                            )
+                        a_vals[mr] = a_ptr[(i + mr) * k + p]
+                    _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
                 comptime for mr in range(MR):
                     comptime for nv in range(NR_VECS):
                         (c_ptr + (i + mr) * n + j).store(
