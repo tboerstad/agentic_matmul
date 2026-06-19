@@ -762,10 +762,18 @@ def _prefill[
     dtype: DType, KC: Int, TILE_N: Int, SHARED_A: Bool = False
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     """The SOTA packed prefill GEMM at its standard 6x(4*NELTS) register tile
-    (KU=4, NC_TILES=64). KC, TILE_N and SHARED_A are the only levers that vary
-    across shapes, so naming the rest here keeps each dispatch branch readable."""
+    (KU=2, NC_TILES=64). KC, TILE_N and SHARED_A are the only levers that vary
+    across shapes, so naming the rest here keeps each dispatch branch readable.
+
+    KU=2 (not 4): the 6x32 tile holds MR*NR_VECS = 24 SIMD accumulators, and the
+    comptime k-unroll keeps KU*NR_VECS B-vectors live per step. KU=2 needs
+    24 + 8 = 32 zmm registers — exactly the AVX-512 file — while KU=4 needs
+    24 + 16 = 40 and spills. Restoring KU=2 (it had drifted to 4 here) is
+    bit-identical (codegen-only; verify_dispatch max_err 0.0) and measured a
+    uniform +2-6% across the heavy-GEMM band, flipping the Qwen up-proj M>=256,
+    down-proj M=256 and h4k/ffn-up8k M=512 from LOSE to WIN — see README."""
     comptime NELTS = simd_width_of[dtype]()
-    _prefill_gemm_v3[dtype, 6, 4 * NELTS, KC, 4, TILE_N, 64, SHARED_A](c, a, b)
+    _prefill_gemm_v3[dtype, 6, 4 * NELTS, KC, 2, TILE_N, 64, SHARED_A](c, a, b)
 
 
 def matmul_dispatch[

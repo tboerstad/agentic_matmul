@@ -144,6 +144,19 @@ it:
   `512×11008×2048` already at parity. Every N now holds ~parity regardless of its
   remainder. Bit-identical (`verify_dispatch` max_err 0.0 across remainder widths
   7/8/24/31 on both the wide-N and square-ish branches).
+- **K-unroll must not exceed the register file.** The 6×32 micro-kernel holds
+  `MR·NR_VECS = 24` SIMD accumulators, and the comptime k-unroll `KU` keeps
+  `KU·NR_VECS` B-vectors live per unrolled step. `KU=2` needs `24 + 8 = 32` zmm
+  registers — exactly the AVX-512 file — while `KU=4` needs `24 + 16 = 40` and
+  spills. The `KU` had drifted to 4 on the shared `_prefill` 6×32 path; restoring
+  `KU=2` is bit-identical (codegen-only; `verify_dispatch` max_err 0.0) and
+  measured — head-to-head KU2-vs-KU4, peak/30 ×3 on the 2.80 GHz Skylake VM — a
+  **uniform win across the heavy-GEMM band**: up-proj/down-proj M=256 **+3 %**
+  (flips 0.96–0.99 LOSE→WIN), M=512 **+3–6 %**, h4k/ffn-up8k M=512 +2–5 %, the
+  big squares sq1536/sq2048 +2–4 %; and neutral-to-slight-win (never a
+  regression) on small-M (M≤64), small-N, and the headline prefill M=96
+  (+0.3–1.7 %). The `NR_VECS=2` narrow-N tile (only 12 accumulators) doesn't
+  spill at `KU=4`, so it keeps it.
 - **KC is cache-size-dependent.** On the 1 MB-L2 Skylake, KC=512 is best; on the
   2 MB-L2 Xeon, KC=2048 (fewer k-panels, less C re-traffic) wins large-M — the
   *opposite* conclusion. Every KC/tile pick in the file is hardware-specific; the
@@ -193,9 +206,11 @@ it:
 
 Micro-kernel parity with `linalg` on the heaviest GEMMs (square M ≥ 256, now
 ~0.90–0.94 after the square-ish shared-A pack, where both kernels sit at ~55–66%
-of the 358 GFLOPS f64 peak). The large-M wide-N/tall-K band has now closed to
-~0.94–1.04 after extending `SHARED_A` to M ≥ 192 there (it was a wide-margin
-LOSE before), so the residual is mostly the big squares. The odd-N remainder
+of the 358 GFLOPS f64 peak). The large-M wide-N/tall-K band has now **flipped to
+a clean WIN** after the `KU=2` register-pressure fix (see *K-unroll* above): on
+the 2.80 GHz Skylake VM the full sweep shows the Qwen up-proj winning all 11 M
+values (M=256 0.99→1.01, M=512 0.99→1.07), down-proj M=256 0.96→1.00, and
+h4k/ffn-up8k M=512 flipping LOSE→WIN — so the residual is mostly the big squares. The odd-N remainder
 (N=11007 was ~0.85–0.88) is now **fixed** by the masked-N partial-panel
 microkernel (see *Masked N-remainder* above): the partial tile runs at full
 microkernel throughput and the shape holds parity (1.01). Closing the square gap
