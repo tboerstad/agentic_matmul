@@ -115,4 +115,23 @@ def main() raises:
     check(33, 47, 51)
     check(50, 50, 50)
     check(80, 80, 80)
+    # Masked-N partial-panel microkernel (last j-tile of an N-not-a-multiple-of-NR
+    # shape). With TILE_N=64, NR=32 the last tile's remainder panel is (N mod 64)
+    # wide if that is <= 32, else (N mod 64) - 32. These N sweep the remainder
+    # width across every store mask case: a sub-NELTS straddling lane (scalar
+    # tail, w=7), exact full lanes (w=8/24), and the worst case w=31 (three full
+    # NELTS lanes + a 7-wide scalar tail). Both full-M (300%6==0) and M-tail
+    # (257%6==5, exercising the partial panel's own M-remainder block).
+    # Wide-N branch (N >= K):
+    check(300, 519, 512)          # rem panel = 7  (one straddling lane)
+    check(300, 520, 512)          # rem panel = 8  (one full lane)
+    check(300, 536, 512)          # rem panel = 24 (three full lanes)
+    check(300, 551, 512)          # 2 panels; rem = 7
+    check(300, 575, 512)          # 2 panels; rem = 31 (full lanes + scalar tail)
+    check(257, 575, 512)          # + M-tail through the partial panel
+    check(96, 575, 512)           # small-M (no SHARED_A) partial panel
+    check(257, 575, 1100)         # + multi-k-panel accumulation into the panel
+    # Square-ish branch (N <= M, N > 192), N not a multiple of NR=32:
+    check(512, 479, 512)          # rem = 31, square-ish path
+    check(513, 479, 600)          # + M-tail + multi-k-panel, square-ish
     print("all passed")

@@ -119,6 +119,20 @@ it:
   masked block (instead of row-by-row) freed the tile choice from needing
   `MR | M`, flipping 5 losing shapes to wins. Verified bit-identical
   (`verify_dispatch` max_err 0.0).
+- **Masked N-remainder.** The mirror image: the last j-tile of an
+  N-not-a-multiple-of-NR shape ends in a partial NR-panel. It used to be computed
+  by a row-by-row `vectorize` tail that swept K once per row with only NR_VECS-deep
+  ILP — far too shallow to hide FMA latency, so the partial tile ran at a fraction
+  of the microkernel's throughput and dragged down the straggler worker. Because
+  the packed B panel is already zero-padded to full NR, the fix runs the *same*
+  register-blocked MR×NR_VECS microkernel on it (the zero columns contribute
+  nothing) and masks only the C store to the valid columns — full-NELTS SIMD for
+  each complete lane, a scalar tail for the straddling lane. The cost had scaled
+  with the remainder width (worst at a 31-wide remainder): on the 2.10 GHz Xeon
+  `512×11007×2048` ran **0.85→1.01** vs `linalg`, with the multiple-of-NR
+  `512×11008×2048` already at parity. Every N now holds ~parity regardless of its
+  remainder. Bit-identical (`verify_dispatch` max_err 0.0 across remainder widths
+  7/8/24/31 on both the wide-N and square-ish branches).
 - **KC is cache-size-dependent.** On the 1 MB-L2 Skylake, KC=512 is best; on the
   2 MB-L2 Xeon, KC=2048 (fewer k-panels, less C re-traffic) wins large-M — the
   *opposite* conclusion. Every KC/tile pick in the file is hardware-specific; the
@@ -170,10 +184,12 @@ Micro-kernel parity with `linalg` on the heaviest GEMMs (square M ≥ 256, now
 ~0.90–0.94 after the square-ish shared-A pack, where both kernels sit at ~55–66%
 of the 358 GFLOPS f64 peak). The large-M wide-N/tall-K band has now closed to
 ~0.94–1.04 after extending `SHARED_A` to M ≥ 192 there (it was a wide-margin
-LOSE before), so the residual is mostly the big squares and the odd-N remainder
-(N=11007 ~0.88, where `linalg`'s masked AVX-512 tail still wins). Closing the
-last gap needs `linalg`-style masked AVX-512 N-remainder handling and/or
-pack/compute overlap — substantial and unproven on this hardware. The thin-N and small-box cache-resident gaps are
+LOSE before), so the residual is mostly the big squares. The odd-N remainder
+(N=11007 was ~0.85–0.88) is now **fixed** by the masked-N partial-panel
+microkernel (see *Masked N-remainder* above): the partial tile runs at full
+microkernel throughput and the shape holds parity (1.01). Closing the square gap
+likely needs pack/compute overlap — substantial and unproven on this hardware.
+The thin-N and small-box cache-resident gaps are
 now both handled by the M-parallel no-pack route; its L2-fit cut is now
 L2-adaptive (compile-time 512 KB tier + a `B ≤ (2·L2)/3` tier), so a larger-L2
 part automatically extends the no-pack route up the B range (the 2 MB Xeon

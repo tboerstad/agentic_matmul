@@ -1192,13 +1192,8 @@ def _prefill_gemm_v3[
         var ap_worker = ap_buf + worker_id * ap_per_worker
 
         # Hoisted captures for inner closures (rule #5)
-        var c_row: type_of(c_ptr)
-        var a_row: type_of(a_ptr)
         var bp_panel: type_of(bp_worker)
         var is_first_k: Bool
-        var kc_h: Int
-        var pc_h: Int
-        var i_h: Int
 
         var jt = j_tile_start
         while jt < j_tile_end:
@@ -1207,8 +1202,6 @@ def _prefill_gemm_v3[
             for pc in range(0, k, KC):
                 var kc = min(KC, k - pc)
                 is_first_k = (pc == 0)
-                kc_h = kc
-                pc_h = pc
 
                 # Pack A: KC outer, MR inner so each pk gives MR contiguous
                 # doubles. Skipped under SHARED_A — the full A was packed once up
@@ -1268,45 +1261,121 @@ def _prefill_gemm_v3[
                         bp_panel = bp_worker + jp * kc * NR
 
                         if jr + NR > tile_n:
+                            # Partial NR-panel (tile_n not a multiple of NR, i.e.
+                            # the last j-tile of an N-not-a-multiple-of-NR shape).
+                            # The packed bp_panel is zero-padded to full NR (see the
+                            # pack loop above), so run the SAME register-blocked
+                            # MR×NR_VECS microkernel as a full panel — the zero
+                            # columns contribute nothing — and store back ONLY the
+                            # jj_limit valid columns (full-NELTS SIMD for each
+                            # complete lane, scalar tail for the straddling lane).
+                            #
+                            # Replaces the old row-by-row `vectorize` tail, which
+                            # swept K once per row with only NR_VECS-deep ILP — far
+                            # too shallow to hide FMA latency, so the partial tile
+                            # ran at a fraction of the microkernel's throughput. The
+                            # cost scaled with the remainder width and dominated the
+                            # straggler worker: N=11007 (rem=31) ran 0.86 vs linalg
+                            # while the multiple-of-NR N=11008 hit parity. With the
+                            # full-ILP microkernel the partial tile keeps pace, so
+                            # any N (odd / not a multiple of NR) holds ~parity.
                             var jj_limit = tile_n - jr
                             i = 0
+                            ip = 0
                             while i + MR <= m:
-                                for ii in range(i, i + MR):
-                                    c_row = c_ptr + ii * n + j0 + jr
-                                    a_row = a_ptr + ii * k + pc
+                                var ap_panel = (
+                                    ap_worker + ip * MR * k + pc * MR
+                                ) if SHARED_A else (ap_worker + ip * MR * kc)
 
-                                    def v3_fma_remainder[width: Int](jj: Int) {mut c_row, read a_row, read bp_panel, read is_first_k, read kc_h}:
-                                        var acc = c_row.load[width=width](offset=jj)
-                                        if is_first_k:
-                                            acc = SIMD[dtype, width](0)
-                                        for ppk in range(kc_h):
-                                            acc = fma(
-                                                SIMD[dtype, width](a_row[ppk]),
-                                                (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                                acc,
+                                var racc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
+                                    fill=SIMD[dtype, NELTS](0)
+                                )
+                                if not is_first_k:
+                                    comptime for mr in range(MR):
+                                        comptime for nr in range(NR_VECS):
+                                            var col0 = nr * NELTS
+                                            var cr = c_ptr + (i + mr) * n + j0 + jr
+                                            if col0 + NELTS <= jj_limit:
+                                                racc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
+                                            elif col0 < jj_limit:
+                                                var tmp = SIMD[dtype, NELTS](0)
+                                                for e in range(jj_limit - col0):
+                                                    tmp[e] = cr[col0 + e]
+                                                racc[mr * NR_VECS + nr] = tmp
+                                for pk in range(kc):
+                                    var bp_k = bp_panel + pk * NR
+                                    var ap_k = ap_panel + pk * MR
+                                    var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                                        fill=SIMD[dtype, NELTS](0)
+                                    )
+                                    comptime for nr in range(NR_VECS):
+                                        bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
+                                    comptime for mr in range(MR):
+                                        var a_bc = SIMD[dtype, NELTS](ap_k[mr])
+                                        comptime for nr in range(NR_VECS):
+                                            racc[mr * NR_VECS + nr] = a_bc.fma(
+                                                bv[nr], racc[mr * NR_VECS + nr]
                                             )
-                                        c_row.store(offset=jj, val=acc)
-
-                                    vectorize[NELTS](jj_limit, v3_fma_remainder)
+                                comptime for mr in range(MR):
+                                    comptime for nr in range(NR_VECS):
+                                        var col0 = nr * NELTS
+                                        var cr = c_ptr + (i + mr) * n + j0 + jr
+                                        if col0 + NELTS <= jj_limit:
+                                            cr.store(offset=col0, val=racc[mr * NR_VECS + nr])
+                                        elif col0 < jj_limit:
+                                            var v = racc[mr * NR_VECS + nr]
+                                            for e in range(jj_limit - col0):
+                                                cr[col0 + e] = v[e]
                                 i += MR
-                            while i < m:
-                                i_h = i
-                                c_row = c_ptr + i * n + j0 + jr
-
-                                def v3_fma_tail_rem[width: Int](jj: Int) {mut c_row, mut a_ptr, read bp_panel, read is_first_k, read kc_h, read pc_h, read i_h, read k}:
-                                    var acc = c_row.load[width=width](offset=jj)
-                                    if is_first_k:
-                                        acc = SIMD[dtype, width](0)
-                                    for ppk in range(kc_h):
-                                        acc = fma(
-                                            SIMD[dtype, width](a_ptr[i_h * k + pc_h + ppk]),
-                                            (bp_panel + ppk * NR).load[width=width](offset=jj),
-                                            acc,
-                                        )
-                                    c_row.store(offset=jj, val=acc)
-
-                                vectorize[NELTS](jj_limit, v3_fma_tail_rem)
-                                i += 1
+                                ip += 1
+                            # M-remainder rows (m % MR) of the partial panel: same
+                            # masked-N microkernel, reading unpacked A (these rows
+                            # are past the packed full-MR i-panels).
+                            if i < m:
+                                var r = m - i
+                                var racc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
+                                    fill=SIMD[dtype, NELTS](0)
+                                )
+                                if not is_first_k:
+                                    comptime for mr in range(MR):
+                                        if mr < r:
+                                            comptime for nr in range(NR_VECS):
+                                                var col0 = nr * NELTS
+                                                var cr = c_ptr + (i + mr) * n + j0 + jr
+                                                if col0 + NELTS <= jj_limit:
+                                                    racc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
+                                                elif col0 < jj_limit:
+                                                    var tmp = SIMD[dtype, NELTS](0)
+                                                    for e in range(jj_limit - col0):
+                                                        tmp[e] = cr[col0 + e]
+                                                    racc[mr * NR_VECS + nr] = tmp
+                                for pk in range(kc):
+                                    var bp_k = bp_panel + pk * NR
+                                    var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                                        fill=SIMD[dtype, NELTS](0)
+                                    )
+                                    comptime for nr in range(NR_VECS):
+                                        bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
+                                    comptime for mr in range(MR):
+                                        if mr < r:
+                                            var a_bc = SIMD[dtype, NELTS](
+                                                a_ptr[(i + mr) * k + pc + pk]
+                                            )
+                                            comptime for nr in range(NR_VECS):
+                                                racc[mr * NR_VECS + nr] = a_bc.fma(
+                                                    bv[nr], racc[mr * NR_VECS + nr]
+                                                )
+                                comptime for mr in range(MR):
+                                    if mr < r:
+                                        comptime for nr in range(NR_VECS):
+                                            var col0 = nr * NELTS
+                                            var cr = c_ptr + (i + mr) * n + j0 + jr
+                                            if col0 + NELTS <= jj_limit:
+                                                cr.store(offset=col0, val=racc[mr * NR_VECS + nr])
+                                            elif col0 < jj_limit:
+                                                var v = racc[mr * NR_VECS + nr]
+                                                for e in range(jj_limit - col0):
+                                                    cr[col0 + e] = v[e]
                             continue
 
                         # ---- Full NR-panel: hoisted-load microkernel ----
