@@ -1,5 +1,6 @@
 from cpu_cache import l2_cache_size
 from matrix import Matrix
+from tile import Tile
 from std.algorithm.functional import parallelize, vectorize
 from std.collections import InlineArray
 from std.math import ceildiv, fma
@@ -55,25 +56,22 @@ struct RegisterTile[dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int](
                 )
 
     @always_inline
-    def load[org: MutOrigin](
-        mut self, c_block: UnsafePointer[Scalar[Self.dtype], org], row_stride: Int
-    ):
-        """Seed the tile from C, to accumulate onto a prior K-panel's partial.
-        `c_block` is the tile's top-left element; rows are `row_stride` apart."""
+    def load[org: MutOrigin](mut self, c: Tile[Self.dtype, org]):
+        """Seed the tile from a C block, to accumulate onto a prior K-panel's
+        partial. `c` is the block's view: c.row(0) is its top-left, rows
+        c.stride apart."""
         comptime for mr in range(Self.MR):
-            var row = c_block + mr * row_stride
+            var row = c.row(mr)
             comptime for nr in range(Self.NR_VECS):
                 self.acc[mr * Self.NR_VECS + nr] = row.load[width = Self.NELTS](
                     offset=nr * Self.NELTS
                 )
 
     @always_inline
-    def store[org: MutOrigin](
-        self, c_block: UnsafePointer[Scalar[Self.dtype], org], row_stride: Int
-    ):
-        """Write the finished tile back to C."""
+    def store[org: MutOrigin](self, c: Tile[Self.dtype, org]):
+        """Write the finished tile back to a C block (see `load` for the view)."""
         comptime for mr in range(Self.MR):
-            var row = c_block + mr * row_stride
+            var row = c.row(mr)
             comptime for nr in range(Self.NR_VECS):
                 row.store(
                     offset=nr * Self.NELTS, val=self.acc[mr * Self.NR_VECS + nr]
@@ -369,16 +367,16 @@ def _packed_gemm[
                             var ap_panel = (
                                 ap_worker + ip * MR * k + pc * MR
                             ) if SHARED_A else (ap_worker + ip * MR * kc)
-                            var c_block = c_ptr + i * n + j0 + jr
+                            var c_block = Tile(c_ptr, m, n, n).sub(i, j0 + jr)
 
                             comptime for mr in range(MR):
                                 prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
-                                    c_block + mr * n
+                                    c_block.row(mr)
                                 )
 
                             var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
                             if not is_first_k:
-                                tile.load(c_block, n)
+                                tile.load(c_block)
 
                             # K-sweep, unrolled by KU so KU*NR_VECS B-vectors stay
                             # live per step. KU=2 keeps the 6x32 tile's 24 + 8 = 32
@@ -403,7 +401,7 @@ def _packed_gemm[
                                 )
                                 pk += 1
 
-                            tile.store(c_block, n)
+                            tile.store(c_block)
 
                             i += MR
                             ip += 1
@@ -571,9 +569,10 @@ def _serial_gemm[
     var m = a.rows
     var n = c.cols
     var k = a.cols
-    var c_ptr = c.data.unsafe_ptr()
-    var a_ptr = a.data.unsafe_ptr()
-    var b_ptr = b.data.unsafe_ptr()
+    var c_view = Tile(c.data.unsafe_ptr(), m, n, n)
+    var a_view = Tile(a.data.unsafe_ptr(), m, k, k)
+    var b_view = Tile(b.data.unsafe_ptr(), k, n, n)
+    var b_ptr = b_view.ptr
 
     var j = 0
     while j + NR <= n:
@@ -583,20 +582,20 @@ def _serial_gemm[
             var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
             for p in range(k):
                 tile.rank1_update(
-                    load_a_col[MR](a_ptr + i * k + p, k),
-                    load_b_row[NR_VECS, NELTS](b_ptr + p * n + j),
+                    load_a_col[MR](a_view.addr(i, p), k),
+                    load_b_row[NR_VECS, NELTS](b_view.addr(p, j)),
                 )
-            tile.store(c_ptr + i * n + j, n)
+            tile.store(c_view.sub(i, j))
             i += MR
         # M-remainder rows (m % MR): one row at a time, same NR-wide SIMD.
         while i < m:
             var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
             for p in range(k):
                 tile.rank1_update(
-                    load_a_col[1](a_ptr + i * k + p, k),
-                    load_b_row[NR_VECS, NELTS](b_ptr + p * n + j),
+                    load_a_col[1](a_view.addr(i, p), k),
+                    load_b_row[NR_VECS, NELTS](b_view.addr(p, j)),
                 )
-            tile.store(c_ptr + i * n + j, n)
+            tile.store(c_view.sub(i, j))
             i += 1
         j += NR
     # N-remainder columns (n % NR): vectorized tail over the full M extent,
@@ -604,8 +603,8 @@ def _serial_gemm[
     if j < n:
         var jr = j
         for i in range(m):
-            var c_row = c_ptr + i * n
-            var a_row = a_ptr + i * k
+            var c_row = c_view.row(i)
+            var a_row = a_view.row(i)
 
             def tail[width: Int](jj: Int) {mut c_row, read a_row, read b_ptr, read k, read n, read jr}:
                 var acc = SIMD[dtype, width](0)
@@ -648,6 +647,9 @@ def _nopack_gemm[
     var num_blocks = ceildiv(m, MR)
 
     def worker(blk: Int) {mut c_ptr, mut a_ptr, mut b_ptr, read m, read n, read k}:
+        var c_view = Tile(c_ptr, m, n, n)
+        var a_view = Tile(a_ptr, m, k, k)
+        var b_view = Tile(b_ptr, k, n, n)
         var i = blk * MR
         var r = min(MR, m - i)
         # A full MR-row block uses the comptime-unrolled MR tile (each B-load
@@ -658,10 +660,10 @@ def _nopack_gemm[
                 var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
                 for p in range(k):
                     tile.rank1_update(
-                        load_a_col[MR](a_ptr + i * k + p, k),
-                        load_b_row[NR_VECS, NELTS](b_ptr + p * n + j),
+                        load_a_col[MR](a_view.addr(i, p), k),
+                        load_b_row[NR_VECS, NELTS](b_view.addr(p, j)),
                     )
-                tile.store(c_ptr + i * n + j, n)
+                tile.store(c_view.sub(i, j))
                 j += NR
         else:
             for ii in range(i, i + r):
@@ -670,22 +672,22 @@ def _nopack_gemm[
                     var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
                     for p in range(k):
                         tile.rank1_update(
-                            load_a_col[1](a_ptr + ii * k + p, k),
-                            load_b_row[NR_VECS, NELTS](b_ptr + p * n + j2),
+                            load_a_col[1](a_view.addr(ii, p), k),
+                            load_b_row[NR_VECS, NELTS](b_view.addr(p, j2)),
                         )
-                    tile.store(c_ptr + ii * n + j2, n)
+                    tile.store(c_view.sub(ii, j2))
                     j2 += NR
 
         # N-remainder columns (n % NR < NR): scalar dot per (row, col). A tiny
         # strip (NR <= 16 cols), so a scalar tail costs nothing.
         var jr = (n // NR) * NR
         for ii in range(i, i + r):
-            var a_row = a_ptr + ii * k
+            var a_row = a_view.row(ii)
             for jj in range(jr, n):
                 var acc = Scalar[dtype](0)
                 for p in range(k):
-                    acc = fma(a_row[p], b_ptr[p * n + jj], acc)
-                c_ptr[ii * n + jj] = acc
+                    acc = fma(a_row[p], b_view.addr(p, jj)[0], acc)
+                c_view.addr(ii, jj)[0] = acc
 
     parallelize(worker, num_blocks, nw)
 
