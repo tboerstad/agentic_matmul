@@ -27,20 +27,25 @@ Peak GFLOPS by hardware (higher is better):
 | **Mojo (agentic matmul)** | 13.9 | **28.5** | 20.7 |
 | Mojo linalg (stdlib) | 5.9 | 11.4 | 4.8 |
 
-## Kernel evolution
+## Kernels
 
-1. **naive** — Triple-nested loop baseline
-2. **tiled** — 32×32 cache-blocking
-3. **simd** — Tiled + SIMD vectorization
-4. **parallel** — Tiled + thread parallelism
-5. **register_blocked** — Higher loop unrolling
-6. **packed** — A/B buffer packing for sequential access
-7. **comptime** — Compile-time parameter specialization
-8. **goto** — GOTO-style GEMM: B-panel packing, GEMV/GEMM dispatch
-9. **prefill** — Worker-based parallelism, A-panel packing, 8×24 microkernel
-10. **prefill_opt** — v3 microkernel (hoisted B-load + noalias), 6×32 register tile, KU=2, KC=256, TILE_N=128
-11. **decode** — j-parallel GEMV with L1-resident column chunks for decode shapes
-12. **dispatch** — Shape-adaptive auto-selection (see below)
+`gemm.mojo` keeps only the state-of-the-art kernels — the earlier evolution
+steps (naive, tiled, simd, parallel, register-blocked, packed, comptime, goto,
+and the v2 prefill kernel) have been removed. `matmul_dispatch` routes each
+shape to the fastest of these four:
+
+- **`_prefill_gemm_v3`** — the workhorse packed GEMM: per-worker A/B-panel
+  packing, an MR×NR register-tiled micro-kernel with hoisted B-loads + noalias,
+  a register-blocked masked tail for the M- and N-remainders, and an optional
+  shared single pack of A. All register-blocked kernels share the `_fma_tile`
+  inner step and the `_micro_masked` cold-path kernel.
+- **`_decode_gemv`** — j-parallel GEMV with L1-resident column chunks and
+  software prefetch, for decode shapes (M = 1). Streams B exactly once.
+- **`_thin_n_gemm`** — M-parallel, no-packing register-blocked kernel for the
+  two regimes the N-parallel prefill kernel handles badly: thin-N (small N,
+  large M·K) and small M-dominant boxes whose B stays L2-resident.
+- **`_matmul_small`** — serial register-blocked kernel for tiny shapes, where
+  any thread launch / packing overhead dwarfs the compute.
 
 ## Dispatch logic
 
@@ -220,7 +225,6 @@ bash setup.sh
 
 ```bash
 source .venv/bin/activate
-mojo bench_matmul.mojo           # All 12 kernels on both shapes
 mojo bench_linalg.mojo           # Mojo stdlib linalg.matmul baseline
 mojo bench_sweep.mojo --iterate  # FAST: dispatch vs linalg on corner/edge shapes (default)
 mojo bench_sweep.mojo --full     # SLOW: full per-M sweep over many aspect ratios + general grid
