@@ -1,7 +1,8 @@
 from std.collections import List
+from tile import Tile
 
 
-struct Matrix[dtype: DType = DType.float64]:
+struct Matrix[dtype: DType = DType.float64](Movable):
     """A simple 2D CPU matrix backed by a flat row-major buffer.
 
     Inspired by NDBuffer but stripped to essentials:
@@ -19,11 +20,27 @@ struct Matrix[dtype: DType = DType.float64]:
 
     def __init__(out self, rows: Int, cols: Int):
         """Allocate a zero-filled rows x cols matrix."""
+        self = Self(rows, cols, fill=Scalar[Self.dtype](0))
+
+    def __init__(out self, rows: Int, cols: Int, *, fill: Scalar[Self.dtype]):
+        """Allocate a rows x cols matrix, every element set to `fill`."""
         self.rows = rows
         self.cols = cols
         self.data = List[Scalar[Self.dtype]](capacity=rows * cols)
         for _ in range(rows * cols):
-            self.data.append(Scalar[Self.dtype](0))
+            self.data.append(fill)
+
+    @staticmethod
+    def from_rows(rows: List[List[Scalar[Self.dtype]]]) -> Self:
+        """Build a matrix from a list of equal-length rows — for tests and demos
+        that would otherwise assign element by element."""
+        var r = len(rows)
+        var c = len(rows[0]) if r > 0 else 0
+        var m = Self(r, c)
+        for i in range(r):
+            for j in range(c):
+                m.data[i * c + j] = rows[i][j]
+        return m^
 
     # --- element access ---------------------------------------------------------
 
@@ -40,6 +57,21 @@ struct Matrix[dtype: DType = DType.float64]:
 
     def store(mut self, idx: Int, val: Scalar[Self.dtype]):
         self.data[idx] = val
+
+    # --- views ------------------------------------------------------------------
+
+    def view(ref self) -> Tile[Self.dtype, origin_of(self.data)]:
+        """The whole matrix as a `Tile` (row-major, stride = cols)."""
+        return Tile(self.data.unsafe_ptr(), self.rows, self.cols, self.cols)
+
+    def noalias_view(ref self) -> Tile[Self.dtype, origin_of(self.data)]:
+        """The whole matrix as a `Tile` over a *noalias* pointer — the handle the
+        kernels work from. Each GEMM operand is a distinct matrix viewed once, so
+        the noalias contract (nothing else writes through an aliasing pointer)
+        holds, and it widens LLVM's hoisting across the hot loops."""
+        return Tile(
+            self.data.unsafe_ptr().as_noalias_ptr(), self.rows, self.cols, self.cols
+        )
 
     # --- properties -------------------------------------------------------------
 
@@ -60,22 +92,12 @@ struct Matrix[dtype: DType = DType.float64]:
 
 
 def main():
-    # float64 (default)
-    var m = Matrix(2, 3)
-    m[0, 0] = 1.0
-    m[0, 1] = 2.0
-    m[0, 2] = 3.0
-    m[1, 0] = 4.0
-    m[1, 1] = 5.0
-    m[1, 2] = 6.0
+    # float64 (default), built row-by-row
+    var m = Matrix.from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     print("Matrix[float64] 2x3:")
     m.print()
 
     # float32
-    var m32 = Matrix[DType.float32](2, 2)
-    m32[0, 0] = 1.0
-    m32[0, 1] = 2.0
-    m32[1, 0] = 3.0
-    m32[1, 1] = 4.0
+    var m32 = Matrix[DType.float32].from_rows([[1.0, 2.0], [3.0, 4.0]])
     print("Matrix[float32] 2x2:")
     m32.print()
