@@ -9,39 +9,79 @@ from std.sys import num_physical_cores, simd_width_of, size_of
 from std.sys.intrinsics import prefetch, PrefetchOptions
 
 
-# ---------------------------------------------------------------------------
-# Register-tile micro-kernel building blocks
+# ===========================================================================
+# The register tile
 #
-# Every register-blocked kernel in this file (the packed prefill kernel, the
-# serial small-shape kernel, the no-pack thin-N kernel) computes an MR x NR
-# block of C as a register-resident accumulator tile swept over K. These two
-# helpers factor out that shared inner step so each kernel expresses only its
-# own packing / loop scaffolding. Both are @always_inline, so after inlining
-# they emit the same machine code as the hand-written nests they replace —
-# `_fma_tile` takes SIMD values only (no pointers), so it cannot perturb the
-# noalias B-load hoisting the hot loop depends on.
-# ---------------------------------------------------------------------------
+# Every kernel in this file is the same idea: hold an MR x (NR_VECS*NELTS)
+# block of C entirely in SIMD registers, sweep it over K with rank-1 updates,
+# then write it back once. `RegisterTile` is that block. Its accumulator is an
+# `InlineArray` the compiler flattens into registers, so each method is a
+# zero-cost abstraction — after `@always_inline` the tile emits exactly the
+# FMA/load/store nest you would otherwise hand-write and hand-number. Naming it
+# once lets each kernel below express only its own packing and loop scaffolding.
+# ===========================================================================
 
 
-@always_inline
-def _fma_tile[
-    dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int,
-](
-    mut acc: InlineArray[SIMD[dtype, NELTS], MR * NR_VECS],
-    a_vals: InlineArray[Scalar[dtype], MR],
-    bv: InlineArray[SIMD[dtype, NELTS], NR_VECS],
+struct RegisterTile[dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int](
+    Copyable & Movable
 ):
-    """Broadcast each of the MR A scalars across the NR_VECS B vectors and FMA
-    into the MR x NR_VECS register-tile accumulator. The one inner step shared
-    by every register-blocked micro-kernel here."""
-    comptime for mr in range(MR):
-        var a_bc = SIMD[dtype, NELTS](a_vals[mr])
-        comptime for nr in range(NR_VECS):
-            acc[mr * NR_VECS + nr] = a_bc.fma(bv[nr], acc[mr * NR_VECS + nr])
+    """An MR x (NR_VECS*NELTS) block of C, resident in SIMD registers."""
+
+    var acc: InlineArray[SIMD[Self.dtype, Self.NELTS], Self.MR * Self.NR_VECS]
+
+    @always_inline
+    def __init__(out self):
+        """Start at zero: a fresh C block, or the first K-panel of a sweep."""
+        self.acc = InlineArray[
+            SIMD[Self.dtype, Self.NELTS], Self.MR * Self.NR_VECS
+        ](fill=SIMD[Self.dtype, Self.NELTS](0))
+
+    @always_inline
+    def rank1_update(
+        mut self,
+        a_col: InlineArray[Scalar[Self.dtype], Self.MR],
+        b_row: InlineArray[SIMD[Self.dtype, Self.NELTS], Self.NR_VECS],
+    ):
+        """C_tile += a_col (x) b_row — one K-step. Broadcast each of the MR A
+        scalars across the NR_VECS B vectors and FMA into the tile. This is the
+        single inner step shared by every kernel here. It takes SIMD values
+        only (no pointers), so it can never perturb the noalias B-load hoisting
+        the hot loops depend on."""
+        comptime for mr in range(Self.MR):
+            var a_bc = SIMD[Self.dtype, Self.NELTS](a_col[mr])
+            comptime for nr in range(Self.NR_VECS):
+                self.acc[mr * Self.NR_VECS + nr] = a_bc.fma(
+                    b_row[nr], self.acc[mr * Self.NR_VECS + nr]
+                )
+
+    @always_inline
+    def load[org: MutOrigin](
+        mut self, c_block: UnsafePointer[Scalar[Self.dtype], org], row_stride: Int
+    ):
+        """Seed the tile from C, to accumulate onto a prior K-panel's partial.
+        `c_block` is the tile's top-left element; rows are `row_stride` apart."""
+        comptime for mr in range(Self.MR):
+            var row = c_block + mr * row_stride
+            comptime for nr in range(Self.NR_VECS):
+                self.acc[mr * Self.NR_VECS + nr] = row.load[width = Self.NELTS](
+                    offset=nr * Self.NELTS
+                )
+
+    @always_inline
+    def store[org: MutOrigin](
+        self, c_block: UnsafePointer[Scalar[Self.dtype], org], row_stride: Int
+    ):
+        """Write the finished tile back to C."""
+        comptime for mr in range(Self.MR):
+            var row = c_block + mr * row_stride
+            comptime for nr in range(Self.NR_VECS):
+                row.store(
+                    offset=nr * Self.NELTS, val=self.acc[mr * Self.NR_VECS + nr]
+                )
 
 
 @always_inline
-def _micro_masked[
+def _masked_microkernel[
     dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int, NR: Int,
     c_org: MutOrigin, a_org: ImmutOrigin, b_org: MutOrigin,
 ](
@@ -57,19 +97,19 @@ def _micro_masked[
     jj_limit: Int,
     is_first_k: Bool,
 ):
-    """Cold-path MR x NR_VECS micro-kernel: the leftover blocks the hot loop
-    can't take. Handles an M-remainder (only `r` of MR rows active) and/or a
-    partial NR-panel (only `jj_limit` of NR columns valid) by masking the C
-    load and store; reads A unpacked (so it works for the un-packed remainder
-    rows too) and B from the zero-padded packed panel. With r == MR and
-    jj_limit == NR it degenerates to the unmasked full kernel, so this one
-    function also covers the full-panel M-remainder.
+    """Cold-path register tile: the leftover blocks the hot loop can't take.
+
+    Handles an M-remainder (only `r` of MR rows active) and/or a partial
+    NR-panel (only `jj_limit` of NR columns valid) by masking the C load and
+    store; reads A unpacked (so it covers the un-packed remainder rows too) and
+    B from the zero-padded packed panel. With r == MR and jj_limit == NR it is
+    the unmasked full kernel, so this one function also serves the full-panel
+    M-remainder.
 
     c_base = i*n + j0 + jr  (top-left of the block in C);
-    a_base = i*k + pc       (top-left of the block's rows in A)."""
-    var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
-        fill=SIMD[dtype, NELTS](0)
-    )
+    a_base = i*k + pc       (top-left of the block's rows in A).
+    """
+    var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
     if not is_first_k:
         comptime for mr in range(MR):
             if mr < r:
@@ -77,64 +117,63 @@ def _micro_masked[
                     var col0 = nr * NELTS
                     var cr = c_ptr + c_base + mr * n
                     if col0 + NELTS <= jj_limit:
-                        acc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
+                        tile.acc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
                     elif col0 < jj_limit:
                         var tmp = SIMD[dtype, NELTS](0)
                         for e in range(jj_limit - col0):
                             tmp[e] = cr[col0 + e]
-                        acc[mr * NR_VECS + nr] = tmp
+                        tile.acc[mr * NR_VECS + nr] = tmp
     for pk in range(kc):
         var bp_k = bp_panel + pk * NR
-        var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+        var b_row = InlineArray[SIMD[dtype, NELTS], NR_VECS](
             fill=SIMD[dtype, NELTS](0)
         )
         comptime for nr in range(NR_VECS):
-            bv[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
+            b_row[nr] = bp_k.load[width=NELTS](offset=nr * NELTS)
         # Gather A guarded by mr < r: rows past the M-remainder are out of
         # bounds, so leave them zero (their acc lanes are never stored).
-        var a_vals = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
+        var a_col = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
         comptime for mr in range(MR):
             if mr < r:
-                a_vals[mr] = a_ptr[a_base + mr * k + pk]
-        _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
+                a_col[mr] = a_ptr[a_base + mr * k + pk]
+        tile.rank1_update(a_col, b_row)
     comptime for mr in range(MR):
         if mr < r:
             comptime for nr in range(NR_VECS):
                 var col0 = nr * NELTS
                 var cr = c_ptr + c_base + mr * n
                 if col0 + NELTS <= jj_limit:
-                    cr.store(offset=col0, val=acc[mr * NR_VECS + nr])
+                    cr.store(offset=col0, val=tile.acc[mr * NR_VECS + nr])
                 elif col0 < jj_limit:
-                    var v = acc[mr * NR_VECS + nr]
+                    var v = tile.acc[mr * NR_VECS + nr]
                     for e in range(jj_limit - col0):
                         cr[col0 + e] = v[e]
 
 
-def _prefill_gemm_v3[
+# ===========================================================================
+# The packed prefill GEMM — the workhorse
+# ===========================================================================
+
+
+def _packed_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
     NC_TILES: Int, SHARED_A: Bool = False,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # Prefill GEMM with explicit B-load hoisting in the microkernel.
-    #
-    # SHARED_A (square-ish only): by default every worker re-packs the FULL A
-    # (all i-panels) for each k-panel into its own buffer — num_workers
-    # redundant copies. On a wide/tall headline shape A is small relative to the
-    # N-sweep, so that redundancy is cheap L3 traffic (measured a wash; the
-    # default keeps it). On a big SQUARE, A is as large as B/C and the 4x
-    # re-pack is a real cost (sq2048: ~134 MB of redundant pack traffic/call).
-    # With SHARED_A the full A is packed ONCE up front (parallelized over
-    # i-panels) into a single shared buffer keyed [i-panel][k][MR]; every worker
-    # then reads that buffer. Halves the packed-A footprint and removes the
-    # redundant packing. Enabled from the square-ish branch only, so every
-    # headline shape keeps the byte-for-byte original path.
-    # The NR_VECS SIMD loads of B per K-step are stored in an InlineArray
-    # and reused across the MR broadcast-FMA inner loop, so the compiler
-    # cannot accidentally re-issue them per `mr` iteration. Pointers are
-    # marked noalias to widen LLVM's CSE/hoist opportunities.
+    """Packed C = A * B: pack A and B into cache-friendly panels, then run the
+    `RegisterTile` micro-kernel over them, parallelized across N (j-tiles).
+
+    Pointers are noalias to widen LLVM's hoisting; the NR_VECS B-loads per
+    K-step are kept inline (not hidden behind a helper) so the compiler cannot
+    re-issue them per accumulator row.
+
+    SHARED_A packs the full A once up front instead of having every worker
+    re-pack it per K-panel. Off the headline wide/tall shapes A is tiny next to
+    the N-sweep, so the redundant per-worker pack is cheap and SHARED_A is left
+    off; on a big square A is as large as B/C and packing it once is a real win
+    (see the design notes at the foot of this file)."""
     comptime NELTS = simd_width_of[dtype]()
     comptime NR_VECS = NR // NELTS
     comptime PREFETCH_B_DIST = 8
-    comptime PREFETCH_DIST = 4
 
     var m = a.rows
     var n = c.cols
@@ -167,7 +206,7 @@ def _prefill_gemm_v3[
 
     if SHARED_A:
         # Pre-pack the full A once, in parallel over full MR-row i-panels. Each
-        # panel block is MR*k contiguous, organized [k][MR] so the microkernel's
+        # panel block is MR*k contiguous, organized [k][MR] so the micro-kernel's
         # ap_panel + pk*MR + mr indexing matches the per-worker layout (just with
         # a full-k stride + pc offset instead of a per-panel kc stride).
         def pack_a_panel(ip: Int) {mut ap_buf, mut a_ptr, read k}:
@@ -189,7 +228,7 @@ def _prefill_gemm_v3[
         var bp_worker = bp_buf + worker_id * bp_per_worker
         var ap_worker = ap_buf + worker_id * ap_per_worker
 
-        # Hoisted captures for inner closures (rule #5)
+        # Hoisted captures for inner closures (declare type-only, see AGENTS.md).
         var bp_panel: type_of(bp_worker)
         var is_first_k: Bool
 
@@ -202,8 +241,7 @@ def _prefill_gemm_v3[
                 is_first_k = (pc == 0)
 
                 # Pack A: KC outer, MR inner so each pk gives MR contiguous
-                # doubles. Skipped under SHARED_A — the full A was packed once up
-                # front into the shared buffer before the parallel region.
+                # doubles. Skipped under SHARED_A — A was packed once up front.
                 var i = 0
                 var ip = 0
                 if not SHARED_A:
@@ -231,6 +269,9 @@ def _prefill_gemm_v3[
                             has_remainder = True
                             nr_actual = tile_n - last_jr
 
+                    # Pack this j-tile's slab of B into [panel][k][NR], padding a
+                    # partial trailing panel out to full NR with zeros so the
+                    # micro-kernel can run it as a full panel (see below).
                     for pk in range(kc):
                         var row_base = b_ptr + (pc + pk) * n + j0
                         prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
@@ -259,46 +300,32 @@ def _prefill_gemm_v3[
                         bp_panel = bp_worker + jp * kc * NR
 
                         if jr + NR > tile_n:
-                            # Partial NR-panel (tile_n not a multiple of NR, i.e.
-                            # the last j-tile of an N-not-a-multiple-of-NR shape).
-                            # The packed bp_panel is zero-padded to full NR (see the
-                            # pack loop above), so run the SAME register-blocked
-                            # MR×NR_VECS microkernel as a full panel — the zero
-                            # columns contribute nothing — and store back ONLY the
-                            # jj_limit valid columns (full-NELTS SIMD for each
-                            # complete lane, scalar tail for the straddling lane).
-                            #
-                            # Replaces the old row-by-row `vectorize` tail, which
-                            # swept K once per row with only NR_VECS-deep ILP — far
-                            # too shallow to hide FMA latency, so the partial tile
-                            # ran at a fraction of the microkernel's throughput. The
-                            # cost scaled with the remainder width and dominated the
-                            # straggler worker: N=11007 (rem=31) ran 0.86 vs linalg
-                            # while the multiple-of-NR N=11008 hit parity. With the
-                            # full-ILP microkernel the partial tile keeps pace, so
-                            # any N (odd / not a multiple of NR) holds ~parity.
-                            # _micro_masked runs that full-width kernel and stores
-                            # only the jj_limit valid columns: full MR-row i-panels
-                            # first, then the m % MR remainder rows (r = MR vs
-                            # r = m - i).
+                            # Partial NR-panel (tile_n not a multiple of NR — the
+                            # last j-tile of an N-not-a-multiple-of-NR shape). The
+                            # packed panel is zero-padded to full NR, so run the
+                            # SAME register-tiled micro-kernel (the zero columns
+                            # contribute nothing) and store back only the jj_limit
+                            # valid columns. `_masked_microkernel` does exactly
+                            # that: full MR-row i-panels first (r = MR), then the
+                            # m % MR remainder rows (r = m - i).
                             var jj_limit = tile_n - jr
                             i = 0
                             while i + MR <= m:
-                                _micro_masked[dtype, MR, NR_VECS, NELTS, NR](
+                                _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
                                     c_ptr, a_ptr, bp_panel,
                                     i * n + j0 + jr, i * k + pc,
                                     n, k, kc, MR, jj_limit, is_first_k,
                                 )
                                 i += MR
                             if i < m:
-                                _micro_masked[dtype, MR, NR_VECS, NELTS, NR](
+                                _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
                                     c_ptr, a_ptr, bp_panel,
                                     i * n + j0 + jr, i * k + pc,
                                     n, k, kc, m - i, jj_limit, is_first_k,
                                 )
                             continue
 
-                        # ---- Full NR-panel: hoisted-load microkernel ----
+                        # ---- Full NR-panel: the register-tile micro-kernel ----
                         i = 0
                         ip = 0
                         while i + MR <= m:
@@ -307,33 +334,28 @@ def _prefill_gemm_v3[
                             var ap_panel = (
                                 ap_worker + ip * MR * k + pc * MR
                             ) if SHARED_A else (ap_worker + ip * MR * kc)
+                            var c_block = c_ptr + i * n + j0 + jr
 
                             comptime for mr in range(MR):
                                 prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
-                                    c_ptr + (i + mr) * n + j0 + jr
+                                    c_block + mr * n
                                 )
 
-                            var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
-                                fill=SIMD[dtype, NELTS](0)
-                            )
+                            var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
                             if not is_first_k:
-                                comptime for mr in range(MR):
-                                    comptime for nr in range(NR_VECS):
-                                        acc[mr * NR_VECS + nr] = (
-                                            c_ptr + (i + mr) * n + j0 + jr
-                                        ).load[width=NELTS](offset=nr * NELTS)
+                                tile.load(c_block, n)
 
+                            # K-sweep, unrolled by KU so KU*NR_VECS B-vectors stay
+                            # live per step. KU=2 keeps the 6x32 tile's 24 + 8 = 32
+                            # accumulator+B vectors inside the AVX-512 register file
+                            # (KU=4 needs 40 and spills). The bv loads stay inline
+                            # so the noalias B-load hoist holds.
                             var pk = 0
                             var pk_end = kc - (kc % KU)
                             while pk < pk_end:
                                 comptime for ku in range(KU):
                                     var bp_k = bp_panel + (pk + ku) * NR
                                     var ap_k = ap_panel + (pk + ku) * MR
-
-                                    # Load B once per ku-step (NR_VECS SIMD loads,
-                                    # kept inline so the noalias hoist holds),
-                                    # gather the MR packed-A scalars, then FMA the
-                                    # tile via the shared inner step.
                                     var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
                                         fill=SIMD[dtype, NELTS](0)
                                     )
@@ -344,13 +366,12 @@ def _prefill_gemm_v3[
                                     )
                                     comptime for mr in range(MR):
                                         a_vals[mr] = ap_k[mr]
-                                    _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
+                                    tile.rank1_update(a_vals, bv)
                                 pk += KU
 
                             while pk < kc:
                                 var bp_k = bp_panel + pk * NR
                                 var ap_k = ap_panel + pk * MR
-
                                 var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
                                     fill=SIMD[dtype, NELTS](0)
                                 )
@@ -361,30 +382,20 @@ def _prefill_gemm_v3[
                                 )
                                 comptime for mr in range(MR):
                                     a_vals[mr] = ap_k[mr]
-                                _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
+                                tile.rank1_update(a_vals, bv)
                                 pk += 1
 
-                            comptime for mr in range(MR):
-                                comptime for nr in range(NR_VECS):
-                                    (c_ptr + (i + mr) * n + j0 + jr).store(
-                                        offset=nr * NELTS, val=acc[mr * NR_VECS + nr],
-                                    )
+                            tile.store(c_block, n)
 
                             i += MR
                             ip += 1
 
-                        # M-remainder (m % MR rows, 1..MR-1): handle all r
-                        # leftover rows as ONE register-blocked block — a single
-                        # K-sweep with r×NR_VECS accumulators, reusing the packed
-                        # B panel, full NR-width SIMD. (jr+NR <= tile_n here: the
-                        # partial-tile case already `continue`d above, so the full
-                        # NR width is valid — jj_limit = NR, no column masking.)
-                        # Replaces the old row-by-row `vectorize` tail, which swept
-                        # K once per row with only NR_VECS-deep ILP — too shallow
-                        # to hide FMA latency, the tax that made MR-not-dividing-M
-                        # tiles (e.g. 6x32 at M=256) lose to remainder-free ones.
+                        # M-remainder (m % MR rows): one register-tiled block, a
+                        # single K-sweep with r x NR_VECS accumulators reusing the
+                        # packed B panel at full NR width (jj_limit = NR — the
+                        # partial-tile case already `continue`d above).
                         if i < m:
-                            _micro_masked[dtype, MR, NR_VECS, NELTS, NR](
+                            _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
                                 c_ptr, a_ptr, bp_panel,
                                 i * n + j0 + jr, i * k + pc,
                                 n, k, kc, m - i, NR, is_first_k,
@@ -395,6 +406,22 @@ def _prefill_gemm_v3[
     parallelize(process_worker, num_workers, num_workers)
     bp_buf.free()
     ap_buf.free()
+
+
+@always_inline
+def _prefill[
+    dtype: DType, KC: Int, TILE_N: Int, SHARED_A: Bool = False
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """The SOTA packed GEMM at its standard 6 x (4*NELTS) register tile (KU=2,
+    NC_TILES=64). KC, TILE_N and SHARED_A are the only levers that vary across
+    shapes, so naming the rest here keeps each dispatch branch a one-liner."""
+    comptime NELTS = simd_width_of[dtype]()
+    _packed_gemm[dtype, 6, 4 * NELTS, KC, 2, TILE_N, 64, SHARED_A](c, a, b)
+
+
+# ===========================================================================
+# Decode GEMV (M = 1)
+# ===========================================================================
 
 
 @always_inline
@@ -411,17 +438,16 @@ def _decode_fma_chunk_unrolled[
 ):
     """KU-unrolled FMA chunk for the GEMV main loop.
 
-    Extracted to a top-level def so the inner closure can capture `p` and the
-    pointers directly as function-scope bindings (a closure nested inside
-    another closure cannot capture for/while-loop-body variables in current
-    Mojo)."""
+    A top-level def so the inner closure can capture `p` and the pointers as
+    function-scope bindings (a closure nested inside another closure cannot
+    capture for/while-loop-body variables in current Mojo)."""
     def do_fma[width: Int](j: Int) {read ci, read ai, read b_col, read p, read n}:
         var acc = ci.load[width=width](offset=j)
         comptime for ku in range(KU):
-            # Prefetch the same columns of the next KU-block of B rows: the
-            # KU streams are n*8 bytes apart, too far for the hardware
-            # prefetcher to follow. May reach past the end of B on the last
-            # block — prefetch is architecturally non-faulting, so that's safe.
+            # Prefetch the same columns of the next KU-block of B rows: the KU
+            # streams are n*8 bytes apart, too far for the HW prefetcher. May
+            # reach past the end of B on the last block — prefetch is
+            # architecturally non-faulting, so that is safe.
             prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
                 b_col + (p + ku + KU) * n + j
             )
@@ -455,11 +481,12 @@ def _decode_fma_chunk_tail[
 def _decode_gemv[
     dtype: DType, //, KU: Int = 8,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # J-parallel GEMV optimized for decode (small M, large K×N).
-    #
-    # Each worker owns a disjoint column chunk of C and sweeps all K rows.
-    # Per-k working set ≈ (N/nw)*8 bytes of B + same for C, which fits L1
-    # (e.g. 2752×8 = 21 KB for N=11008, nw=4).  No reduction needed.
+    """J-parallel GEMV optimized for decode (small M, large K x N).
+
+    Each worker owns a disjoint column chunk of C and sweeps all K rows. The
+    per-k working set ~ (N/nw)*8 bytes of B + same for C fits L1 (e.g. 2752*8 =
+    21 KB for N=11008, nw=4), so B streams past exactly once and no reduction
+    is needed."""
     comptime assert KU > 0, "KU must be positive"
     comptime assert dtype.is_floating_point(), "GEMV requires floating-point dtype"
     comptime NELTS = simd_width_of[dtype]()
@@ -501,101 +528,26 @@ def _decode_gemv[
     parallelize(worker, nw, nw)
 
 
-def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
-    # Cache-aware KC for the prefill GEMM's large-M band.
-    #
-    # The L2-resident working set is the packed-B tile (TILE_N x KC elements),
-    # reused across every i-panel of a j-tile. Sizing that block at ~half of
-    # the per-core L2 (the BLIS rule of thumb) leaves the other half for the
-    # streaming packed-A micro-panel and the C accumulators.
-    #
-    # Driving KC from the detected L2 keeps the pick correct across machines:
-    # a 1 MB/core L2 yields KC=1024, a 2 MB/core L2 yields KC=2048. The caller
-    # snaps this budget to the kernel's KC ladder.
-    comptime elem = size_of[Scalar[dtype]]()
-    var l2 = l2_cache_size()
-    if l2 == 0:
-        # L2 undetectable (e.g. non-x86 without sysctl): pick a KC that fits a
-        # small (1 MB) L2.
-        return min(512, k)
-    var budget = (l2 // 2) // (tile_n * elem)
-    return min(budget, k)
+# ===========================================================================
+# No-pack kernels: serial (tiny) and M-parallel thin-N / small box
+#
+# Both read A and B straight from source — for a tiny or cache-resident shape
+# the data already fits L1/L2, so explicit packing buys nothing and the prefill
+# kernel's packing + thread-launch overhead would dominate. Both reuse
+# `RegisterTile` for the full MR-row panels and a 1-row tile for the M-tail.
+# ===========================================================================
 
 
-def _square_ish_kc(m: Int, n: Int, k: Int) -> Int:
-    # Per-L2-adaptive KC for the square-ish branch (n <= m). Square-ish wants
-    # HALF the BLIS half-L2 KC the wide/tall branches use, because here the M*KC
-    # packed-A competes with the packed-B tile for L2 (a box-shaped C is small,
-    # so a bigger KC buys little C-traffic saving while inflating packed-A). That
-    # works out to KC=512 on a 1 MB/core L2 and KC=1024 on a 2 MB/core L2 — and
-    # each is the measured best ON its machine, the opposite conclusions a single
-    # hardcoded KC can't satisfy: interleaved A/B (peak/25) gives Skylake (1 MB)
-    # KC512 > KC1024 (sq2048 0.84 vs 0.72, sq1024 0.84 vs 0.80), while the Xeon
-    # (2 MB) measured KC1024 > KC512 (sq768..2048 +3-6%).
-    #
-    # KC only matters when k > 512 (a smaller k is one <=512-wide panel either
-    # way), and a square-ish shape with k > 512 and M*N*K >= 2^28 is a multi-ms
-    # op where the l2_cache_size() probe (~6 cpuid -> ~61 us VM-exit on a KVM
-    # guest) is < 2.5%. Smaller shapes skip the probe entirely and take KC=512
-    # (the single-panel / small-L2-optimal pick) — keeping cpuid off the hot path
-    # for the few-us shapes, the lesson from the small-box gate.
-    if k <= 512 or m * n * k < (1 << 28):
-        return 512
-    return 1024 if l2_cache_size() >= (3 << 19) else 512
-
-
-def _box_l2_budget() -> Int:
-    # Upper bound (bytes of B = k*n) for routing an M-dominant box to the
-    # no-pack M-parallel _thin_n_gemm. That kernel re-reads the whole of B once
-    # per MR-row block, so B must stay L2-resident across the M-sweep; once B no
-    # longer fits, the packed prefill path wins. The small-box gate's first tier
-    # uses a COMPILE-TIME 512 KB cut (a quarter of this 2 MB-L2 part, half the
-    # 1 MB Skylake) so it never probes on the few-us cache-resident boxes. This
-    # second tier extends the route up the B range on a larger L2, where the
-    # newly-eligible boxes (B > 512 KB, so m*n*k in the tens of millions) are big
-    # enough that the one-time memoized cpuid is amortized to noise.
-    #
-    # Cut at L2/3, the re-measured crossover (interleaved A/B vs linalg on this
-    # 2.10 GHz Xeon, 2 MB/core L2, peak over 50 runs x3). The no-pack route
-    # re-reads ALL of B once per MR-row block, so B must stay L2-resident
-    # *alongside* the packed-A micro-panel, the C output, and the HW prefetcher's
-    # headroom across the whole M-sweep — that holds only while B occupies about
-    # a third of L2. Past that, B spills mid-sweep and the route collapses:
-    #   sq288 (B=648KB) nopack ~0.92-1.00 vs packed ~0.92  -> nopack (admit)
-    #   sq320 (B=800KB) nopack ~0.64-0.71 vs packed ~0.82-0.86 -> PACKED
-    #   sq352 (B=968KB) nopack ~0.55-0.58 vs packed ~0.77-0.95 -> PACKED
-    #   sq384 (B=1.15M) nopack ~0.42      vs packed ~0.89-0.92 -> PACKED
-    #   640x256x512 (B=1MB)   nopack 0.47 vs packed 0.86-0.91  -> PACKED
-    #   512x320x512 (B=1.28M) nopack 0.46-0.50 vs packed 0.83-0.87 -> PACKED
-    # The previous (2*L2)/3 = 1.33MB cut admitted sq320..sq416 and those tall
-    # boxes to no-pack, where they were the worst losses in the whole sweep
-    # (sq384 0.42); their earlier no-pack "wins" were measured on an older Mojo
-    # nightly whose linalg.matmul was slower — the current stdlib kernel retakes
-    # them, so the cut must tighten to L2/3 (= 682 KB here; admits sq288 at
-    # 648 KB, excludes sq320 at 800 KB). On the 1 MB Skylake L2/3 = 341 KB sits
-    # below the compile-time 512 KB tier-1 cut, so that part simply keeps no-pack
-    # for B <= 512 KB (sq288/sq320 there already preferred packed). Falls back to
-    # the compile-time 512 KB tier (no extension) when L2 is undetectable.
-    var l2 = l2_cache_size()
-    if l2 == 0:
-        return (1 << 19)
-    return l2 // 3
-
-
-def _matmul_small[
+def _serial_gemm[
     dtype: DType, MR: Int, NR_VECS: Int
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # Serial register-blocked GEMM for tiny shapes. No thread spawn, no buffer
-    # allocation, no A/B packing — for a handful-of-FLOPs matmul the prefill
-    # kernel's fixed overhead (parallelize launch + per-worker bp/ap allocs +
-    # packing) dwarfs the compute, so it runs 10-100x SLOWER than a plain
-    # serial loop here (e.g. an 8x8x8 ran 0.16 GFLOPS through the parallel path
-    # vs 14 GFLOPS serial). This kernel holds an MR x (NR_VECS*NELTS) register
-    # tile of C across the K loop, reading A and B straight from their source
-    # buffers (a tiny N/K stays L1-resident, so explicit packing buys nothing).
-    # Computes C = A * B (overwrites C). MR=6, NR_VECS=2 measured best on the
-    # 2.10 GHz Xeon across the captured band; correctness is bit-identical to
-    # the parallel kernels (verify_dispatch / max_err 0.0).
+    """Serial register-tiled GEMM for tiny shapes (no threads, no packing).
+
+    Below the dispatch's tiny cutoff the parallel kernels' fixed cost (thread
+    launch + per-worker buffers + packing) dwarfs the compute, running
+    10-100x slower than this plain serial loop (an 8x8x8 measured 0.16 GFLOPS
+    through the parallel path vs 14 GFLOPS here). Computes C = A * B; bit-
+    identical to the parallel kernels. MR=6, NR_VECS=2 measured best."""
     comptime NELTS = simd_width_of[dtype]()
     comptime NR = NR_VECS * NELTS
     var m = a.rows
@@ -607,12 +559,10 @@ def _matmul_small[
 
     var j = 0
     while j + NR <= n:
-        # Full MR-row register-blocked panels.
+        # Full MR-row register-tiled panels.
         var i = 0
         while i + MR <= m:
-            var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
-                fill=SIMD[dtype, NELTS](0)
-            )
+            var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
             for p in range(k):
                 var b_row = b_ptr + p * n + j
                 var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
@@ -623,27 +573,22 @@ def _matmul_small[
                 var a_vals = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
                 comptime for mr in range(MR):
                     a_vals[mr] = a_ptr[(i + mr) * k + p]
-                _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
-            comptime for mr in range(MR):
-                comptime for nv in range(NR_VECS):
-                    (c_ptr + (i + mr) * n + j).store(
-                        offset=nv * NELTS, val=acc[mr * NR_VECS + nv]
-                    )
+                tile.rank1_update(a_vals, bv)
+            tile.store(c_ptr + i * n + j, n)
             i += MR
         # M-remainder rows (m % MR): one row at a time, same NR-wide SIMD.
         while i < m:
-            var acc = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                fill=SIMD[dtype, NELTS](0)
-            )
+            var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
             for p in range(k):
                 var b_row = b_ptr + p * n + j
-                var av = SIMD[dtype, NELTS](a_ptr[i * k + p])
+                var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                    fill=SIMD[dtype, NELTS](0)
+                )
                 comptime for nv in range(NR_VECS):
-                    acc[nv] = av.fma(
-                        b_row.load[width=NELTS](offset=nv * NELTS), acc[nv]
-                    )
-            comptime for nv in range(NR_VECS):
-                (c_ptr + i * n + j).store(offset=nv * NELTS, val=acc[nv])
+                    bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
+                var a_vals = InlineArray[Scalar[dtype], 1](fill=a_ptr[i * k + p])
+                tile.rank1_update(a_vals, bv)
+            tile.store(c_ptr + i * n + j, n)
             i += 1
         j += NR
     # N-remainder columns (n % NR): vectorized tail over the full M extent,
@@ -667,22 +612,22 @@ def _matmul_small[
             vectorize[NELTS](n - jr, tail)
 
 
-def _thin_n_gemm[
+def _nopack_gemm[
     dtype: DType, MR: Int, NR_VECS: Int
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # M-parallel register-blocked GEMM with NO packing. Used for two regimes
-    # the N-parallel prefill kernel handles badly (see matmul_dispatch):
-    #   * thin-N (small N, large M*K): the prefill kernel parallelizes only over
-    #     N (j-tiles), so a thin N starves the cores — N=16 -> 1 j-tile -> 1 of 4
-    #     cores busy. Here the work is along M, so NR_VECS is 1-2 (NR=8/16).
-    #   * small box, M-dominant, B fits L2 (the sq96..sq256 gap): the prefill
-    #     kernel's A/B packing + per-worker buffers + parallelize-launch overhead
-    #     dwarfs the compute when the whole problem is cache-resident. Here NR=32
-    #     (NR_VECS=4) covers the wider-but-still-small N.
-    # Either way every core owns a disjoint band of C's rows and sweeps the full
-    # N, reading A and B straight from source — B stays cache-resident across the
-    # M-sweep so explicit packing buys nothing. Computes C = A * B (overwrites C);
-    # bit-identical to the serial/parallel paths.
+    """M-parallel register-tiled GEMM with NO packing, for two regimes the
+    N-parallel prefill kernel handles badly:
+
+      * thin-N (small N, large M*K): the prefill kernel parallelizes only over
+        N, so a thin N starves the cores (N=16 -> 1 j-tile -> 1 of 4 cores).
+        Here the work is along M, with NR_VECS 1-2 (NR=8/16).
+      * small M-dominant box whose B fits L2 (the sq96..256 gap): the prefill
+        kernel's packing + per-worker buffers + launch overhead dwarfs the
+        compute when the whole problem is cache-resident. Here NR=32 (NR_VECS=4).
+
+    Either way every core owns a band of C's rows and sweeps the full N, reading
+    A/B straight from source. Computes C = A * B; bit-identical to the other
+    paths."""
     comptime NELTS = simd_width_of[dtype]()
     comptime NR = NR_VECS * NELTS
     var m = a.rows
@@ -697,15 +642,12 @@ def _thin_n_gemm[
     def worker(blk: Int) {mut c_ptr, mut a_ptr, mut b_ptr, read m, read n, read k}:
         var i = blk * MR
         var r = min(MR, m - i)
-        # NR-wide register-blocked panels over the N tiles. A full MR-row block
-        # uses the comptime-unrolled MR path (each B-load reused across MR rows);
-        # a tail M-block (m % MR) falls back to one row at a time.
+        # A full MR-row block uses the comptime-unrolled MR tile (each B-load
+        # reused across MR rows); a tail block (m % MR) falls back to 1 row.
         if r == MR:
             var j = 0
             while j + NR <= n:
-                var acc = InlineArray[SIMD[dtype, NELTS], MR * NR_VECS](
-                    fill=SIMD[dtype, NELTS](0)
-                )
+                var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
                 for p in range(k):
                     var b_row = b_ptr + p * n + j
                     var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
@@ -718,33 +660,30 @@ def _thin_n_gemm[
                     )
                     comptime for mr in range(MR):
                         a_vals[mr] = a_ptr[(i + mr) * k + p]
-                    _fma_tile[dtype, MR, NR_VECS, NELTS](acc, a_vals, bv)
-                comptime for mr in range(MR):
-                    comptime for nv in range(NR_VECS):
-                        (c_ptr + (i + mr) * n + j).store(
-                            offset=nv * NELTS, val=acc[mr * NR_VECS + nv]
-                        )
+                    tile.rank1_update(a_vals, bv)
+                tile.store(c_ptr + i * n + j, n)
                 j += NR
         else:
             for ii in range(i, i + r):
                 var j2 = 0
                 while j2 + NR <= n:
-                    var acc = InlineArray[SIMD[dtype, NELTS], NR_VECS](
-                        fill=SIMD[dtype, NELTS](0)
-                    )
+                    var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
                     for p in range(k):
                         var b_row = b_ptr + p * n + j2
-                        var av = SIMD[dtype, NELTS](a_ptr[ii * k + p])
+                        var bv = InlineArray[SIMD[dtype, NELTS], NR_VECS](
+                            fill=SIMD[dtype, NELTS](0)
+                        )
                         comptime for nv in range(NR_VECS):
-                            acc[nv] = av.fma(
-                                b_row.load[width=NELTS](offset=nv * NELTS), acc[nv]
-                            )
-                    comptime for nv in range(NR_VECS):
-                        (c_ptr + ii * n + j2).store(offset=nv * NELTS, val=acc[nv])
+                            bv[nv] = b_row.load[width=NELTS](offset=nv * NELTS)
+                        var a_vals = InlineArray[Scalar[dtype], 1](
+                            fill=a_ptr[ii * k + p]
+                        )
+                        tile.rank1_update(a_vals, bv)
+                    tile.store(c_ptr + ii * n + j2, n)
                     j2 += NR
 
-        # N-remainder columns (n % NR < NR): scalar dot per (row, col). This is a
-        # tiny strip (NR is at most 16 cols) so a scalar tail costs nothing.
+        # N-remainder columns (n % NR < NR): scalar dot per (row, col). A tiny
+        # strip (NR <= 16 cols), so a scalar tail costs nothing.
         var jr = (n // NR) * NR
         for ii in range(i, i + r):
             var a_row = a_ptr + ii * k
@@ -757,83 +696,119 @@ def _thin_n_gemm[
     parallelize(worker, num_blocks, nw)
 
 
-@always_inline
-def _prefill[
-    dtype: DType, KC: Int, TILE_N: Int, SHARED_A: Bool = False
-](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """The SOTA packed prefill GEMM at its standard 6x(4*NELTS) register tile
-    (KU=2, NC_TILES=64). KC, TILE_N and SHARED_A are the only levers that vary
-    across shapes, so naming the rest here keeps each dispatch branch readable.
+# ===========================================================================
+# Cache-aware tile heuristics
+#
+# Each picks a KC (K-panel depth) or a routing budget from the detected L2 so
+# the working set stays cache-resident across machines. The measurement tables
+# behind these numbers live in the design notes at the foot of this file.
+# ===========================================================================
 
-    KU=2 (not 4): the 6x32 tile holds MR*NR_VECS = 24 SIMD accumulators, and the
-    comptime k-unroll keeps KU*NR_VECS B-vectors live per step. KU=2 needs
-    24 + 8 = 32 zmm registers — exactly the AVX-512 file — while KU=4 needs
-    24 + 16 = 40 and spills. Restoring KU=2 (it had drifted to 4 here) is
-    bit-identical (codegen-only; verify_dispatch max_err 0.0) and measured a
-    uniform +2-6% across the heavy-GEMM band, flipping the Qwen up-proj M>=256,
-    down-proj M=256 and h4k/ffn-up8k M=512 from LOSE to WIN — see README."""
-    comptime NELTS = simd_width_of[dtype]()
-    _prefill_gemm_v3[dtype, 6, 4 * NELTS, KC, 2, TILE_N, 64, SHARED_A](c, a, b)
+
+def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
+    """Cache-aware KC for the prefill GEMM's large-M band: size the L2-resident
+    packed-B tile (TILE_N x KC) at ~half the per-core L2 (the BLIS rule), leaving
+    the rest for the streaming packed-A panel and the C accumulators. A 1 MB/core
+    L2 yields KC=1024, a 2 MB/core L2 yields KC=2048; the caller snaps to its
+    KC ladder."""
+    comptime elem = size_of[Scalar[dtype]]()
+    var l2 = l2_cache_size()
+    if l2 == 0:
+        # L2 undetectable (e.g. non-x86 without sysctl): pick a KC for a 1 MB L2.
+        return min(512, k)
+    var budget = (l2 // 2) // (tile_n * elem)
+    return min(budget, k)
+
+
+def _square_ish_kc(m: Int, n: Int, k: Int) -> Int:
+    """Per-L2 KC for the square-ish branch: HALF the wide/tall branches' KC,
+    because here the M*KC packed-A competes with the packed-B tile for L2. Yields
+    KC=512 on a 1 MB/core L2 and KC=1024 on a 2 MB/core L2 — each the measured
+    best on its machine.
+
+    KC only matters when k > 512, and such a square-ish op (with M*N*K >= 2^28)
+    is multi-ms, so the l2_cache_size() probe is < 2.5%. Smaller shapes skip the
+    probe and take KC=512, keeping cpuid off the hot path for the few-us shapes."""
+    if k <= 512 or m * n * k < (1 << 28):
+        return 512
+    return 1024 if l2_cache_size() >= (3 << 19) else 512
+
+
+def _box_l2_budget() -> Int:
+    """Upper bound (bytes of B = k*n) for routing an M-dominant box to the no-pack
+    `_nopack_gemm`. That kernel re-reads all of B once per MR-row block, so B must
+    stay L2-resident *alongside* the packed-A panel, C, and prefetch headroom
+    across the whole M-sweep — which holds only while B is ~1/3 of L2. Past that
+    B spills mid-sweep and the packed prefill path wins, so cut at L2/3. Falls
+    back to a compile-time 512 KB tier when L2 is undetectable."""
+    var l2 = l2_cache_size()
+    if l2 == 0:
+        return (1 << 19)
+    return l2 // 3
+
+
+# ===========================================================================
+# Dispatch
+# ===========================================================================
 
 
 def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    # C = A * B, routed to the kernel + tile that measured fastest for the shape
-    # on this class of CPU (4c AVX-512 Xeon, f64). The full per-branch rationale
-    # and measurements live in README.md ("Dispatch logic"); the summary:
-    #
-    #   tiny  M*N*K < 2^19          _matmul_small  serial, no threads/packing
-    #   M == 1                      _decode_gemv   j-parallel GEMV, streams B once
-    #   M in 2..5                   prefill MR=M   pack B once, reuse across rows
-    #   thin-N  N<=64, M>=64        _thin_n_gemm   M-parallel, no packing
-    #   small box  M>=N, B fits L2  _thin_n_gemm   M-parallel, no packing
-    #   N <= 192                    prefill NR=16  narrow tile -> >= 4 j-tiles
-    #   square-ish  N <= M          prefill 6x32   L2-adaptive KC, SHARED_A
-    #   wide-N  N >= K              prefill 6x32   (8x24 only for N>=9k & M<=32)
-    #   tall-K  N < K               prefill 6x32   cache-aware KC by M band
-    #
-    # Every KC/TILE_N/tile pick is hardware-specific. The N<=M and m>=n gates keep
-    # the square-ish and no-pack routes off every wide headline shape (Qwen
-    # up/down proj are N >> M), where those kernels are catastrophic.
+    """C = A * B, routed to the kernel + tile that measured fastest for the shape
+    on a 4-core AVX-512 Xeon (f64):
+
+        tiny  M*N*K < 2^19          _serial_gemm   serial, no threads/packing
+        M == 1                      _decode_gemv   j-parallel GEMV, streams B once
+        M in 2..5                   packed MR=M    pack B once, reuse across rows
+        thin-N  N<=64, M>=64        _nopack_gemm   M-parallel, no packing
+        small box  M>=N, B fits L2  _nopack_gemm   M-parallel, no packing
+        N <= 192                    packed NR=16   narrow tile -> >= 4 j-tiles
+        square-ish  N <= M          packed 6x32    L2-adaptive KC, SHARED_A
+        wide-N  N >= K              packed 6x32    (8x24 only for N>=9k & M<=32)
+        tall-K  N < K               packed 6x32    cache-aware KC by M band
+
+    Every KC/TILE_N/tile pick is hardware-specific; the full per-branch rationale
+    and measurements live in README.md and the design notes at the foot of this
+    file. The N<=M and M>=N gates keep the square-ish and no-pack routes off every
+    wide headline shape (the Qwen up/down projections are N >> M), where those
+    kernels are catastrophic."""
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
     var k = a.cols
 
     if m * n * k < (1 << 19):
-        # Tiny total work: a plain serial register-blocked loop. Below ~2^19 MACs
-        # the parallel kernels' fixed cost (thread launch + per-worker packing
-        # buffers) dwarfs the compute (sq8..32 ran 0.03-0.17x linalg parallel vs
-        # 1.2-2.6x serial). Can never fire for a headline shape.
-        _matmul_small[dtype, 6, 2](c, a, b)
+        # Tiny: a plain serial register-tiled loop. Below ~2^19 MACs the parallel
+        # kernels' fixed cost dwarfs the compute (sq8..32 ran 0.03-0.17x linalg
+        # parallel vs 1.2-2.6x serial). Can never fire for a headline shape.
+        _serial_gemm[dtype, 6, 2](c, a, b)
     elif m == 1:
         # Pure decode GEMV: each worker owns an L1-resident column chunk of C and
         # streams B exactly once.
         _decode_gemv(c, a, b)
     elif m <= 5:
-        # Small-batch decode: the prefill micro-kernel with MR = M, so the packed
+        # Small-batch decode: the packed micro-kernel with MR = M, so the packed
         # B panel is streamed once and reused across all M rows (the GEMV would
         # re-stream B per row, ~2x slower at M=4). KU=2, TILE_N=8*NELTS.
         if m == 2:
-            _prefill_gemm_v3[dtype, 2, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+            _packed_gemm[dtype, 2, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
         elif m == 3:
-            _prefill_gemm_v3[dtype, 3, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+            _packed_gemm[dtype, 3, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
         elif m == 4:
-            _prefill_gemm_v3[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+            _packed_gemm[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
         else:
-            _prefill_gemm_v3[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+            _packed_gemm[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
     elif n <= NELTS * 8 and m >= 64:
         # Thin-N, tall-M (N <= 64): the work is along M, but the prefill kernel
-        # parallelizes only over N, so a thin N starves the cores. _thin_n_gemm
-        # parallelizes over M-row blocks instead, reading A/B straight from source
-        # (a thin N stays cache-resident, so packing buys nothing). Lifts the band
-        # from 0.10-0.58 to 0.80-1.27 vs linalg. NR_VECS=1 for sub-16-wide N so it
-        # still fills a SIMD panel; NR_VECS=2 otherwise.
+        # parallelizes only over N, starving the cores. _nopack_gemm parallelizes
+        # over M-row blocks, reading A/B from source (a thin N stays cache-
+        # resident, so packing buys nothing). Lifts the band from 0.10-0.58 to
+        # 0.80-1.27 vs linalg. NR_VECS=1 for sub-16-wide N; NR_VECS=2 otherwise.
         if n < 2 * NELTS:
-            _thin_n_gemm[dtype, 6, 1](c, a, b)
+            _nopack_gemm[dtype, 6, 1](c, a, b)
         else:
-            _thin_n_gemm[dtype, 6, 2](c, a, b)
+            _nopack_gemm[dtype, 6, 2](c, a, b)
     elif (
         m >= 64
         and m >= n
@@ -843,32 +818,27 @@ def matmul_dispatch[
         )
     ):
         # Small M-dominant box whose B stays L2-resident: same no-pack M-parallel
-        # kernel (NR=32). The packed prefill kernel's packing + thread-launch
-        # overhead dwarfs the compute on a cache-resident box (sq96..256 ran
-        # 0.65-0.79 packed; no-pack flips them to 1.0-1.18). The B-fits-L2 test is
-        # two tiered: a compile-time 512 KB cut (no cpuid on the few-us shapes)
-        # plus an L2-adaptive B <= L2/3 tier (_box_l2_budget). m >= n keeps it off
-        # every wide headline shape; m >= 64 gives enough row-blocks to fill 4c.
-        _thin_n_gemm[dtype, 6, 4](c, a, b)
+        # kernel (NR=32). The packed kernel's packing + launch overhead dwarfs the
+        # compute on a cache-resident box (sq96..256 ran 0.65-0.79 packed; no-pack
+        # flips them to 1.0-1.18). The B-fits-L2 test is two-tiered: a compile-time
+        # 512 KB cut (no cpuid on the few-us shapes) plus an L2-adaptive B <= L2/3
+        # tier (_box_l2_budget). m >= n keeps it off every wide headline shape.
+        _nopack_gemm[dtype, 6, 4](c, a, b)
     elif n <= 3 * 64:
-        # Narrow N (<= 192): at the default TILE_N=64 such an N is < 4 j-tiles, so
-        # the N-only parallelism idles most of a 4-core box. A narrow NR=16 /
-        # TILE_N=16 tile splits N into >= num_workers j-tiles (sq64 0.44->0.83).
-        _prefill_gemm_v3[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS, 64](c, a, b)
+        # Narrow N (<= 192): at TILE_N=64 such an N is < 4 j-tiles, idling most of
+        # a 4-core box. A narrow NR=16 / TILE_N=16 tile splits N into >= num_workers
+        # j-tiles (sq64 0.44->0.83). KU=4 here.
+        _packed_gemm[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS, 64](c, a, b)
     elif n <= m:
-        # Square-ish (192 < N <= M). The wide/tall branches' TILE_N=64 + big
-        # cache-aware KC fit a box-shaped C badly (few coarse j-tiles; a fat M*KC
-        # packed-A with no C-traffic saving to amortize it). A finer tile + smaller
-        # KC keep packed-A and packed-B L2-resident and multiply the j-tile count
-        # (sq512 0.74->0.88, sq2048 0.70->0.85). Two levers, each at its measured
-        # best per machine:
-        #   * KC by detected L2 (_square_ish_kc): 512 on a 1 MB/core L2, 1024 on
-        #     2 MB/core (the two machines reach opposite picks a constant can't).
-        #   * TILE_N by load balance (the #1 win lever): the fatter 8*NELTS only
-        #     when N tiles evenly across workers (>= 2 each), else the finer
-        #     4*NELTS, which collapses less on awkward N.
-        # SHARED_A: here A is as large as B/C, so packing it once (not per-worker)
-        # is a real win, unlike the wide/tall headline shapes where A is tiny.
+        # Square-ish (192 < N <= M). The wide/tall branches' TILE_N=64 + big KC
+        # fit a box-shaped C badly (few coarse j-tiles; a fat M*KC packed-A with no
+        # C-traffic saving to amortize it). A finer tile + smaller KC keep both
+        # packs L2-resident and multiply the j-tile count (sq512 0.74->0.88, sq2048
+        # 0.70->0.85). Two levers at their measured best:
+        #   * KC by detected L2 (_square_ish_kc): 512 on 1 MB/core, 1024 on 2 MB.
+        #   * TILE_N by load balance: the fatter 8*NELTS only when N tiles evenly
+        #     across workers (>= 2 each), else the finer 4*NELTS.
+        # SHARED_A: here A is as large as B/C, so packing it once is a real win.
         comptime TN_WIDE = 8 * NELTS
         comptime TN_FINE = 4 * NELTS
         var njt_wide = ceildiv(n, TN_WIDE)
@@ -886,13 +856,13 @@ def matmul_dispatch[
             else:
                 _prefill[dtype, 512, TN_FINE, True](c, a, b)
     elif n >= k:
-        # Wide-N (up-proj-like). The N-balanced 6x32 tile (TILE_N=8*NELTS=64, 32
-        # even j-tiles on N=2048) wins almost everywhere now that the masked
+        # Wide-N (up-proj-like). The N-balanced 6x32 tile (TILE_N=64, 32 even
+        # j-tiles on N=2048) wins almost everywhere now that the masked
         # M-remainder tail removed the MR-divides-M tax.
         if n >= 9 * 1024 and m <= 32:
             # The one corner where the older 8x24 tile still edges 6x32 by ~2-4%:
             # very wide N and tiny M (the Qwen up-proj small batch). KU=2.
-            _prefill_gemm_v3[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
+            _packed_gemm[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
         elif m <= 192:
             # Small-M band: KC=256, per-worker A pack (below the SHARED_A crossover
             # at M~192, so the M=96 headline keeps the byte-for-byte path).
@@ -936,3 +906,65 @@ def matmul_dispatch[
                 _prefill[dtype, 1024, 8 * NELTS, True](c, a, b)
             else:
                 _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
+
+
+# ===========================================================================
+# Design notes & benchmark rationale
+#
+# Relocated here from the function bodies so the kernels read cleanly. Numbers
+# are peak GFLOPS ratios vs Mojo's stdlib `linalg.matmul`, measured on the two
+# headline machines (Machine A: Intel Xeon Skylake 2.80 GHz, 1 MB/core L2;
+# Machine B: Intel Xeon 2.10 GHz, 2 MB/core L2; both 4 cores, AVX-512, KVM, f64).
+# Your numbers WILL differ — see AGENTS.md.
+#
+# --- _packed_gemm / SHARED_A ----------------------------------------------
+# By default every worker re-packs the FULL A (all i-panels) per k-panel into
+# its own buffer: num_workers redundant copies. On a wide/tall headline shape A
+# is small next to the N-sweep, so that redundancy is cheap L3 traffic (measured
+# a wash; the default keeps it). On a big SQUARE, A is as large as B/C and the
+# 4x re-pack is a real cost (sq2048: ~134 MB of redundant pack traffic/call).
+# SHARED_A packs A once up front (parallelized over i-panels) into a single
+# buffer keyed [i-panel][k][MR]; halves the packed-A footprint and removes the
+# redundant packing. Enabled from the square-ish branch (and large-M wide/tall),
+# so every byte-for-byte headline path is preserved.
+#
+# --- KU=2 (not 4) on the 6x32 tile ----------------------------------------
+# The 6x32 tile holds MR*NR_VECS = 24 SIMD accumulators, and the comptime
+# k-unroll keeps KU*NR_VECS B-vectors live per step. KU=2 needs 24 + 8 = 32 zmm
+# registers — exactly the AVX-512 file — while KU=4 needs 24 + 16 = 40 and
+# spills. KU=2 measured a uniform +2-6% across the heavy-GEMM band, flipping the
+# Qwen up-proj M>=256, down-proj M=256 and h4k/ffn-up8k M=512 from LOSE to WIN.
+#
+# --- masked partial-N panel (the old row-by-row tail) ---------------------
+# The partial NR-panel and the M-remainder both used to run a row-by-row
+# `vectorize` tail, sweeping K once per row with only NR_VECS-deep ILP — far too
+# shallow to hide FMA latency. N=11007 (rem=31) ran 0.86 vs linalg while the
+# multiple-of-NR N=11008 hit parity. Running the full-width register tile
+# (`_masked_microkernel`) and storing only the valid columns keeps any N (odd /
+# not a multiple of NR) at ~parity, and removed the MR-not-dividing-M tax (e.g.
+# 6x32 at M=256).
+#
+# --- _box_l2_budget: the L2/3 no-pack cut ---------------------------------
+# The no-pack route re-reads ALL of B once per MR-row block, so B must stay
+# L2-resident across the whole M-sweep — which holds only to ~1/3 of L2 (re-
+# measured interleaved A/B vs linalg, Machine B, peak over 50 runs x3):
+#   sq288 (B=648KB) nopack ~0.92-1.00 vs packed ~0.92  -> nopack (admit)
+#   sq320 (B=800KB) nopack ~0.64-0.71 vs packed ~0.82-0.86 -> PACKED
+#   sq352 (B=968KB) nopack ~0.55-0.58 vs packed ~0.77-0.95 -> PACKED
+#   sq384 (B=1.15M) nopack ~0.42      vs packed ~0.89-0.92 -> PACKED
+#   640x256x512 (B=1MB)   nopack 0.47 vs packed 0.86-0.91  -> PACKED
+#   512x320x512 (B=1.28M) nopack 0.46-0.50 vs packed 0.83-0.87 -> PACKED
+# A previous (2*L2)/3 ~= 1.33MB cut admitted sq320..sq416 + tall boxes to
+# no-pack, where they were the worst losses in the whole sweep (sq384 0.42);
+# their earlier no-pack "wins" were on an older Mojo nightly whose linalg was
+# slower and have since flipped. On the 1 MB Skylake, L2/3 = 341 KB sits below
+# the compile-time 512 KB tier-1 cut, so that part simply keeps no-pack for
+# B <= 512 KB (sq288/sq320 there already preferred packed).
+#
+# --- _square_ish_kc: opposite picks per machine ---------------------------
+# Interleaved A/B (peak/25) gives Machine A (1 MB) KC512 > KC1024 (sq2048 0.84
+# vs 0.72, sq1024 0.84 vs 0.80), while Machine B (2 MB) measured KC1024 > KC512
+# (sq768..2048 +3-6%) — opposite conclusions a single hardcoded KC can't satisfy.
+# The l2_cache_size() probe is ~6 cpuid -> ~61 us VM-exit on a KVM guest, < 2.5%
+# of a multi-ms square-ish op; smaller shapes skip it entirely.
+# ===========================================================================

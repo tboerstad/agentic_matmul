@@ -34,17 +34,22 @@ steps (naive, tiled, simd, parallel, register-blocked, packed, comptime, goto,
 and the v2 prefill kernel) have been removed. `matmul_dispatch` routes each
 shape to the fastest of these four:
 
-- **`_prefill_gemm_v3`** — the workhorse packed GEMM: per-worker A/B-panel
-  packing, an MR×NR register-tiled micro-kernel with hoisted B-loads + noalias,
-  a register-blocked masked tail for the M- and N-remainders, and an optional
-  shared single pack of A. All register-blocked kernels share the `_fma_tile`
-  inner step and the `_micro_masked` cold-path kernel.
+Every kernel is built on one shared abstraction, **`RegisterTile`** — an
+MR×(NR_VECS·NELTS) block of C held in SIMD registers and swept over K with
+`rank1_update`. The compiler flattens its `InlineArray` accumulator into
+registers, so the abstraction is zero-cost: the FMA/load/store it emits is
+byte-for-byte identical to a hand-numbered register nest. The four kernels:
+
+- **`_packed_gemm`** — the workhorse packed GEMM: per-worker A/B-panel
+  packing, the `RegisterTile` micro-kernel with hoisted B-loads + noalias,
+  a register-tiled masked tail (`_masked_microkernel`) for the M- and
+  N-remainders, and an optional shared single pack of A.
 - **`_decode_gemv`** — j-parallel GEMV with L1-resident column chunks and
   software prefetch, for decode shapes (M = 1). Streams B exactly once.
-- **`_thin_n_gemm`** — M-parallel, no-packing register-blocked kernel for the
+- **`_nopack_gemm`** — M-parallel, no-packing register-tiled kernel for the
   two regimes the N-parallel prefill kernel handles badly: thin-N (small N,
   large M·K) and small M-dominant boxes whose B stays L2-resident.
-- **`_matmul_small`** — serial register-blocked kernel for tiny shapes, where
+- **`_serial_gemm`** — serial register-tiled kernel for tiny shapes, where
   any thread launch / packing overhead dwarfs the compute.
 
 ## Dispatch logic
@@ -52,14 +57,14 @@ shape to the fastest of these four:
 `matmul_dispatch` routes each shape to the kernel and tile that measured best for
 it (see the comment in `matmul_dispatch` for the authoritative table):
 
-- `M·N·K < 2^19` (tiny): serial register-blocked `_matmul_small` — no thread
+- `M·N·K < 2^19` (tiny): serial register-tiled `_serial_gemm` — no thread
   launch, allocation, or packing. Avoids the fixed parallel-kernel overhead that
   made tiny GEMMs 7–30× slower than `linalg` (sq8 0.03× → 2.37× after).
 - `M == 1`: decode GEMV (streams B once).
-- `2 ≤ M ≤ 5`: v3 micro-kernel with `MR = M` — packs B once and reuses it across
-  all rows (vs the GEMV re-streaming all of B per row, ~2× slower at M=4).
+- `2 ≤ M ≤ 5`: the packed micro-kernel with `MR = M` — packs B once and reuses it
+  across all rows (vs the GEMV re-streaming all of B per row, ~2× slower at M=4).
 - **Small box, M-dominant, B fits L2** (`M ≥ 64`, `M ≥ N`, B = `K·N·8` fits L2):
-  M-parallel, no-packing `_thin_n_gemm` — each core owns a band of C's rows and
+  M-parallel, no-packing `_nopack_gemm` — each core owns a band of C's rows and
   sweeps the full N, reading A/B straight from source (B stays L2-resident, so
   packing buys nothing). The packed prefill kernel's packing + thread-launch
   overhead dwarfs the tiny compute on these cache-resident shapes; this branch
@@ -81,7 +86,7 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
   On a 1 MB-L2 part L2/3 = 341 KB sits below the 512 KB tier-1, so it keeps
   no-pack only for B ≤ 512 KB. The `M ≥ N` gate keeps it unreachable for every
   wide/headline shape (Qwen up/down proj are `N ≫ M`).
-- `M ≥ 6`: parallel `_prefill_gemm_v3` (N-parallel: each worker owns a band of
+- `M ≥ 6`: parallel `_packed_gemm` (N-parallel: each worker owns a band of
   j-tiles, reading the dominant B matrix from DRAM once into private L2). Tile and
   KC are selected per regime — narrow NR=16 for `N ≤ 192` (so a small N still
   splits into ≥ num_workers j-tiles), 8×24 only for very-wide-N small-M (Qwen
@@ -117,7 +122,7 @@ kernels see the same turbo/thermal state:
 
 ### Key findings from tuning
 
-The micro-kernel itself is not the bottleneck on most shapes: `_prefill_gemm_v3`
+The micro-kernel itself is not the bottleneck on most shapes: `_packed_gemm`
 and `linalg.matmul` compile to the same 6×32/8×24 register tile running
 `vfmadd231pd` at ~2 FMA/cycle. The wins and losses came from everything *around*
 it:
