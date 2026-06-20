@@ -23,8 +23,8 @@ All accessors return 0 when the value can't be determined, so callers should
 fall back to a sensible default in that case.
 
 Cache geometry is fixed for the life of the process, so the (relatively heavy)
-hardware probe — a `cpuid` enumeration on x86, a handful of `sysctlbyname`
-calls on macOS — runs at most once. The first accessor call detects the whole
+hardware probe runs at most once. That probe is a `cpuid` enumeration on x86 and
+a handful of `sysctlbyname` calls on macOS. The first accessor call detects the whole
 L1/L2/L3/line geometry in a single pass and memoizes it in a process-global via
 `_Global` (thread-safe, lazily initialized); every later call just reads the
 cached struct. This matters because the matmul dispatcher queries the L2 size
@@ -55,7 +55,7 @@ def cpuid(leaf: UInt32, subleaf: UInt32 = 0) -> CpuidResult:
     """Execute the x86 `cpuid` instruction.
 
     `leaf` is loaded into EAX and `subleaf` into ECX before the instruction;
-    the EAX/EBX/ECX/EDX outputs are returned. Only valid on x86 hosts — guard
+    the EAX/EBX/ECX/EDX outputs are returned. Only valid on x86 hosts, so guard
     callers with `CompilationTarget.is_x86()`.
     """
     return inlined_assembly[
@@ -248,8 +248,8 @@ struct CacheGeometry(Copyable, Movable):
 def _detect_cache_geometry() -> CacheGeometry:
     """Probe the hardware for the full cache geometry in a single pass.
 
-    Runs the platform-specific detection exactly once — `_Global` below makes
-    this the lazily-initialized backing store, so the `cpuid` walk / `sysctl`
+    Runs the platform-specific detection exactly once. `_Global` below makes
+    this the lazily-initialized backing store, so the `cpuid` walk and `sysctl`
     calls happen on the first accessor and never again.
     """
     comptime if CompilationTarget.is_macos():

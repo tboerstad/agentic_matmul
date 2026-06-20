@@ -58,7 +58,8 @@ Intel Xeon @ 2.10 GHz Granite Rapids; both 4 cores, AVX-512, KVM). Your results 
 
 ## Style preferences
 
-- When providing links to the user, always use raw plain text — never wrap in markdown bold (`**`) or other formatting
+- When providing links to the user, always use raw plain text. Do not wrap them in markdown bold (`**`) or other formatting
+- Write code comments and docstrings in plain human language. Avoid contrastive negations (the "not X, but Y" or "X, not Y" shape). Say the thing you mean directly. Avoid em-dashes; use a period, comma, or parentheses instead
 
 ## Creating a Pull Request
 
