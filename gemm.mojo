@@ -6,7 +6,12 @@ from std.collections import InlineArray
 from std.math import ceildiv, fma
 from std.memory import memset_zero
 from std.memory.unsafe_pointer import alloc
-from std.sys import num_physical_cores, simd_width_of, size_of
+from std.sys import (
+    CompilationTarget,
+    num_physical_cores,
+    simd_width_of,
+    size_of,
+)
 from std.sys.intrinsics import prefetch, PrefetchOptions
 
 
@@ -658,12 +663,11 @@ def _nopack_gemm[
     var m = a_view.rows
     var n = c_view.cols
     var k = a_view.cols
-    # All physical cores (incl. Apple E-cores): these boxes are small and
-    # cache-resident, so the compute per block is tiny and the E-cores never
-    # straggle; capping to P-cores here only idles 4 cores (sq128/sq256 lost
-    # ~30-44%). The straggler effect that the P-core cap fixes only bites the
-    # heavy packed kernel, which has enough work per block for E-core slowness
-    # to accumulate.
+    # All physical cores (incl. Apple E-cores): the boxes that reach this kernel
+    # are small and cache-resident (the Apple box-budget cut routes the heavier
+    # ones to the packed P-core path), so the compute per block is tiny, the
+    # E-cores never straggle, and capping to P-cores only idles 4 cores
+    # (P-core no-pack measured worse: sq256 0.82 vs 1.11, sq320 0.91 vs 1.04).
     var nw = num_physical_cores()
     var num_blocks = ceildiv(m, MR)
 
@@ -758,6 +762,18 @@ def _box_l2_budget() -> Int:
     var l2 = l2_cache_size()
     if l2 == 0:
         return (1 << 19)
+    comptime if CompilationTarget.is_apple_silicon():
+        # On Apple Silicon l2_cache_size() reports the cluster-shared L2 (16 MB
+        # on M4 Max), so the Intel per-core l2/3 rule (~5.6 MB here) wildly
+        # over-admits boxes to the no-pack route. That route skips packing but
+        # re-reads all of B once per MR-row block and runs on all cores (incl.
+        # the slow E-cores), so measured on M4 Max it only beats the packed
+        # P-core path for genuinely small boxes: it wins to ~sq320 (B 800 KB,
+        # ratio 1.04) and loses above (sq512 B 2 MB 0.76, box768 B 1 MB 0.73,
+        # box640 0.83), where the packed path is both algorithmically better
+        # (B packed once, reused) and P-core-only (no straggler). Cut at the
+        # measured ~900 KB crossover.
+        return (7 << 17)  # 896 KB
     return l2 // 3
 
 
