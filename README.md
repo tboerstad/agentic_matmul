@@ -123,7 +123,11 @@ kernels see the same turbo/thermal state:
   single-run count). Two recent levers: (1) the square-ish branch now picks KC
   by detected L2 (KC=512 on the 1 MB Skylake, KC=1024 on the 2 MB Xeon — each
   the measured best on its machine; a single hardcoded KC=1024 had sunk Skylake
-  sq2048 to ~0.72) plus a load-balance-aware TILE_N, holding the large squares at
+  sq2048 to ~0.72) plus a load-balance-aware TILE_N (wide 8·NELTS only at >= 4
+  wide j-tiles per worker, else the finer 4·NELTS — the fine tile's extra
+  j-tiles smooth the balance on the small squares: sq512, with 2 wide tiles per
+  worker, runs +2–4% on the fine tile, while sq1024/sq2048 keep the wide tile;
+  see DESIGN.md), holding the large squares at
   ~0.84 on Skylake / ~0.88–0.91 on the Xeon; (2) the small-box M-parallel route
   flipped the two worst shapes in the whole sweep — square sq96/sq128, which
   interleaved-A/B (peak/40) lifts 0.65–0.71 → 1.0–1.16 — plus the tall

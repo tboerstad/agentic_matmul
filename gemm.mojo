@@ -844,14 +844,21 @@ def matmul_dispatch[
         # packs L2-resident and multiply the j-tile count (sq512 0.74->0.88, sq2048
         # 0.70->0.85). Two levers at their measured best:
         #   * KC by detected L2 (_square_ish_kc): 512 on 1 MB/core, 1024 on 2 MB.
-        #   * TILE_N by load balance: the fatter 8*NELTS only when N tiles evenly
-        #     across workers (>= 2 each), else the finer 4*NELTS.
+        #   * TILE_N by load balance: the fatter 8*NELTS only when N gives each
+        #     worker plenty of wide j-tiles (>= 4 each), else the finer 4*NELTS.
+        #     With only a couple of wide tiles per worker, a single straggler
+        #     skews the whole op, so the finer tile (twice the j-tiles) smooths
+        #     the balance and outweighs its extra packed-A re-reads. Measured
+        #     interleaved A/B (peak/40, x4) on the 1 MB/core Skylake: sq512 (2
+        #     wide tiles/worker) runs ~2-4% faster on the fine tile, while
+        #     sq1024 (4/worker) is a wash and sq2048 (8/worker) prefers wide, so
+        #     the >= 4 cut keeps the big squares on wide and lifts only sq512.
         # SHARED_A: here A is as large as B/C, so packing it once is a real win.
         comptime TN_WIDE = 8 * NELTS
         comptime TN_FINE = 4 * NELTS
         var njt_wide = ceildiv(n, TN_WIDE)
         var num_workers = num_physical_cores()
-        var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 2
+        var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 4
         var kc = 1024 if _square_ish_kc(m, n, k) >= 1024 else 512
         if use_wide:
             if kc >= 1024:
