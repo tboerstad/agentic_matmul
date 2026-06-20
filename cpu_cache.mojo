@@ -35,7 +35,7 @@ on each call, and without memoization a decode/prefill loop would re-run the
 from std.collections import List
 from std.ffi import _Global, external_call
 from std.memory.unsafe_pointer import alloc
-from std.sys import CompilationTarget
+from std.sys import CompilationTarget, num_physical_cores
 from std.sys.intrinsics import inlined_assembly
 
 
@@ -313,3 +313,45 @@ def cache_line_size() -> Int:
     alignment and the inner-kernel stride in the matmul.
     """
     return _cached_geometry().line
+
+
+# --- compute-core topology (Apple Silicon big.LITTLE) -----------------------
+
+
+def _detect_compute_cores() -> Int:
+    """Number of cores to parallelize a compute-bound GEMM across.
+
+    On Apple Silicon the efficiency (E) cores run a compute-bound register-tiled
+    kernel at a fraction of the performance (P) core throughput. The kernels here
+    split the work in a static even share per worker, so handing an E-core the
+    same share as a P-core makes it the straggler the whole parallel region waits
+    on. Parallelizing across the P-cores only (read from `hw.perflevel0`) removes
+    that straggler. On x86 and Intel Macs every physical core is a peer, so this
+    is just `num_physical_cores()` and the whole Apple branch is elided at compile
+    time (so no `sysctl` call is ever linked there).
+    """
+    comptime if CompilationTarget.is_apple_silicon():
+        var p = _sysctl_size("hw.perflevel0.physicalcpu")
+        if p > 0:
+            return p
+    return num_physical_cores()
+
+
+# Memoized once, like the cache geometry above: this is queried on every matmul
+# dispatch, and a per-call `sysctl` would be the same hot-path hardware probe the
+# README warns against (cpuid sank a tiny GEMM to 0.19x when queried live).
+comptime _COMPUTE_CORES = _Global[
+    "agentic_matmul_compute_cores", _detect_compute_cores
+]
+
+
+def compute_core_count() -> Int:
+    """Performance-core count for compute-bound parallelism, memoized.
+
+    On Apple Silicon this is the P-core count; everywhere else it is
+    `num_physical_cores()` (see `_detect_compute_cores`).
+    """
+    try:
+        return _COMPUTE_CORES.get_or_create_ptr()[]
+    except:
+        return num_physical_cores()

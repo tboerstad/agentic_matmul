@@ -1,4 +1,4 @@
-from cpu_cache import l2_cache_size
+from cpu_cache import l2_cache_size, compute_core_count
 from matrix import Matrix
 from tile import Tile
 from std.algorithm.functional import parallelize, vectorize
@@ -255,7 +255,7 @@ def _packed_gemm[
 
     var num_j_tiles = ceildiv(n, TILE_N)
     var num_i_panels = ceildiv(m, MR)
-    var num_workers = num_physical_cores()
+    var num_workers = compute_core_count()
 
     var num_nr_panels = ceildiv(TILE_N, NR)
     var bp_per_worker = num_nr_panels * KC * NR + KU * NR
@@ -658,6 +658,12 @@ def _nopack_gemm[
     var m = a_view.rows
     var n = c_view.cols
     var k = a_view.cols
+    # All physical cores (incl. Apple E-cores): these boxes are small and
+    # cache-resident, so the compute per block is tiny and the E-cores never
+    # straggle; capping to P-cores here only idles 4 cores (sq128/sq256 lost
+    # ~30-44%). The straggler effect that the P-core cap fixes only bites the
+    # heavy packed kernel, which has enough work per block for E-core slowness
+    # to accumulate.
     var nw = num_physical_cores()
     var num_blocks = ceildiv(m, MR)
 
@@ -870,7 +876,7 @@ def matmul_dispatch[
         comptime TN_WIDE = 8 * NELTS
         comptime TN_FINE = 4 * NELTS
         var njt_wide = ceildiv(n, TN_WIDE)
-        var num_workers = num_physical_cores()
+        var num_workers = compute_core_count()
         var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 4
         var kc = 1024 if _square_ish_kc(m, n, k) >= 1024 else 512
         if use_wide:
