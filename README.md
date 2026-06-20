@@ -81,7 +81,15 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
   packing buys nothing). The packed prefill kernel's packing + thread-launch
   overhead dwarfs the tiny compute on these cache-resident shapes; this branch
   pays none of it. Fixes the worst shapes in the general sweep — sq128 0.65→1.0,
-  sq96 0.71→1.16, 512×128×512 0.56→0.84. The B-fits-L2 test is **L2-adaptive**:
+  sq96 0.71→1.16, 512×128×512 0.56→0.84. The tile **MR is picked per shape so it
+  divides M with no leftover-row tail**: MR=6 (24 accumulators, deepest ILP) when
+  `M % 6 == 0`, else MR=4 (16 accumulators, still deep enough to hide FMA
+  latency, and divides every multiple-of-4 box). An M not divisible by MR ran its
+  tail one row at a time (a 1×NR tile) far below the MR-row throughput, which made
+  sq256 (M%6=4) the single worst shape in the robust peak sweep (~0.84); MR=4
+  brings it to ~0.95, 512×128×512 0.89→0.97, 256×128×512 0.97→1.08, while the
+  M%6==0 boxes (sq96, sq192) keep MR=6. See DESIGN.md. The B-fits-L2 test is
+  **L2-adaptive**:
   a compile-time 512 KB tier (kept cpuid-free for the few-µs tiny boxes) plus a
   `B ≤ L2/3` tier (`_box_l2_budget`, only reached once B > 512 KB, where the op
   is large enough that the one-time memoized cpuid is free). The no-pack route
@@ -131,10 +139,15 @@ kernels see the same turbo/thermal state:
   ~0.84 on Skylake / ~0.88–0.91 on the Xeon; (2) the small-box M-parallel route
   flipped the two worst shapes in the whole sweep — square sq96/sq128, which
   interleaved-A/B (peak/40) lifts 0.65–0.71 → 1.0–1.16 — plus the tall
-  cache-resident boxes (512×128×512 0.56→0.84, 256×128×512 0.63→0.90). Residual
-  losses are the mid/large squares (sq256 ~0.80, sq512 ~0.81) and low-arithmetic-
+  cache-resident boxes (512×128×512 0.56→0.84, 256×128×512 0.63→0.90); a later
+  MR-divides-M tile pick on that route (MR=6 only when M%6==0, else MR=4) lifted
+  the no-tail-divisible boxes another step — sq256, the single worst shape in the
+  robust peak sweep at ~0.84, to ~0.95, and 256×128×512 to ~1.08 (see the
+  small-box bullet above and DESIGN.md). Residual losses are the mid/large packed
+  squares (sq512 ~0.96, sq768/1024 ~0.93–0.97 at robust peak) and low-arithmetic-
   intensity corners (K=128, odd N/K) where `linalg`'s masked AVX-512 remainder
-  handling wins.
+  handling wins. The big-square gap is algorithmic (pack/compute overlap or
+  M-blocking), not a tile pick.
 
 ### Key findings from tuning
 

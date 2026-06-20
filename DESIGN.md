@@ -63,6 +63,38 @@ the bigger squares, where the wide tile's lower packed-A traffic wins, on wide.
 An earlier `>= 2` cut sent sq512 to the wide tile and left that ~2–4% on the
 table. Bit-identical either way (same kernel, different TILE_N).
 
+## `_nopack_gemm` MR: divide M with no tail
+
+The no-pack small-box kernel splits M into MR-row register-tiled blocks; an M
+not divisible by MR leaves a tail block that runs one row at a time (a `1 x NR`
+tile), far below the MR-row block's throughput. MR=6 (24 SIMD accumulators, the
+deepest ILP that still fits the register file) is best when it divides M
+cleanly, but the cache-resident box shapes are mostly multiples of 4 that are
+not multiples of 6 (128, 256, 512), so MR=6 leaves a 2-to-4-row tail on each.
+MR=4 (16 accumulators, still deep enough to hide FMA latency) divides every
+multiple-of-4 box with no tail. The dispatch picks MR=6 when `M % 6 == 0`, else
+MR=4.
+
+Measured interleaved peak vs linalg on the 1 MB/core Skylake (the worst small
+boxes were the worst shapes in the whole sweep at peak):
+
+| Shape | M%6 | MR=6 | MR=4 | MR |
+|---|---|---|---|---|
+| sq96 | 0 | 1.13-1.17 | 1.09-1.12 | 6 |
+| sq192 | 0 | 1.00 | 0.93-0.94 | 6 |
+| sq128 | 2 | 1.00-1.06 | 1.01-1.09 | 4 |
+| sq256 | 4 | 0.83-0.89 | 0.89-0.97 | 4 |
+| 512x128x512 | 2 | 0.88-0.89 | 0.95-0.97 | 4 |
+| 256x128x512 | 4 | 0.95-0.97 | 1.08-1.09 | 4 |
+| 512x256x256 | 2 | 0.90-0.91 | 0.91-0.93 | 4 |
+
+The `M % 6` rule picks the faster tile in every measured box: MR=6 keeps the
+two M%6==0 squares (more ILP, no tail either way), MR=4 lifts the rest by
+removing the slow one-row tail. sq256 was the single worst shape in the robust
+peak sweep (~0.84); MR=4 brings it to ~0.95. The big-square gap (packed sq512
+and up, ~0.93-0.97) is untouched: that residual is algorithmic (it needs
+pack/compute overlap or M-blocking), not a tile pick.
+
 ## `_box_l2_budget`: the L2/3 no-pack cut
 
 The no-pack route re-reads ALL of B once per MR-row block, so B must stay

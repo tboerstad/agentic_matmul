@@ -831,7 +831,20 @@ def matmul_dispatch[
         # flips them to 1.0-1.18). The B-fits-L2 test is two-tiered: a compile-time
         # 512 KB cut (no cpuid on the few-us shapes) plus an L2-adaptive B <= L2/3
         # tier (_box_l2_budget). m >= n keeps it off every wide headline shape.
-        _nopack_gemm[dtype, 6, 4](c, a, b)
+        #
+        # MR splits M into register-tiled row blocks; an M not divisible by MR
+        # leaves a tail that runs one row at a time (1 x NR accumulators), far
+        # below the MR-row block's throughput. MR=6 (24 accumulators, the most
+        # ILP) when it divides M cleanly, else MR=4 (16 accumulators, still deep
+        # enough to hide FMA latency), which divides every multiple-of-4 box with
+        # no tail. Measured interleaved peak vs linalg on the 1 MB/core Skylake:
+        # sq256 0.83->0.89, 512x128x512 0.89->0.97, 256x128x512 0.97->1.08, while
+        # M%6==0 boxes (sq96, sq192) keep MR=6 (sq96 1.17, sq192 1.00). See
+        # DESIGN.md.
+        if m % 6 == 0:
+            _nopack_gemm[dtype, 6, 4](c, a, b)
+        else:
+            _nopack_gemm[dtype, 4, 4](c, a, b)
     elif n <= 3 * 64:
         # Narrow N (<= 192): at TILE_N=64 such an N is < 4 j-tiles, idling most of
         # a 4-core box. A narrow NR=16 / TILE_N=16 tile splits N into >= num_workers
