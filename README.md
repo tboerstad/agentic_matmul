@@ -152,6 +152,11 @@ measured rationale in `DESIGN.md`; in short:
   2^19 so they stay serial.
 - **Decode GEMV on P-cores** too (bandwidth-bound, but the E-cores contend
   rather than add bandwidth).
+- **SHARED_A (pack A once) down to the small-M band.** The M≥192 crossover was
+  set for 4 Xeon cores; the per-worker re-pack is `(workers − 1)×` redundant, so
+  on 10 P-cores it pays below the headline band. Enabled for the wide-N (M≤192)
+  and tall-K small-M branches: both Qwen M=96 headlines improve (up-proj
+  1.11→1.20, down-proj 1.20→1.27).
 
 The 6×(4·NELTS) register tile needs no change: `NELTS` auto-scales (2 for f64
 NEON, 8 for AVX-512) and the 24-accumulator / KU=2 tile fills the 32-register

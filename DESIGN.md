@@ -129,7 +129,7 @@ of a multi-ms square-ish op; smaller shapes skip it entirely.
 
 The kernels were tuned on 4-core AVX-512 Xeons; the constants above are x86.
 Apple Silicon differs on three axes that the original picks get wrong, so the
-four adaptations below are each behind `comptime CompilationTarget.is_apple_silicon()`
+five adaptations below are each behind `comptime CompilationTarget.is_apple_silicon()`
 and compile away to the byte-for-byte x86 path off Apple. NELTS auto-scales
 (2 for f64 NEON vs 8 for AVX-512), so the register tile is already correct: the
 6×(4·NELTS) tile is 24 SIMD accumulators on both, and with KU=2 it needs 32
@@ -179,6 +179,17 @@ thermal-normalized metric (see `bench_focus.mojo`).
    shape (1×11008×2048 ratio 1.52→1.6–1.8). Sub-P-core counts are no better
    (nw=4 dropped to ~half), so the residual gap to OpenBLAS's 1-thread GEMV is
    per-core micro-kernel efficiency, not the worker count.
+
+5. **SHARED_A down to the small-M band.** SHARED_A packs the full A once instead
+   of having every N-worker re-pack it; the M≥192 crossover where that starts to
+   pay was measured on a 4-core Xeon. The per-worker re-pack is
+   `(num_workers − 1)×` redundant, so on 10 P-cores it is ~10× rather than ~4×,
+   and the crossover drops below the small-M headline band. Enabled for the
+   wide-N (M≤192) and tall-K (65≤M<192) small-M branches on Apple. Positive on
+   every small-M shape measured (peak over 150 runs, the effect was inside the
+   noise at n=60 and only resolved at n=150): up-proj M=96 1.11→1.20, M=192
+   1.12→1.16; down-proj M=96 1.20→1.27, M=160 1.10→1.18. Both Qwen headline
+   shapes are M=96, so this is a direct headline win on top of adaptation 1.
 
 What did **not** move on Apple (all within the noise floor, so left at the x86
 pick): the large-band KC (the 16 MB shared L2 keeps even KC=2048 resident), the

@@ -804,13 +804,16 @@ def matmul_dispatch[
     wide headline shape (the Qwen up/down projections are N >> M), where those
     kernels are catastrophic.
 
-    On Apple Silicon (big.LITTLE + cluster-shared L2) four picks are overridden
+    On Apple Silicon (big.LITTLE + cluster-shared L2) five picks are overridden
     behind `comptime CompilationTarget.is_apple_silicon()`, so x86 is unchanged:
     the heavy kernels and the decode GEMV parallelize over P-cores only
     (`compute_core_count()`, so the slow E-cores do not straggle), the no-pack
     box budget is capped (l2_cache_size() is the cluster-shared L2, not
-    per-core), and the tiny serial cutoff drops to 2^18 for M >= 64. See
-    DESIGN.md "Apple Silicon" for the measured rationale."""
+    per-core), the tiny serial cutoff drops to 2^18 for M >= 64, and SHARED_A
+    (pack A once) extends down to the small-M band (10 P-cores make the
+    per-worker re-pack ~10x redundant, so the M>=192 Xeon crossover drops below
+    the headline band). See DESIGN.md "Apple Silicon" for the measured
+    rationale."""
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
