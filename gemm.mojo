@@ -529,7 +529,7 @@ def _decode_gemv[
     var m = a_view.rows
     var n = c_view.cols
     var k = a_view.cols
-    var nw = num_physical_cores()
+    var nw = compute_core_count()
 
     memset_zero(c_view.ptr, m * n)
 
