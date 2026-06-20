@@ -139,10 +139,9 @@ def _masked_microkernel[
     the unmasked full kernel, so this one function also serves the full-panel
     M-remainder.
 
-    `c_block` is the block's view into C (its top-left is the (i, j0+jr) corner,
-    rows c_block.stride == n apart); `a_block` is the matching view into A (corner
-    (i, pc), rows k apart) — both `sub`-views, so the kernel speaks in tiles
-    instead of `c_ptr + i*n + j0 + jr` pointer math.
+    `c_block`/`a_block` are `sub`-views onto the block's corner — (i, j0+jr) in C,
+    (i, pc) in A — so the kernel reads C via `c_block.row(mr)` and A via
+    `a_block.row(mr)[pk]` instead of `c_ptr + i*n + j0 + jr` pointer math.
     """
     var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
     if not is_first_k:
