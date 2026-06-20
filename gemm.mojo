@@ -808,8 +808,18 @@ def matmul_dispatch[
     var n = c.cols
     var k = a.cols
 
-    if m * n * k < (1 << 19):
-        # Tiny: a plain serial register-tiled loop. Below ~2^19 MACs the parallel
+    # Tiny cutoff (MACs below which the serial loop beats the parallel kernels'
+    # fixed launch/packing overhead). 2^19 on x86. On Apple Silicon the parallel
+    # launch is cheap enough that a shape with enough M-row blocks to fill the
+    # cores (m >= 64, the no-pack box branch's own floor) wants parallelism well
+    # below 2^19: sq64/sq80 ran 0.29-0.55 serial vs ~0.6-0.8 parallel, so they
+    # take the 2^18 cutoff. A small-M shape (m < 64) has too few row blocks to
+    # parallelize (e.g. 8x8x4096 stays serial), so it keeps the 2^19 cutoff. On
+    # x86 both arms are 2^19, byte-for-byte unchanged.
+    comptime APPLE = CompilationTarget.is_apple_silicon()
+    var tiny_macs = (1 << 18) if (APPLE and m >= 64) else (1 << 19)
+    if m * n * k < tiny_macs:
+        # Tiny: a plain serial register-tiled loop. Below the cutoff the parallel
         # kernels' fixed cost dwarfs the compute (sq8..32 ran 0.03-0.17x linalg
         # parallel vs 1.2-2.6x serial). Can never fire for a headline shape.
         _serial_gemm[dtype, 6, 2](c, a, b)
