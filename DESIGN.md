@@ -41,6 +41,28 @@ multiple-of-NR N=11008 hit parity. Running the full-width register tile
 a multiple of NR) at ~parity, and removed the MR-not-dividing-M tax (e.g. 6×32 at
 M=256).
 
+## `_square_ish` TILE_N: the wide-tiles-per-worker cut
+
+The square-ish branch picks between a wide `TILE_N` (8·NELTS, 64) and a fine one
+(4·NELTS, 32). The wide tile packs B in fewer, fatter j-tiles (less packed-A
+re-reading); the fine tile doubles the j-tile count, which smooths load balance
+when each worker owns only a couple of tiles. The cut is the count of wide
+j-tiles per worker: take the wide tile only at >= 4 each, else the fine tile.
+
+Measured interleaved A/B (the two tiles plus linalg in one loop, peak/40 ×4) on
+the 1 MB/core Skylake:
+
+| Shape | wide tiles/worker | TN32 vs TN64 | tile |
+|---|---|---|---|
+| sq512 | 2 | TN32 +2–4% (robust) | fine |
+| sq1024 | 4 | wash (±2%) | wide |
+| sq2048 | 8 | TN64 +1–2% (robust) | wide |
+
+So the >= 4 cut lifts only sq512 (the worst square) onto the fine tile and keeps
+the bigger squares, where the wide tile's lower packed-A traffic wins, on wide.
+An earlier `>= 2` cut sent sq512 to the wide tile and left that ~2–4% on the
+table. Bit-identical either way (same kernel, different TILE_N).
+
 ## `_box_l2_budget`: the L2/3 no-pack cut
 
 The no-pack route re-reads ALL of B once per MR-row block, so B must stay
