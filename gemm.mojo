@@ -934,7 +934,10 @@ def matmul_dispatch[
         elif m <= 192:
             # Small-M band: KC=256, per-worker A pack (below the SHARED_A crossover
             # at M~192, so the M=96 headline keeps the byte-for-byte path).
-            _prefill[dtype, 256, 8 * NELTS](c, a, b)
+            comptime if CompilationTarget.is_apple_silicon():
+                _prefill[dtype, 256, 8 * NELTS, True](c, a, b)  # EXPERIMENT
+            else:
+                _prefill[dtype, 256, 8 * NELTS](c, a, b)
         elif m <= 288:
             # Past the SHARED_A crossover: pack A once (+3%, up-proj M=256).
             _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
@@ -964,7 +967,10 @@ def matmul_dispatch[
             if m >= 192:
                 _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
             else:
-                _prefill[dtype, 512, 8 * NELTS](c, a, b)
+                comptime if CompilationTarget.is_apple_silicon():
+                    _prefill[dtype, 512, 8 * NELTS, True](c, a, b)  # EXPERIMENT
+                else:
+                    _prefill[dtype, 512, 8 * NELTS](c, a, b)
         else:
             # Large M: cache-aware KC (1024 on 1 MB/core L2, 2048 on 2 MB/core).
             var kc = _l2_resident_kc[dtype](64, k)
