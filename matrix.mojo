@@ -32,7 +32,7 @@ struct Matrix[dtype: DType = DType.float64](Movable):
 
     @staticmethod
     def from_rows(rows: List[List[Scalar[Self.dtype]]]) -> Self:
-        """Build a matrix from a list of equal-length rows — for tests and demos
+        """Build a matrix from a list of equal-length rows, for tests and demos
         that would otherwise assign element by element."""
         var r = len(rows)
         var c = len(rows[0]) if r > 0 else 0
@@ -65,7 +65,7 @@ struct Matrix[dtype: DType = DType.float64](Movable):
         return Tile(self.data.unsafe_ptr(), self.rows, self.cols, self.cols)
 
     def noalias_view(ref self) -> Tile[Self.dtype, origin_of(self.data)]:
-        """The whole matrix as a `Tile` over a *noalias* pointer — the handle the
+        """The whole matrix as a `Tile` over a *noalias* pointer, the handle the
         kernels work from. Each GEMM operand is a distinct matrix viewed once, so
         the noalias contract (nothing else writes through an aliasing pointer)
         holds, and it widens LLVM's hoisting across the hot loops."""

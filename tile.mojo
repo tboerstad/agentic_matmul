@@ -4,17 +4,18 @@ from std.sys import simd_width_of
 # ===========================================================================
 # Tile: a window into a row-major buffer
 #
-# The kernels in gemm.mojo speak in raw offsets — `c_ptr + i * n + j0 + jr`,
-# `a_ptr[(i + mr) * k + pc + pk]`, `bp_worker + jp * kc * NR + pk * NR`. Each is
-# correct and each hides what it means behind arithmetic. A `Tile` names that
-# arithmetic once: a rows x cols rectangle whose rows are `stride` elements apart
-# (the *parent* row width), so a sub-block of a bigger matrix is just a Tile with
-# a smaller extent over the same buffer — no copy.
+# Without it the kernels in gemm.mojo would index B and C by raw offset, like
+# `c_ptr + i * n + j0 + jr` or `bp_worker + jp * kc * NR + pk * NR`. Each offset
+# is correct, and each hides its meaning behind arithmetic. A `Tile` names that
+# arithmetic once: a rows x cols rectangle whose rows sit `stride` elements apart
+# (the parent row width). A sub-block of a bigger matrix is then a Tile with a
+# smaller extent over the same buffer, no copy involved.
 #
-# Every method is `@always_inline` and does only the add/multiply the kernel
-# would write by hand, so a Tile is a zero-cost rename, the same bet `RegisterTile`
-# makes for the accumulator. The kernels get theirs from `Matrix.noalias_view()`
-# once at the top and work from that — no raw pointers, no re-wrapping in loops.
+# Every method is `@always_inline` and does only the add and multiply the kernel
+# would write by hand, so a Tile is a zero-cost rename (the same bet RegisterTile
+# makes for the accumulator). Each kernel takes its tiles from
+# `Matrix.noalias_view()` once at the top and works from those, with no raw
+# pointers and no re-wrapping in loops.
 # ===========================================================================
 
 
@@ -44,7 +45,7 @@ struct Tile[dtype: DType, origin: Origin](Copyable & Movable):
 
     @always_inline
     def tile[R: Int, C: Int](self, bi: Int, bj: Int) -> Self:
-        """The (bi, bj)-th R x C block — sugar for `sub(bi*R, bj*C)` that also
+        """The (bi, bj)-th R x C block. Sugar for `sub(bi*R, bj*C)` that also
         carries the R x C extent. For loops that step in whole tiles (no-pack,
         serial), `c.tile[MR, NR](i // MR, j // NR)` reads as the block it is."""
         return Self(
@@ -60,5 +61,5 @@ struct Tile[dtype: DType, origin: Origin](Copyable & Movable):
     def addr(self, r: Int, c: Int) -> UnsafePointer[
         Scalar[Self.dtype], Self.origin
     ]:
-        """Pointer to element (r, c) — the base a strided operand loader walks."""
+        """Pointer to element (r, c), the base a strided operand loader walks."""
         return self.ptr + r * self.stride + c

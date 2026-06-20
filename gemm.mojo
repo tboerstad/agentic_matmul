@@ -17,7 +17,7 @@ from std.sys.intrinsics import prefetch, PrefetchOptions
 # block of C entirely in SIMD registers, sweep it over K with rank-1 updates,
 # then write it back once. `RegisterTile` is that block. Its accumulator is an
 # `InlineArray` the compiler flattens into registers, so each method is a
-# zero-cost abstraction — after `@always_inline` the tile emits exactly the
+# zero-cost abstraction. After `@always_inline` the tile emits exactly the
 # FMA/load/store nest you would otherwise hand-write and hand-number. Naming it
 # once lets each kernel below express only its own packing and loop scaffolding.
 # ===========================================================================
@@ -43,7 +43,7 @@ struct RegisterTile[dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int](
         a_col: InlineArray[Scalar[Self.dtype], Self.MR],
         b_row: InlineArray[SIMD[Self.dtype, Self.NELTS], Self.NR_VECS],
     ):
-        """C_tile += a_col (x) b_row — one K-step. Broadcast each of the MR A
+        """C_tile += a_col (x) b_row, one K-step. Broadcast each of the MR A
         scalars across the NR_VECS B vectors and FMA into the tile. This is the
         single inner step shared by every kernel here. It takes SIMD values
         only (no pointers), so it can never perturb the noalias B-load hoisting
@@ -82,7 +82,7 @@ struct RegisterTile[dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int](
 #
 # Every K-step in every kernel feeds `rank1_update` the same pair: NR_VECS
 # contiguous B vectors and MR A scalars. These two `@always_inline` loaders name
-# that gather once. Like the tile itself they are zero-cost — the comptime loop
+# that gather once. Like the tile itself they are zero-cost: the comptime loop
 # over a register-flattened `InlineArray` lowers to the exact vmovupd nest you'd
 # hand-write, so every kernel's inner loop collapses to a single readable line:
 #
@@ -139,8 +139,8 @@ def _masked_microkernel[
     the unmasked full kernel, so this one function also serves the full-panel
     M-remainder.
 
-    `c_block`/`a_block` are `sub`-views onto the block's corner — (i, j0+jr) in C,
-    (i, pc) in A — so the kernel reads C via `c_block.row(mr)` and A via
+    `c_block`/`a_block` are `sub`-views onto the block's corner, (i, j0+jr) in C
+    and (i, pc) in A, so the kernel reads C via `c_block.row(mr)` and A via
     `a_block.row(mr)[pk]` instead of `c_ptr + i*n + j0 + jr` pointer math.
     """
     var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
@@ -181,7 +181,7 @@ def _masked_microkernel[
 
 
 # ===========================================================================
-# The packed prefill GEMM — the workhorse
+# The packed prefill GEMM: the workhorse
 # ===========================================================================
 
 
@@ -312,7 +312,7 @@ def _packed_gemm[
                 is_first_k = (pc == 0)
 
                 # Pack A: KC outer, MR inner so each pk gives MR contiguous
-                # doubles. Skipped under SHARED_A — A was packed once up front.
+                # doubles. Skipped under SHARED_A, since A was packed once up front.
                 var i = 0
                 var ip = 0
                 if not SHARED_A:
@@ -341,7 +341,7 @@ def _packed_gemm[
                             nr_actual = tile_n - last_jr
 
                     # Pack this j-tile's slab of B into [panel][k][NR] (a partial
-                    # trailing panel is zero-padded to full NR — see _pack_b_slab).
+                    # trailing panel is zero-padded to full NR, see _pack_b_slab).
                     _pack_b_slab[dtype, NR, NR_VECS, NELTS, PREFETCH_B_DIST](
                         b_view, bp_worker, pc, j0, kc,
                         last_full_panel, has_remainder, nr_actual,
@@ -352,7 +352,7 @@ def _packed_gemm[
                         bp_panel = bp_worker + jp * kc * NR
 
                         if jr + NR > tile_n:
-                            # Partial NR-panel (tile_n not a multiple of NR — the
+                            # Partial NR-panel (tile_n not a multiple of NR, the
                             # last j-tile of an N-not-a-multiple-of-NR shape). The
                             # packed panel is zero-padded to full NR, so run the
                             # SAME register-tiled micro-kernel (the zero columns
@@ -425,7 +425,7 @@ def _packed_gemm[
 
                         # M-remainder (m % MR rows): one register-tiled block, a
                         # single K-sweep with r x NR_VECS accumulators reusing the
-                        # packed B panel at full NR width (jj_limit = NR — the
+                        # packed B panel at full NR width (jj_limit = NR, since the
                         # partial-tile case already `continue`d above).
                         if i < m:
                             _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
@@ -478,7 +478,7 @@ def _decode_fma_chunk_unrolled[
         comptime for ku in range(KU):
             # Prefetch the same columns of the next KU-block of B rows: the KU
             # streams are n*8 bytes apart, too far for the HW prefetcher. May
-            # reach past the end of B on the last block — prefetch is
+            # reach past the end of B on the last block. Prefetch is
             # architecturally non-faulting, so that is safe.
             prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
                 b_col + (p + ku + KU) * n + j
@@ -563,7 +563,7 @@ def _decode_gemv[
 # ===========================================================================
 # No-pack kernels: serial (tiny) and M-parallel thin-N / small box
 #
-# Both read A and B straight from source — for a tiny or cache-resident shape
+# Both read A and B straight from source. For a tiny or cache-resident shape
 # the data already fits L1/L2, so explicit packing buys nothing and the prefill
 # kernel's packing + thread-launch overhead would dominate. Both reuse
 # `RegisterTile` for the full MR-row panels and a 1-row tile for the M-tail.
@@ -731,7 +731,7 @@ def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
 def _square_ish_kc(m: Int, n: Int, k: Int) -> Int:
     """Per-L2 KC for the square-ish branch: HALF the wide/tall branches' KC,
     because here the M*KC packed-A competes with the packed-B tile for L2. Yields
-    KC=512 on a 1 MB/core L2 and KC=1024 on a 2 MB/core L2 — each the measured
+    KC=512 on a 1 MB/core L2 and KC=1024 on a 2 MB/core L2, each the measured
     best on its machine.
 
     KC only matters when k > 512, and such a square-ish op (with M*N*K >= 2^28)
@@ -746,7 +746,7 @@ def _box_l2_budget() -> Int:
     """Upper bound (bytes of B = k*n) for routing an M-dominant box to the no-pack
     `_nopack_gemm`. That kernel re-reads all of B once per MR-row block, so B must
     stay L2-resident *alongside* the packed-A panel, C, and prefetch headroom
-    across the whole M-sweep — which holds only while B is ~1/3 of L2. Past that
+    across the whole M-sweep, which holds only while B is ~1/3 of L2. Past that
     B spills mid-sweep and the packed prefill path wins, so cut at L2/3. Falls
     back to a compile-time 512 KB tier when L2 is undetectable."""
     var l2 = l2_cache_size()
@@ -919,8 +919,8 @@ def matmul_dispatch[
 # ===========================================================================
 # Design notes
 #
-# The "why" behind every tuning constant above — SHARED_A, KU=2, the masked
-# partial-N panel, the L2/3 no-pack cut, and the per-machine KC picks — lives in
+# The "why" behind every tuning constant above (SHARED_A, KU=2, the masked
+# partial-N panel, the L2/3 no-pack cut, and the per-machine KC picks) lives in
 # DESIGN.md, kept out of the source so the kernels read as code. README.md has
 # the per-branch dispatch table and the full benchmark results.
 # ===========================================================================

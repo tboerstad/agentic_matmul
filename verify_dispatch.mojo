@@ -2,8 +2,8 @@
 #
 # Exercises every dispatch branch and the packed micro-kernel's edge cases
 # (full MR panels, NR remainders, and M tails) across both projection
-# orientations. test_gemm.mojo only tests a local reference matmul, not the
-# real kernels, so this is the actual coverage for matmul_dispatch.
+# orientations. test_gemm.mojo covers only a local reference matmul, so this
+# file is where matmul_dispatch itself gets exercised.
 from gemm import matmul_dispatch
 from matrix import Matrix
 from std.math import abs
@@ -70,7 +70,7 @@ def main() raises:
     # Thin-N, tall-M branch (N <= 64, M >= 64 -> M-parallel _nopack_gemm). Cover
     # the NR_VECS=1 path (N < 2*NELTS), N at/over a multiple of 16, an N that is
     # NOT a multiple of NR (scalar N-remainder strip), and M values that exercise
-    # the MR=6 M-tail block — all across a K big enough to clear the wMNK cutoff.
+    # the MR=6 M-tail block, all across a K big enough to clear the wMNK cutoff.
     for i in range(len(ms)):
         check(ms[i], 16, 512)     # N=16, exactly one NR=16 panel
     for i in range(len(ms)):

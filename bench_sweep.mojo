@@ -8,12 +8,12 @@
 # Two modes (pick one on the command line):
 #
 #   mojo bench_sweep.mojo --iterate   (default)
-#       Fast, surgical pass over the CORNERS & EDGES of the (M,N,K) space —
+#       Fast, surgical pass over the CORNERS & EDGES of the (M,N,K) space,
 #       the shapes most likely to expose a dispatch/tiling weakness or a
 #       regression: square GEMMs (N==K branch boundary), N that doesn't tile
 #       evenly across the workers, odd N/K (remainder paths), small K (low
 #       arithmetic intensity), and the M dispatch thresholds (1, just-past
-#       small-batch, large). ~A few seconds of runtime — built for the
+#       small-batch, large). ~A few seconds of runtime, built for the
 #       edit-kernel -> remeasure dev loop.
 #
 #   mojo bench_sweep.mojo --full
@@ -22,8 +22,8 @@
 #       broad general (M,N,K) shape grid. Slower; run before committing a
 #       kernel change to confirm nothing regressed off the corners.
 #
-# The goal is a GENERAL-PURPOSE matmul, not a Qwen-specific one: the Qwen
-# shapes are included as two aspect ratios among many, not as the headline.
+# The goal is a general-purpose matmul. The Qwen shapes appear here as two
+# aspect ratios among many, with no special status in the sweep.
 from gemm import matmul_dispatch
 from matrix import Matrix
 from linalg.matmul import matmul as linalg_matmul
@@ -165,8 +165,8 @@ def run_full() raises:
     var ms = [1, 2, 4, 8, 16, 32, 64, 96, 128, 256, 512]
 
     # Per-M sweeps over four aspect ratios. Two are general (square, and a
-    # 4x wide-N / tall-K pair); two are the Qwen MLP orientations, kept as
-    # examples rather than the headline.
+    # 4x wide-N / tall-K pair); two are the Qwen MLP orientations, kept here as
+    # ordinary examples.
     var sq_l = List[String]()
     var sq_m = List[Int](); var sq_n = List[Int](); var sq_k = List[Int]()
     for i in range(len(ms)):
@@ -197,7 +197,7 @@ def run_full() raises:
             [2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048],
             [11008,11008,11008,11008,11008,11008,11008,11008,11008,11008,11008], n_runs)
 
-    # Broad general (M,N,K) grid — corner/edge shapes plus a few larger GEMMs.
+    # Broad general (M,N,K) grid: corner/edge shapes plus a few larger GEMMs.
     var g_l = [
         String("h4k-m128"), "h4k-m512", "ffn-up8k", "ffn-dn8k",
         "N4000   ", "N5504   ", "N-odd   ", "K-odd   ",
@@ -220,7 +220,7 @@ def run_full() raises:
     ]
     run_set("general (M,N,K) grid", g_l, g_m, g_n, g_k, n_runs)
 
-    # Thin-N, tall-M grid — the M-parallel _nopack_gemm branch (N <= 64, M >= 64).
+    # Thin-N, tall-M grid: the M-parallel _nopack_gemm branch (N <= 64, M >= 64).
     # The prefill kernel only parallelizes over N, so before this kernel these
     # ran the worst ratios in the whole sweep (0.10-0.58 vs linalg). Kept here as
     # permanent regression coverage for the M-parallel route.
@@ -242,7 +242,7 @@ def run_full() raises:
     ]
     run_set("thin-N tall-M grid (M-parallel branch)", tn_l, tn_m, tn_n, tn_k, n_runs)
 
-    # Small-box grid — the M-parallel no-pack _nopack_gemm[6,4] branch (m >= n,
+    # Small-box grid: the M-parallel no-pack _nopack_gemm[6,4] branch (m >= n,
     # n > 64, B = k*n*8 fits L2). Before this branch these cache-resident boxes
     # went to the packed prefill kernel, whose packing + thread-launch overhead
     # dwarfed the tiny compute: square sq96..sq256 ran 0.65-0.79 and tall boxes
@@ -250,10 +250,10 @@ def run_full() raises:
     # tiered: a compile-time 512 KB tier (always) plus an L2-adaptive B<=(2*L2)/3
     # tier (see _box_l2_budget). sq320 (B 800 KB) / sq352 (B 968 KB) therefore
     # route by L2: on a 1 MB/core L2 (e.g. Skylake) they stay PACKED (no-pack
-    # collapses there — sq320 0.52); on a 2 MB/core L2 (this Xeon) they take the
+    # collapses there, sq320 0.52); on a 2 MB/core L2 (this Xeon) they take the
     # no-pack route and WIN (interleaved A/B vs the packed path: sq320 1.35x,
     # sq352 1.16x; vs linalg ~1.0-1.02). 128x256x256 (m < n) MUST always stay on
-    # the packed path — _thin_n needs m >= n and collapses here (0.75-0.82).
+    # the packed path, since _thin_n needs m >= n and collapses here (0.75-0.82).
     var sb_l = [
         String("sb-sq96 "), "sb-sq128", "sb-sq192", "sb-sq256",
         "sb-512x128", "sb-256x128", "sb-512x256",
