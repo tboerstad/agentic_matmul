@@ -332,9 +332,15 @@ shapes flipped to the *worst* losses in the sweep, sq384 0.42; re-routing them
 back to packed lifts them to 0.78–0.95.)
 
 > **Methodology note:** ratios from a single `bench_sweep` run swing ±5–10% at
-> M ≥ 128 from turbo/thermal state on shared VMs. Judge micro-kernel changes with
-> an interleaved A/B of the two variants (peak GFLOPS over ~15–20 runs), never by
-> comparing absolute numbers across runs.
+> M ≥ 128 from turbo/thermal state on shared VMs, and we kept misreading those
+> swings as real wins or losses (up-m512 has shown 0.79 in one launch and 1.04 in
+> another with byte-identical code). Judge a kernel change with `bench_focus`,
+> which is built for exactly this: it runs the shape set for N independent epochs
+> (default 10), each a peak over ~12 interleaved A/B reps, and reports the ratio's
+> mean ± stdev with a 2σ verdict (WIN / LOSE / tie). A shape is only a real win or
+> loss when its 2σ band clears 1.0; a `tie` (band straddles 1.0) is within
+> run-to-run noise no matter what a single run printed. Never judge off one ratio,
+> and never compare absolute GFLOPS across separate process launches.
 
 ## Setup
 
@@ -349,6 +355,8 @@ source .venv/bin/activate
 mojo bench_linalg.mojo           # Mojo stdlib linalg.matmul baseline
 mojo bench_sweep.mojo --iterate  # FAST: dispatch vs linalg on corner/edge shapes (default)
 mojo bench_sweep.mojo --full     # SLOW: full per-M sweep over many aspect ratios + general grid
+mojo bench_focus.mojo            # JUDGE A CHANGE: mean ± stdev + 2σ verdict over 10 epochs
+mojo bench_focus.mojo --quick    # fast single-epoch sanity check (NOT for judging)
 python bench_sota.py             # NumPy/SciPy/MKL benchmarks
 mojo test_gemm.mojo              # Correctness tests
 mojo verify_dispatch.mojo        # dispatch correctness vs naive (all branches + edge cases)
