@@ -848,13 +848,15 @@ def _box_l2_budget() -> Int:
 
 
 # ===========================================================================
-# Per-hardware dispatch knobs
+# Dispatch predicates
 #
-# The thresholds the dispatch leans on that differ across CPUs, isolated here so
-# the cascade below reads as a flat regime map. The x86 picks are the defaults;
-# each Apple Silicon override is behind `comptime is_apple_silicon()` and compiles
-# away to the byte-for-byte x86 path off Apple. Measured rationale lives in
-# DESIGN.md ("Apple Silicon", "SME").
+# One named gate per regime, tested top to bottom in matmul_dispatch below. Each
+# returns only its own condition; the regime it selects is that condition with
+# every gate above it having already failed (so _is_square_ish is just `n <= m`,
+# because the narrow-N gate above it has ruled out n <= 192). The thresholds that
+# differ across CPUs sit in _tiny_cutoff here and _box_l2_budget (cache heuristics
+# above), and the SME gates compile away off Apple/f64. The measured rationale is
+# in README.md / DESIGN.md.
 # ===========================================================================
 
 
@@ -867,6 +869,37 @@ def _tiny_cutoff(m: Int) -> Int:
         if m >= 64:
             return 1 << 18
     return 1 << 19
+
+
+def _is_tiny(m: Int, n: Int, k: Int) -> Bool:
+    """Tiny shape: total work below the serial/parallel crossover, where the
+    parallel kernels' launch + packing overhead dwarfs the compute. The crossover
+    is hardware specific (_tiny_cutoff)."""
+    return m * n * k < _tiny_cutoff(m)
+
+
+def _is_decode(m: Int) -> Bool:
+    """Decode GEMV: a single output row (M == 1)."""
+    return m == 1
+
+
+def _is_small_batch(m: Int) -> Bool:
+    """Small-batch decode: 2..5 rows (M == 1 is already the GEMV), few enough to
+    reuse one packed B panel across all rows with MR = M."""
+    return m <= 5
+
+
+def _sme_small_eligible[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
+    """True for the small-M SME batch (6 <= M < 16) on the 8x32 tile, which wastes
+    far less FMOPA than the 16-row tile below 16 rows. n >= 256 keeps thin-N small-M
+    on the NEON no-pack path. Comptime-false off Apple/f64."""
+    comptime APPLE_F64 = CompilationTarget.is_apple_silicon() and (
+        dtype == DType.float64
+    )
+    var ok = False
+    comptime if APPLE_F64:
+        ok = m >= 6 and m < 16 and n >= 256 and (m * n * k >= (1 << 21))
+    return ok
 
 
 def _sme_eligible[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
@@ -884,17 +917,12 @@ def _sme_eligible[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
     return ok
 
 
-def _sme_small_eligible[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
-    """True for the small-M SME batch (6 <= M < 16) on the 8x32 tile, which wastes
-    far less FMOPA than the 16-row tile below 16 rows. n >= 256 keeps thin-N small-M
-    on the NEON no-pack path. Comptime-false off Apple/f64."""
-    comptime APPLE_F64 = CompilationTarget.is_apple_silicon() and (
-        dtype == DType.float64
-    )
-    var ok = False
-    comptime if APPLE_F64:
-        ok = m >= 6 and m < 16 and n >= 256 and (m * n * k >= (1 << 21))
-    return ok
+def _is_thin_n[dtype: DType](m: Int, n: Int) -> Bool:
+    """Thin-N tall-M: N at most 8*NELTS with at least 64 rows. The work is along M,
+    so it wants the no-pack kernel's M-parallelism instead of the prefill kernel's
+    N-parallelism (which a thin N starves)."""
+    comptime NELTS = simd_width_of[dtype]()
+    return n <= NELTS * 8 and m >= 64
 
 
 def _box_fits_l2[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
@@ -910,6 +938,23 @@ def _box_fits_l2[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
         and m >= n
         and (b_bytes <= (1 << 19) or b_bytes <= _box_l2_budget())
     )
+
+
+def _is_narrow_n(n: Int) -> Bool:
+    """Narrow N: N at most 192, too few TILE_N=64 j-tiles to fill the cores without
+    dropping to the narrow NR=16 tile."""
+    return n <= 3 * 64
+
+
+def _is_square_ish(m: Int, n: Int) -> Bool:
+    """Square-ish: N at most M (with N > 192 already, from the narrow-N gate above)."""
+    return n <= m
+
+
+def _is_wide_n(n: Int, k: Int) -> Bool:
+    """Wide-N (up-proj-like): N at least K (with N > M already, from the square-ish
+    gate above). The remaining shapes (N < K) are tall-K, the cascade's else."""
+    return n >= k
 
 
 # ===========================================================================
@@ -1087,8 +1132,6 @@ def _wide_n[
         _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
     else:
         var kc = _l2_resident_kc[dtype](64, k)
-        if n <= m:
-            kc = min(kc, 1024)
         _prefill_kc[dtype, 8 * NELTS, True](c, a, b, kc)
 
 
@@ -1151,29 +1194,28 @@ def matmul_dispatch[
     the box-budget cap, the 2^18 tiny cutoff (m >= 64), and SHARED_A in the small-M
     bands take over, each behind `comptime is_apple_silicon()` so x86 is
     byte-for-byte unchanged. See DESIGN.md "Apple Silicon" / "SME"."""
-    comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
     var k = a.cols
-    if m * n * k < _tiny_cutoff(m):
+    if _is_tiny(m, n, k):
         _serial_gemm[dtype, 6, 2](c, a, b)
-    elif m == 1:
+    elif _is_decode(m):
         _decode_gemv(c, a, b)
-    elif m <= 5:
+    elif _is_small_batch(m):
         _small_batch(c, a, b)
     elif _sme_small_eligible[dtype](m, n, k):
         _sme_small(c, a, b)
     elif _sme_eligible[dtype](m, n, k):
         _sme(c, a, b)
-    elif n <= NELTS * 8 and m >= 64:
+    elif _is_thin_n[dtype](m, n):
         _thin_n(c, a, b)
     elif _box_fits_l2[dtype](m, n, k):
         _small_box(c, a, b)
-    elif n <= 3 * 64:
+    elif _is_narrow_n(n):
         _narrow_n(c, a, b)
-    elif n <= m:
+    elif _is_square_ish(m, n):
         _square_ish(c, a, b)
-    elif n >= k:
+    elif _is_wide_n(n, k):
         _wide_n(c, a, b)
     else:
         _tall_k(c, a, b)
