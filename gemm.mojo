@@ -457,6 +457,22 @@ def _prefill[
     _packed_gemm[dtype, 6, 4 * NELTS, KC, 2, TILE_N, 64, SHARED_A](c, a, b)
 
 
+@always_inline
+def _prefill_kc[
+    dtype: DType, TILE_N: Int, SHARED_A: Bool = False
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype], kc: Int):
+    """Run `_prefill` at the comptime KC rung nearest the runtime cache-aware `kc`.
+    KC must be a compile-time constant for the micro-kernel, so the measured rungs
+    {512, 1024, 2048} are spelled out here and each large-M branch just passes its
+    computed kc, snapping down (kc >= rung)."""
+    if kc >= 2048:
+        _prefill[dtype, 2048, TILE_N, SHARED_A](c, a, b)
+    elif kc >= 1024:
+        _prefill[dtype, 1024, TILE_N, SHARED_A](c, a, b)
+    else:
+        _prefill[dtype, 512, TILE_N, SHARED_A](c, a, b)
+
+
 # ===========================================================================
 # Decode GEMV (M = 1)
 # ===========================================================================
@@ -832,6 +848,276 @@ def _box_l2_budget() -> Int:
 
 
 # ===========================================================================
+# Per-hardware dispatch knobs
+#
+# The thresholds the dispatch leans on that differ across CPUs, isolated here so
+# the cascade below reads as a flat regime map. The x86 picks are the defaults;
+# each Apple Silicon override is behind `comptime is_apple_silicon()` and compiles
+# away to the byte-for-byte x86 path off Apple. Measured rationale lives in
+# DESIGN.md ("Apple Silicon", "SME").
+# ===========================================================================
+
+
+def _tiny_cutoff(m: Int) -> Int:
+    """MAC count below which the serial loop beats the parallel kernels' launch +
+    packing overhead. 2^19 on x86. On Apple the cheap parallel launch drops it to
+    2^18 once there are enough M-row blocks to fill the cores (m >= 64); a small-M
+    shape keeps 2^19 (too few row blocks to parallelize). DESIGN.md adaptation 3."""
+    comptime if CompilationTarget.is_apple_silicon():
+        if m >= 64:
+            return 1 << 18
+    return 1 << 19
+
+
+def _sme_eligible[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
+    """True when the f64 SME coprocessor path (the 16x32 FMOPA micro-kernel) should
+    run: Apple Silicon + f64, at least one 16-row tile and one 32-wide column tile,
+    and enough work (>= 2^21 MACs) to amortize the streaming-mode entry. The kernel's
+    overlap tiles cover non-divisible M/N. Comptime-false off Apple/f64, so the whole
+    SME branch compiles away. DESIGN.md "SME"."""
+    comptime APPLE_F64 = CompilationTarget.is_apple_silicon() and (
+        dtype == DType.float64
+    )
+    var ok = False
+    comptime if APPLE_F64:
+        ok = m >= 16 and n >= 32 and (m * n * k >= (1 << 21))
+    return ok
+
+
+def _sme_small_eligible[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
+    """True for the small-M SME batch (6 <= M < 16) on the 8x32 tile, which wastes
+    far less FMOPA than the 16-row tile below 16 rows. n >= 256 keeps thin-N small-M
+    on the NEON no-pack path. Comptime-false off Apple/f64."""
+    comptime APPLE_F64 = CompilationTarget.is_apple_silicon() and (
+        dtype == DType.float64
+    )
+    var ok = False
+    comptime if APPLE_F64:
+        ok = m >= 6 and m < 16 and n >= 256 and (m * n * k >= (1 << 21))
+    return ok
+
+
+def _box_fits_l2[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
+    """True for a small M-dominant box (m >= 64, m >= n) whose B = k*n stays
+    L2-resident, where the no-pack M-parallel kernel beats the packed path (whose
+    packing + launch overhead dwarfs the compute on a cache-resident box). Two-tier:
+    a compile-time 512 KB cut (no cpuid on the few-us shapes) then the L2-adaptive
+    B <= L2/3 cut (_box_l2_budget). m >= n keeps it off every wide headline shape.
+    DESIGN.md "_box_l2_budget"."""
+    var b_bytes = k * n * size_of[Scalar[dtype]]()
+    return (
+        m >= 64
+        and m >= n
+        and (b_bytes <= (1 << 19) or b_bytes <= _box_l2_budget())
+    )
+
+
+# ===========================================================================
+# Per-regime kernel selection
+#
+# One helper per dispatch regime: each picks the kernel + tile (KC, TILE_N, MR,
+# SHARED_A) that measured fastest for its shape band and forwards to the kernel.
+# Lifting the comptime tile picks out here keeps `matmul_dispatch` a flat regime
+# cascade. The full per-branch measurements live in README.md / DESIGN.md.
+# ===========================================================================
+
+
+@always_inline
+def _small_batch[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Small-batch decode (2 <= M <= 5): the packed micro-kernel with MR = M, so the
+    packed B panel is streamed once and reused across all M rows (a per-row GEMV
+    would re-stream B, ~2x slower at M=4). KU=2, KC=256, TILE_N=8*NELTS."""
+    comptime NELTS = simd_width_of[dtype]()
+    var m = a.rows
+    if m == 2:
+        _packed_gemm[dtype, 2, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif m == 3:
+        _packed_gemm[dtype, 3, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif m == 4:
+        _packed_gemm[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    else:
+        _packed_gemm[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+
+
+@always_inline
+def _sme_small[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Small-M SME batch (6 <= M < 16) on the 8x32 FMOPA tile. f64 + Apple Silicon
+    only; the body compiles away elsewhere (guarded callers never reach it)."""
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+    comptime APPLE_F64 = CompilationTarget.is_apple_silicon() and (
+        dtype == DType.float64
+    )
+    comptime if APPLE_F64:
+        sme_gemm_small_ptr(
+            c.data.unsafe_ptr().bitcast[Float64](),
+            a.data.unsafe_ptr().bitcast[Float64](),
+            b.data.unsafe_ptr().bitcast[Float64](),
+            m, n, k, 2,
+        )
+
+
+@always_inline
+def _sme[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Apple SME (matrix coprocessor) f64 path: the 16x32 FMOPA micro-kernel that
+    breaks the ~515 GFLOPS NEON ceiling (two SME units on M4 Max). f64 + Apple
+    Silicon only; compiles away elsewhere. Picks (KC, MC): one full sweep (no
+    blocking) when A fits L2 with wide N and small K, or when N is narrow; else
+    block, so the MC-tall A block stays L2-resident across the worker's j-tiles and
+    KC keeps the B k-panel L1-resident. DESIGN.md "SME"."""
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+    comptime APPLE_F64 = CompilationTarget.is_apple_silicon() and (
+        dtype == DType.float64
+    )
+    comptime if APPLE_F64:
+        var BIG = 1 << 30
+        var kc = BIG
+        var mc = BIG
+        var a_fits_wide = n >= 4096 and m * k * 8 <= (12 << 20) and k <= 2048
+        if not (a_fits_wide or n < 192):
+            if k >= 4096:
+                kc = 384
+                mc = 256
+            else:
+                kc = 512
+                mc = 128
+        sme_gemm_ptr(
+            c.data.unsafe_ptr().bitcast[Float64](),
+            a.data.unsafe_ptr().bitcast[Float64](),
+            b.data.unsafe_ptr().bitcast[Float64](),
+            m, n, k, 2, kc, mc,
+        )
+
+
+@always_inline
+def _thin_n[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Thin-N tall-M (N <= 8*NELTS, M >= 64): the work is along M, so parallelize
+    over M-row blocks (the prefill kernel parallelizes only over N and starves the
+    cores). Reads A/B from source; a thin N stays cache-resident, so packing buys
+    nothing. NR_VECS=1 for sub-2*NELTS N, else NR_VECS=2."""
+    comptime NELTS = simd_width_of[dtype]()
+    var n = c.cols
+    if n < 2 * NELTS:
+        _nopack_gemm[dtype, 6, 1](c, a, b)
+    else:
+        _nopack_gemm[dtype, 6, 2](c, a, b)
+
+
+@always_inline
+def _small_box[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Small M-dominant box whose B is L2-resident (see _box_fits_l2): the same
+    no-pack M-parallel kernel (NR=32). MR=6 (24 accumulators, deepest ILP) when it
+    divides M with no tail, else MR=4 (16 accumulators, divides every multiple-of-4
+    box). DESIGN.md "_nopack_gemm MR"."""
+    var m = a.rows
+    if m % 6 == 0:
+        _nopack_gemm[dtype, 6, 4](c, a, b)
+    else:
+        _nopack_gemm[dtype, 4, 4](c, a, b)
+
+
+@always_inline
+def _narrow_n[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Narrow N (N <= 192): a narrow NR=16 / TILE_N=16 tile so a small N still splits
+    into >= num_workers j-tiles instead of idling most cores. KU=4."""
+    comptime NELTS = simd_width_of[dtype]()
+    _packed_gemm[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS, 64](c, a, b)
+
+
+@always_inline
+def _square_ish[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Square-ish (192 < N <= M): a finer tile + smaller KC than the wide/tall
+    branches keep both packs L2-resident and multiply the j-tile count. KC by
+    detected L2 (_square_ish_kc). TILE_N wide (8*NELTS) only when each worker gets
+    >= 4 wide j-tiles, else fine (4*NELTS) to smooth load balance. SHARED_A, since
+    here A is as large as B/C. DESIGN.md "_square_ish TILE_N"."""
+    comptime NELTS = simd_width_of[dtype]()
+    comptime TN_WIDE = 8 * NELTS
+    comptime TN_FINE = 4 * NELTS
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+    var njt_wide = ceildiv(n, TN_WIDE)
+    var num_workers = compute_core_count()
+    var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 4
+    var kc = _square_ish_kc(m, n, k)
+    if use_wide:
+        _prefill_kc[dtype, TN_WIDE, True](c, a, b, kc)
+    else:
+        _prefill_kc[dtype, TN_FINE, True](c, a, b, kc)
+
+
+@always_inline
+def _wide_n[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Wide-N (N >= K, up-proj-like): the N-balanced 6x32 tile (TILE_N=8*NELTS). The
+    older 8x24 tile only for very wide N with tiny M (the Qwen up-proj small batch).
+    Small M packs A per worker; past the M~192/288 crossover SHARED_A; large M takes
+    a cache-aware KC (half-L2-resident packed-B tile). DESIGN.md."""
+    comptime NELTS = simd_width_of[dtype]()
+    var m = a.rows
+    var n = c.cols
+    var k = a.cols
+    if n >= 9 * 1024 and m <= 32:
+        _packed_gemm[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
+    elif m <= 192:
+        comptime if CompilationTarget.is_apple_silicon():
+            _prefill[dtype, 256, 8 * NELTS, True](c, a, b)  # EXPERIMENT
+        else:
+            _prefill[dtype, 256, 8 * NELTS](c, a, b)
+    elif m <= 288:
+        _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
+    else:
+        var kc = _l2_resident_kc[dtype](64, k)
+        if n <= m:
+            kc = min(kc, 1024)
+        _prefill_kc[dtype, 8 * NELTS, True](c, a, b, kc)
+
+
+@always_inline
+def _tall_k[
+    dtype: DType
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Tall-K (N < K, down-proj-like): the uniform 6x32 tile (TILE_N=8*NELTS), whose
+    masked M-remainder tail lets it beat 8x24 at every M. Small M packs A per worker;
+    past the M~192 crossover SHARED_A; large M takes a cache-aware KC. DESIGN.md."""
+    comptime NELTS = simd_width_of[dtype]()
+    var m = a.rows
+    var k = a.cols
+    if m <= 64:
+        _prefill[dtype, 256, 8 * NELTS](c, a, b)
+    elif m <= 256:
+        if m >= 192:
+            _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
+        else:
+            comptime if CompilationTarget.is_apple_silicon():
+                _prefill[dtype, 512, 8 * NELTS, True](c, a, b)  # EXPERIMENT
+            else:
+                _prefill[dtype, 512, 8 * NELTS](c, a, b)
+    else:
+        var kc = _l2_resident_kc[dtype](64, k)
+        _prefill_kc[dtype, 8 * NELTS, True](c, a, b, kc)
+
+
+# ===========================================================================
 # Dispatch
 # ===========================================================================
 
@@ -839,279 +1125,58 @@ def _box_l2_budget() -> Int:
 def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """Compute C = A * B, routed to the kernel + tile that measured fastest for
-    the shape on a 4-core AVX-512 Xeon (f64).
+    """Compute C = A * B, routed to the kernel + tile that measured fastest for the
+    shape on a 4-core AVX-512 Xeon (f64). This table is the authoritative dispatch
+    map; each row's helper holds the tile picks and the per-branch rationale:
 
-        tiny  M*N*K < 2^19          _serial_gemm   serial, no threads/packing
-        M == 1                      _decode_gemv   j-parallel GEMV, streams B once
-        M in 2..5                   packed MR=M    pack B once, reuse across rows
-        thin-N  N<=64, M>=64        _nopack_gemm   M-parallel, no packing
-        small box  M>=N, B fits L2  _nopack_gemm   M-parallel, no packing
-        N <= 192                    packed NR=16   narrow tile -> >= 4 j-tiles
-        square-ish  N <= M          packed 6x32    L2-adaptive KC, SHARED_A
-        wide-N  N >= K              packed 6x32    (8x24 only for N>=9k & M<=32)
-        tall-K  N < K               packed 6x32    cache-aware KC by M band
+        tiny  M*N*K < _tiny_cutoff      _serial_gemm  serial, no threads/packing
+        M == 1                          _decode_gemv  j-parallel GEMV, streams B once
+        M in 2..5                       _small_batch  packed MR=M, reuse B across rows
+        SME small  6<=M<16 (Apple f64)  _sme_small    8x32 FMOPA coprocessor tile
+        SME  M>=16 (Apple f64)          _sme          16x32 FMOPA coprocessor tile
+        thin-N  N<=8*NELTS, M>=64       _thin_n       M-parallel, no packing
+        small box  M>=N, B fits L2      _small_box    M-parallel, no packing
+        narrow-N  N<=192                _narrow_n     packed NR=16 -> >= 4 j-tiles
+        square-ish  N<=M                _square_ish   packed 6x32, L2-adaptive KC
+        wide-N  N>=K                    _wide_n       packed 6x32 (8x24 for N>=9k, M<=32)
+        tall-K  N<K                     _tall_k       packed 6x32, cache-aware KC
 
-    Every KC/TILE_N/tile pick is hardware-specific; the full per-branch rationale
-    and measurements live in README.md and DESIGN.md. The N<=M and M>=N gates keep
-    the square-ish and no-pack routes off every
-    wide headline shape (the Qwen up/down projections are N >> M), where those
-    kernels are catastrophic.
+    The N<=M and M>=N gates keep square-ish and the no-pack routes off every wide
+    headline shape (the Qwen up/down projections are N >> M), where those kernels
+    are catastrophic. Every tile pick is hardware-specific; the thresholds that
+    differ across CPUs are isolated in the "Per-hardware dispatch knobs" helpers,
+    and the full rationale + measurements are in README.md and DESIGN.md.
 
-    On Apple Silicon (big.LITTLE + cluster-shared L2) five picks are overridden
-    behind `comptime CompilationTarget.is_apple_silicon()`, so x86 is unchanged:
-    the heavy kernels and the decode GEMV parallelize over P-cores only
-    (`compute_core_count()`, so the slow E-cores do not straggle), the no-pack
-    box budget is capped (l2_cache_size() is the cluster-shared L2, not
-    per-core), the tiny serial cutoff drops to 2^18 for M >= 64, and SHARED_A
-    (pack A once) extends down to the small-M band (10 P-cores make the
-    per-worker re-pack ~10x redundant, so the M>=192 Xeon crossover drops below
-    the headline band). See DESIGN.md "Apple Silicon" for the measured
-    rationale."""
+    On Apple Silicon the SME paths, P-core-only parallelism (compute_core_count),
+    the box-budget cap, the 2^18 tiny cutoff (m >= 64), and SHARED_A in the small-M
+    bands take over, each behind `comptime is_apple_silicon()` so x86 is
+    byte-for-byte unchanged. See DESIGN.md "Apple Silicon" / "SME"."""
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
     var k = a.cols
-
-    # Tiny cutoff (MACs below which the serial loop beats the parallel kernels'
-    # fixed launch/packing overhead). 2^19 on x86. On Apple Silicon the parallel
-    # launch is cheap enough that a shape with enough M-row blocks to fill the
-    # cores (m >= 64, the no-pack box branch's own floor) wants parallelism well
-    # below 2^19: sq64/sq80 ran 0.29-0.55 serial vs ~0.6-0.8 parallel, so they
-    # take the 2^18 cutoff. A small-M shape (m < 64) has too few row blocks to
-    # parallelize (e.g. 8x8x4096 stays serial), so it keeps the 2^19 cutoff. On
-    # x86 both arms are 2^19, byte-for-byte unchanged.
-    comptime APPLE = CompilationTarget.is_apple_silicon()
-    # The SME f64 coprocessor path is Apple-Silicon + float64 only (the FMOPA
-    # micro-kernel is f64-specific). On x86 / other dtypes APPLE_F64 is comptime
-    # False, so sme_eligible is always False and the whole branch compiles away.
-    comptime APPLE_F64 = APPLE and (dtype == DType.float64)
-    var sme_eligible = False
-    var sme_small_eligible = False
-    comptime if APPLE_F64:
-        # At least one 16-row tile (m >= 16, the overlap remainder path needs M >= 16),
-        # N >= 32 (the column overlap-tile needs N - 32 >= 0), and large enough that
-        # driving the coprocessor beats the NEON kernels (~2M MACs: below that the
-        # streaming-mode entry + per-tile setup dominates; sq64 stays serial/NEON).
-        # M % 16 / N % 32 need not be zero: sme_gemm_ptr handles the remainder rows
-        # and columns with in-bounds overlap tiles, so odd-N/odd-M large shapes (which
-        # would otherwise fall to the ~515 GFLOPS NEON ceiling) also reach the SME band.
-        sme_eligible = m >= 16 and n >= 32 and (m * n * k >= (1 << 21))
-        # Small-M batch (6 <= M < 16): the 16-row tile would waste over half its
-        # FMOPA, so use the 8x32 tile (sme_gemm_small_ptr). n >= 256 keeps thin-N
-        # small-M on the NEON no-pack path.
-        sme_small_eligible = (
-            m >= 6 and m < 16 and n >= 256 and (m * n * k >= (1 << 21))
-        )
-    var tiny_macs = (1 << 18) if (APPLE and m >= 64) else (1 << 19)
-    if m * n * k < tiny_macs:
-        # Tiny: a plain serial register-tiled loop. Below the cutoff the parallel
-        # kernels' fixed cost dwarfs the compute (sq8..32 ran 0.03-0.17x linalg
-        # parallel vs 1.2-2.6x serial). Can never fire for a headline shape.
+    if m * n * k < _tiny_cutoff(m):
         _serial_gemm[dtype, 6, 2](c, a, b)
     elif m == 1:
-        # Pure decode GEMV: each worker owns an L1-resident column chunk of C and
-        # streams B exactly once.
         _decode_gemv(c, a, b)
     elif m <= 5:
-        # Small-batch decode: the packed micro-kernel with MR = M, so the packed
-        # B panel is streamed once and reused across all M rows (the GEMV would
-        # re-stream B per row, ~2x slower at M=4). KU=2, TILE_N=8*NELTS.
-        if m == 2:
-            _packed_gemm[dtype, 2, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
-        elif m == 3:
-            _packed_gemm[dtype, 3, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
-        elif m == 4:
-            _packed_gemm[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
-        else:
-            _packed_gemm[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
-    elif sme_small_eligible:
-        # Small-M batch on the 8x32 SME tile (wastes far less FMOPA than the 16-row
-        # tile when M < 16). M6x4096x4096 0.68x -> 0.87x Accelerate.
-        comptime if APPLE_F64:
-            sme_gemm_small_ptr(
-                c.data.unsafe_ptr().bitcast[Float64](),
-                a.data.unsafe_ptr().bitcast[Float64](),
-                b.data.unsafe_ptr().bitcast[Float64](),
-                m, n, k, 2,
-            )
-    elif sme_eligible:
-        # Apple SME (matrix coprocessor) f64 path. The NEON kernels below cap at
-        # the ~515 GFLOPS f64 NEON ceiling of the 10 P-cores; Accelerate beats that
-        # by driving the SME units (two of them on M4 Max, ~1035 GFLOPS aggregate).
-        # The 16x32 FMOPA micro-kernel (sme_kernel.mojo) reaches that band: 98-150%
-        # of Accelerate on the compute-bound shapes. Gated to f64 + Apple Silicon +
-        # enough work to amortize the coprocessor entry; x86 and every other dtype
-        # skip this branch (sme_eligible is comptime-false). Non-divisible M/N is
-        # handled by the kernel's overlap-tile remainder path.
-        comptime if APPLE_F64:
-            # Pick (KC, MC). Skip blocking and run one full sweep when either the
-            # packed A fits L2 and N is wide (many j-strips keep A L2-resident:
-            # prefill, up-proj) or N is narrow (n < 192, too few j-tiles for the
-            # MC-block's A-reuse to pay, and blocking only adds C-reload traffic:
-            # box512). Otherwise block: the MC-tall A block stays L2-resident across
-            # the worker's j-tiles (A read from DRAM once per worker, not once per
-            # j-strip), KC keeps the B k-panel L1-resident, and large K wants a finer KC.
-            var BIG = 1 << 30
-            var kc = BIG
-            var mc = BIG
-            # No-block only when the B k-strip itself stays cache-friendly: A fits
-            # L2, N wide, AND K small enough (<= 2048) that the in-place strided
-            # B-strip (K x 32) does not thrash. Large K needs KC blocking to keep the
-            # B k-panel L1-resident even when A fits (small-M wide shapes at K=4096
-            # ran 316 no-block vs 468 blocked). Narrow N (< 192) has too few j-tiles
-            # for blocking to pay regardless.
-            var a_fits_wide = n >= 4096 and m * k * 8 <= (12 << 20) and k <= 2048
-            if not (a_fits_wide or n < 192):
-                # Squares / moderate-K: KC=512, MC=128 (8 i-tiles per block) measured
-                # best. Large K (>= 4096): a finer KC=384 with MC=256.
-                if k >= 4096:
-                    kc = 384
-                    mc = 256
-                else:
-                    kc = 512
-                    mc = 128
-            # dtype is float64 here (comptime), so bitcast is a no-op reinterpret
-            # that satisfies the f64 pointer type sme_gemm_ptr expects.
-            sme_gemm_ptr(
-                c.data.unsafe_ptr().bitcast[Float64](),
-                a.data.unsafe_ptr().bitcast[Float64](),
-                b.data.unsafe_ptr().bitcast[Float64](),
-                m, n, k, 2, kc, mc,
-            )
+        _small_batch(c, a, b)
+    elif _sme_small_eligible[dtype](m, n, k):
+        _sme_small(c, a, b)
+    elif _sme_eligible[dtype](m, n, k):
+        _sme(c, a, b)
     elif n <= NELTS * 8 and m >= 64:
-        # Thin-N, tall-M (N <= 64): the work is along M, but the prefill kernel
-        # parallelizes only over N, starving the cores. _nopack_gemm parallelizes
-        # over M-row blocks, reading A/B from source (a thin N stays cache-
-        # resident, so packing buys nothing). Lifts the band from 0.10-0.58 to
-        # 0.80-1.27 vs linalg. NR_VECS=1 for sub-16-wide N; NR_VECS=2 otherwise.
-        if n < 2 * NELTS:
-            _nopack_gemm[dtype, 6, 1](c, a, b)
-        else:
-            _nopack_gemm[dtype, 6, 2](c, a, b)
-    elif (
-        m >= 64
-        and m >= n
-        and (
-            k * n * size_of[Scalar[dtype]]() <= (1 << 19)
-            or k * n * size_of[Scalar[dtype]]() <= _box_l2_budget()
-        )
-    ):
-        # Small M-dominant box whose B stays L2-resident: same no-pack M-parallel
-        # kernel (NR=32). The packed kernel's packing + launch overhead dwarfs the
-        # compute on a cache-resident box (sq96..256 ran 0.65-0.79 packed; no-pack
-        # flips them to 1.0-1.18). The B-fits-L2 test is two-tiered: a compile-time
-        # 512 KB cut (no cpuid on the few-us shapes) plus an L2-adaptive B <= L2/3
-        # tier (_box_l2_budget). m >= n keeps it off every wide headline shape.
-        #
-        # MR splits M into register-tiled row blocks; an M not divisible by MR
-        # leaves a tail that runs one row at a time (1 x NR accumulators), far
-        # below the MR-row block's throughput. MR=6 (24 accumulators, the most
-        # ILP) when it divides M cleanly, else MR=4 (16 accumulators, still deep
-        # enough to hide FMA latency), which divides every multiple-of-4 box with
-        # no tail. Measured interleaved peak vs linalg on the 1 MB/core Skylake:
-        # sq256 0.83->0.89, 512x128x512 0.89->0.97, 256x128x512 0.97->1.08, while
-        # M%6==0 boxes (sq96, sq192) keep MR=6 (sq96 1.17, sq192 1.00). See
-        # DESIGN.md.
-        if m % 6 == 0:
-            _nopack_gemm[dtype, 6, 4](c, a, b)
-        else:
-            _nopack_gemm[dtype, 4, 4](c, a, b)
+        _thin_n(c, a, b)
+    elif _box_fits_l2[dtype](m, n, k):
+        _small_box(c, a, b)
     elif n <= 3 * 64:
-        # Narrow N (<= 192): at TILE_N=64 such an N is < 4 j-tiles, idling most of
-        # a 4-core box. A narrow NR=16 / TILE_N=16 tile splits N into >= num_workers
-        # j-tiles (sq64 0.44->0.83). KU=4 here.
-        _packed_gemm[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS, 64](c, a, b)
+        _narrow_n(c, a, b)
     elif n <= m:
-        # Square-ish (192 < N <= M). The wide/tall branches' TILE_N=64 + big KC
-        # fit a box-shaped C badly (few coarse j-tiles; a fat M*KC packed-A with no
-        # C-traffic saving to amortize it). A finer tile + smaller KC keep both
-        # packs L2-resident and multiply the j-tile count (sq512 0.74->0.88, sq2048
-        # 0.70->0.85). Two levers at their measured best:
-        #   * KC by detected L2 (_square_ish_kc): 512 on 1 MB/core, 1024 on 2 MB.
-        #   * TILE_N by load balance: the fatter 8*NELTS only when N gives each
-        #     worker plenty of wide j-tiles (>= 4 each), else the finer 4*NELTS.
-        #     With only a couple of wide tiles per worker, a single straggler
-        #     skews the whole op, so the finer tile (twice the j-tiles) smooths
-        #     the balance and outweighs its extra packed-A re-reads. Measured
-        #     interleaved A/B (peak/40, x4) on the 1 MB/core Skylake: sq512 (2
-        #     wide tiles/worker) runs ~2-4% faster on the fine tile, while
-        #     sq1024 (4/worker) is a wash and sq2048 (8/worker) prefers wide, so
-        #     the >= 4 cut keeps the big squares on wide and lifts only sq512.
-        # SHARED_A: here A is as large as B/C, so packing it once is a real win.
-        comptime TN_WIDE = 8 * NELTS
-        comptime TN_FINE = 4 * NELTS
-        var njt_wide = ceildiv(n, TN_WIDE)
-        var num_workers = compute_core_count()
-        var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 4
-        var kc = 1024 if _square_ish_kc(m, n, k) >= 1024 else 512
-        if use_wide:
-            if kc >= 1024:
-                _prefill[dtype, 1024, TN_WIDE, True](c, a, b)
-            else:
-                _prefill[dtype, 512, TN_WIDE, True](c, a, b)
-        else:
-            if kc >= 1024:
-                _prefill[dtype, 1024, TN_FINE, True](c, a, b)
-            else:
-                _prefill[dtype, 512, TN_FINE, True](c, a, b)
+        _square_ish(c, a, b)
     elif n >= k:
-        # Wide-N (up-proj-like). The N-balanced 6x32 tile (TILE_N=64, 32 even
-        # j-tiles on N=2048) wins almost everywhere now that the masked
-        # M-remainder tail removed the MR-divides-M tax.
-        if n >= 9 * 1024 and m <= 32:
-            # The one corner where the older 8x24 tile still edges 6x32 by ~2-4%:
-            # very wide N and tiny M (the Qwen up-proj small batch). KU=2.
-            _packed_gemm[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
-        elif m <= 192:
-            # Small-M band: KC=256, per-worker A pack (below the SHARED_A crossover
-            # at M~192, so the M=96 headline keeps the byte-for-byte path).
-            comptime if CompilationTarget.is_apple_silicon():
-                _prefill[dtype, 256, 8 * NELTS, True](c, a, b)  # EXPERIMENT
-            else:
-                _prefill[dtype, 256, 8 * NELTS](c, a, b)
-        elif m <= 288:
-            # Past the SHARED_A crossover: pack A once (+3%, up-proj M=256).
-            _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
-        else:
-            # Large M: cache-aware KC (half-L2 resident packed-B tile), capped at
-            # 1024 when N <= M (a single huge k-panel thrashes the M*KC packed-A
-            # of a square-ish shape). M > 288 is always past the SHARED_A crossover.
-            var kc = _l2_resident_kc[dtype](64, k)
-            if n <= m:
-                kc = min(kc, 1024)
-            if kc >= 2048:
-                _prefill[dtype, 2048, 8 * NELTS, True](c, a, b)
-            elif kc >= 1024:
-                _prefill[dtype, 1024, 8 * NELTS, True](c, a, b)
-            else:
-                _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
+        _wide_n(c, a, b)
     else:
-        # Tall-K (down-proj-like): the uniform 6x32 tile. TILE_N=64 splits N=2048
-        # into 32 even j-tiles (perfect 4c balance), and the masked M-remainder
-        # tail lets the balanced tile beat 8x24 at every M.
-        if m <= 64:
-            # Small M: KC=256, per-worker A pack.
-            _prefill[dtype, 256, 8 * NELTS](c, a, b)
-        elif m <= 256:
-            # KC=512; pack A once past the M~192 crossover (down-proj headline
-            # M=96 stays on the per-worker path).
-            if m >= 192:
-                _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
-            else:
-                comptime if CompilationTarget.is_apple_silicon():
-                    _prefill[dtype, 512, 8 * NELTS, True](c, a, b)  # EXPERIMENT
-                else:
-                    _prefill[dtype, 512, 8 * NELTS](c, a, b)
-        else:
-            # Large M: cache-aware KC (1024 on 1 MB/core L2, 2048 on 2 MB/core).
-            var kc = _l2_resident_kc[dtype](64, k)
-            if kc >= 2048:
-                _prefill[dtype, 2048, 8 * NELTS, True](c, a, b)
-            elif kc >= 1024:
-                _prefill[dtype, 1024, 8 * NELTS, True](c, a, b)
-            else:
-                _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
+        _tall_k(c, a, b)
 
 
 # ===========================================================================
