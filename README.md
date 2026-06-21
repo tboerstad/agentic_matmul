@@ -200,13 +200,16 @@ kernels see the same turbo/thermal state:
 - General-shape `--full` sweep: a clear majority WIN after the small-N /
   wide-N-small-M / square-large-M / small-box fixes (the exact tally swings
   ±several with VM turbo/thermal, so judge per-shape via interleaved A/B, not the
-  single-run count). Two recent levers: (1) the square-ish branch now picks KC
-  by detected L2 (KC=1024 from a 1 MB/core L2 up, KC=512 below — a deeper KC
-  sweeps more of K per L2-resident C micro-tile, so C is loaded/stored fewer
-  times for k-panel accumulation; a current-nightly interleaved A/B lifts Skylake
-  sq1024 +3.6% and sq2048 +2.9% at KC1024, both 2σ WIN. An earlier nightly had
-  measured the opposite on the 1 MB part, so the cut was 1.5 MB; the crossover
-  moved with the toolchain, see DESIGN.md) plus a load-balance-aware TILE_N
+  single-run count). Two recent levers: (1) the square-ish branch is now a
+  **pack-B-only / TileK=K** GEMM matching stdlib linalg (found by reading linalg's
+  open source + emit-asm: on a square A is as large as B, so linalg packs only B,
+  reads A unpacked, and sweeps the whole K so C is stored once). We do the same
+  (PACK_A=False, KC at the rung >= min(K,2048), TileN shrunk to a 512 KB pack
+  budget): interleaved A/B vs the old pack-both square path is sq512 +19%, sq768
+  +14%, sq1024 +12%, sq1536 +12%, sq2048 +6.5% (all 2σ WIN), bit-identical to
+  naive. Small-N square-ish and sq384 (too few j-tiles for the N-parallel
+  pack-B-only path) keep the old pack-both fallback, which picks KC by detected L2
+  (KC=1024 from a 1 MB/core L2 up, KC=512 below) plus a load-balance-aware TILE_N
   (wide 8·NELTS only at >= 4
   wide j-tiles per worker, else the finer 4·NELTS — the fine tile's extra
   j-tiles smooth the balance on the small squares: sq512, with 2 wide tiles per
