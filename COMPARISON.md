@@ -1,8 +1,9 @@
 # Full comparison: agentic matmul vs `linalg` vs OpenBLAS
 
 A three-way comparison of the dispatch kernel (`matmul_dispatch`) against the
-Mojo stdlib `linalg.matmul` and OpenBLAS (NumPy `np.matmul`, SciPy `dgemm`),
-all in float64, across the full `bench_focus.mojo` shape set.
+Mojo stdlib `linalg.matmul` and OpenBLAS (NumPy `np.matmul`, SciPy `dgemm`)
+across the full `bench_focus.mojo` shape set. The main tables below are float64
+(the project's target precision); a float32 section follows at the end.
 
 ## Hardware (this run)
 
@@ -87,10 +88,59 @@ vs OpenBLAS:
 - The Mojo stdlib `linalg` also generally beats OpenBLAS on the larger shapes,
   except it loses decode badly (8 vs 23).
 
+## float32
+
+Same machine and methodology, run with `mojo bench_focus.mojo --dtype f32`
+(full 10 epochs). OpenBLAS here is NumPy `sgemm` (`np.matmul` on float32 arrays).
+All peak GFLOPS. Absolute throughput is roughly 2x the float64 tables, as
+expected from doubling the SIMD lane count (NELTS 8 -> 16).
+
+| shape | dims (M x N x K) | dispatch | linalg | OpenBLAS (NumPy) | dispatch/linalg | verdict |
+|---|---|---:|---:|---:|---:|:--:|
+| decode  | 1 x 11008 x 2048    |  21 |   8 |  22.6 | 2.462 +/- 0.078 | WIN  |
+| prefill | 96 x 11008 x 2048   | 302 | 301 | 205.8 | 1.003 +/- 0.024 | tie  |
+| sq512   | 512 x 512 x 512     | 478 | 490 | 399.6 | 0.975 +/- 0.044 | tie  |
+| sq1024  | 1024 x 1024 x 1024  | 474 | 493 | 442.7 | 0.962 +/- 0.010 | LOSE |
+| sq2048  | 2048 x 2048 x 2048  | 464 | 499 | 453.8 | 0.931 +/- 0.022 | LOSE |
+| M512-g  | 512 x 4096 x 4096   | 431 | 450 | 420.0 | 0.958 +/- 0.024 | tie  |
+| up-m256 | 256 x 11008 x 2048  | 396 | 410 | 338.7 | 0.964 +/- 0.025 | tie  |
+| up-m512 | 512 x 11008 x 2048  | 420 | 462 | 416.3 | 0.909 +/- 0.029 | LOSE |
+| dn-m512 | 512 x 2048 x 11008  | 425 | 466 | 412.0 | 0.912 +/- 0.020 | LOSE |
+| sq128   | 128 x 128 x 128     | 158 | 164 | 202.9 | 0.964 +/- 0.028 | tie  |
+| sq256   | 256 x 256 x 256     | 344 | 332 | 347.9 | 1.032 +/- 0.052 | tie  |
+| sq384   | 384 x 384 x 384     | 274 | 360 | 435.7 | 0.761 +/- 0.044 | LOSE |
+| box512  | 512 x 128 x 512     | 372 | 444 | 426.4 | 0.843 +/- 0.086 | tie  |
+| oddN    | 512 x 11007 x 2048  | 418 | 443 | 426.6 | 0.945 +/- 0.038 | tie  |
+
+Reading of the f32 results:
+
+- vs linalg the picture flips from f64. In f64 dispatch is parity-to-slight-win
+  across the compute band; in f32 it is consistently 4-9% behind linalg
+  (sq1024, sq2048, up-m512, dn-m512 are confident LOSEs). The dispatch tiles
+  (MR/NR and the KC cache-blocking constants) are tuned for the f64 element
+  size. At f32 the SIMD lane count doubles and those constants are no longer
+  optimal, so dispatch gives ground to linalg. sq384 stays the weakest shape
+  (0.76), same as f64.
+- decode still wins ~2.5x (the GEMV path under-uses M=1 in linalg), and prefill
+  ties.
+- vs OpenBLAS dispatch still beats sgemm on the headline and upcast shapes
+  (prefill 302 vs 206, up-m256 396 vs 339, sq2048 464 vs 454) and ties most
+  others. OpenBLAS pulls ahead only on the small / odd corners (sq128 203 vs
+  158, sq384 436 vs 274).
+
+float16 and bfloat16: the kernels compile and run at these dtypes (via
+`--dtype f16` / `--dtype bf16`), and `matmul_dispatch` is generic over dtype,
+but on this x86 build there is no vectorized half-precision FMA path, so they
+run near-scalar (one quick epoch took ~12 minutes versus seconds for f32). They
+are also not a fair OpenBLAS comparison: NumPy/OpenBLAS has no bf16 GEMM and no
+real half-precision GEMM (float16 `np.matmul` upcasts). Those runs were not
+included here.
+
 ## Reproduce
 
 ```bash
 source .venv/bin/activate
-mojo bench_focus.mojo      # dispatch vs linalg, 14 shapes, mean +/- stdev verdict
-python bench_sota.py       # NumPy / SciPy OpenBLAS on decode + prefill
+mojo bench_focus.mojo              # dispatch vs linalg, f64, 14 shapes, verdict
+mojo bench_focus.mojo --dtype f32  # same harness in f32
+python bench_sota.py               # NumPy / SciPy OpenBLAS on decode + prefill
 ```
