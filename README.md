@@ -1,9 +1,15 @@
 # matmul
 
-An experiment in writing optimized matmul kernels in Mojo using only [Claude Code](https://claude.com/claude-code) on mobile (iOS). The sole goal is maximizing GFLOPS on the two matrix shapes used by Qwen 2.5 VL 3B MLP projections (float64):
+An experiment in writing optimized matmul kernels in Mojo using only [Claude Code](https://claude.com/claude-code) on mobile (iOS). The goal is fast matmul: maximizing GFLOPS across shapes and element types, staying competitive with the Mojo stdlib `linalg.matmul` and OpenBLAS. The original target, and still the headline benchmark, is the two float64 matrix shapes from the Qwen 2.5 VL 3B MLP projections:
 
 - **Decode:** 1 × 11008 × 2048 (memory-bandwidth bound)
 - **Prefill:** 96 × 11008 × 2048 (compute-bound)
+
+Beyond those, the dispatch kernel and the `bench_focus.mojo` harness now run a
+wider shape set and other element types (`--dtype f32/f16/bf16`). The kernel
+tiles and cache-blocking constants are tuned for float64, so float32 currently
+trails `linalg` by a few percent on the compute-bound square band (an open
+tuning item).
 
 ## Results
 

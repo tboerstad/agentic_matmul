@@ -28,6 +28,10 @@
 #   --runs M         override reps-per-epoch (the peak is taken over these)
 #   --quick          one epoch, prints bare ratios with no stdev (old behavior;
 #                    fast edit-loop sanity check, NOT for judging a change)
+#   --dtype T        element type: f64 (default), f32, f16, or bf16. The whole
+#                    A/B/C path and both kernels run in T. f16/bf16 accumulate in
+#                    the same low-precision type, so dispatch and linalg diverge
+#                    numerically; the ratio still measures throughput, not accuracy.
 from gemm import matmul_dispatch
 from matrix import Matrix
 from linalg.matmul import matmul as linalg_matmul
@@ -54,17 +58,20 @@ def round3(x: Float64) -> Float64:
 
 
 # One epoch for one shape: peak (min-time) GFLOPS over n_runs interleaved reps,
-# returned as (dispatch_gflops, linalg_gflops).
-def measure(m: Int, n: Int, k: Int, n_runs: Int) raises -> Tuple[Float64, Float64]:
-    var a = Matrix(m, k)
-    var b = Matrix(k, n)
-    var c = Matrix(m, n)
+# returned as (dispatch_gflops, linalg_gflops). Generic over dtype so the same
+# harness compares dispatch vs linalg in f64, f32, f16, or bf16.
+def measure[
+    dtype: DType
+](m: Int, n: Int, k: Int, n_runs: Int) raises -> Tuple[Float64, Float64]:
+    var a = Matrix[dtype](m, k)
+    var b = Matrix[dtype](k, n)
+    var c = Matrix[dtype](m, n)
     fill(a, 17)
     fill(b, 13)
 
-    var c_data = List[Float64](capacity=m * n)
+    var c_data = List[Scalar[dtype]](capacity=m * n)
     for _ in range(m * n):
-        c_data.append(0.0)
+        c_data.append(0)
     var a_ptr = a.data.unsafe_ptr()
     var b_ptr = b.data.unsafe_ptr()
     var c_ptr = c_data.unsafe_ptr()
@@ -126,12 +133,12 @@ def shapes() -> Tuple[List[String], List[Int], List[Int], List[Int]]:
 
 # Old single-epoch behavior: one peak ratio per shape, no stdev. Fast, but a
 # single ratio is noise-prone, so this is a sanity check, not a judgment.
-def run_quick(runs: Int) raises:
-    print("=== focused bench --quick (single epoch, peak over", runs, "runs; NOT for judging) ===")
+def run_quick[dtype: DType](runs: Int) raises:
+    print("=== focused bench --quick (single epoch, peak over", runs, "runs; NOT for judging) | dtype", dtype, "===")
     var sh = shapes()
     var labels = sh[0].copy(); var ms = sh[1].copy(); var ns = sh[2].copy(); var ks = sh[3].copy()
     for s in range(len(ms)):
-        var r = measure(ms[s], ns[s], ks[s], runs)
+        var r = measure[dtype](ms[s], ns[s], ks[s], runs)
         print(
             "  ", labels[s], "M=", ms[s], "N=", ns[s], "K=", ks[s],
             "| dispatch", Int(r[0]), "| linalg", Int(r[1]),
@@ -140,10 +147,10 @@ def run_quick(runs: Int) raises:
 
 
 # The default: EPOCHS independent epochs, report mean +/- stdev + 2-sigma verdict.
-def run_stats(epochs: Int, runs: Int) raises:
+def run_stats[dtype: DType](epochs: Int, runs: Int) raises:
     print(
         "=== focused bench:", epochs, "epochs x peak-of-", runs,
-        "; ratio mean +/- stdev, 2-sigma verdict ===",
+        "; ratio mean +/- stdev, 2-sigma verdict | dtype", dtype, "===",
     )
     print("(epoch loop is outer so every shape is sampled across the full thermal envelope)")
     var sh = shapes()
@@ -161,7 +168,7 @@ def run_stats(epochs: Int, runs: Int) raises:
 
     for e in range(epochs):
         for s in range(num):
-            var r = measure(ms[s], ns[s], ks[s], runs)
+            var r = measure[dtype](ms[s], ns[s], ks[s], runs)
             ratios[s].append(r[0] / r[1])
             dgf_sum[s] += r[0]
             lgf_sum[s] += r[1]
@@ -204,11 +211,20 @@ def run_stats(epochs: Int, runs: Int) raises:
         )
 
 
+# Run the chosen mode (quick vs stats) for one compile-time dtype.
+def run[dtype: DType](quick: Bool, epochs: Int, runs: Int) raises:
+    if quick:
+        run_quick[dtype](runs)
+    else:
+        run_stats[dtype](epochs, runs)
+
+
 def main() raises:
     var args = argv()
     var quick = False
     var epochs = 10
     var runs = 12
+    var dt = String("f64")
     var i = 1
     while i < len(args):
         var a = String(args[i])
@@ -220,9 +236,20 @@ def main() raises:
         elif a == "--runs" and i + 1 < len(args):
             runs = Int(String(args[i + 1]))
             i += 1
+        elif a == "--dtype" and i + 1 < len(args):
+            dt = String(args[i + 1])
+            i += 1
         i += 1
 
-    if quick:
-        run_quick(runs)
+    # dtype is a compile-time parameter, so dispatch the string to the matching
+    # instantiation. Default is f64, so a bare `mojo bench_focus.mojo` is unchanged.
+    if dt == "f32":
+        run[DType.float32](quick, epochs, runs)
+    elif dt == "f16":
+        run[DType.float16](quick, epochs, runs)
+    elif dt == "bf16":
+        run[DType.bfloat16](quick, epochs, runs)
+    elif dt == "f64":
+        run[DType.float64](quick, epochs, runs)
     else:
-        run_stats(epochs, runs)
+        print("unknown --dtype", dt, "(use f64, f32, f16, or bf16)")
