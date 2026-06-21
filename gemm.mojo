@@ -1090,12 +1090,28 @@ def _thin_n[
 def _small_box[
     dtype: DType
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """Small M-dominant box whose B is L2-resident (see _box_fits_l2): the same
-    no-pack M-parallel kernel (NR=32). MR=6 (24 accumulators, deepest ILP) when it
-    divides M with no tail, else MR=4 (16 accumulators, divides every multiple-of-4
-    box). DESIGN.md "_nopack_gemm MR"."""
+    """Small M-dominant box whose B is L2-resident (see _box_fits_l2).
+
+    The bigger boxes (B ~ 512 KB, the top of the admission window) take the same
+    pack-B-only / TileK=K path as the squares: packing B once and reading A
+    unpacked beats re-reading all of B per MR-row block once B is large, as long
+    as N splits into >= num_workers NR-tiles to fill the cores. Measured
+    bonly/no-pack: sq256 1.14, 512x128x512 1.10, 256x128x512 1.11 (2-sigma WIN),
+    while the genuinely small boxes lose it (sq192 0.76, sq128 0.95, sq96 0.82) and
+    keep the no-pack M-parallel kernel. The cut is B > 384 KB. DESIGN.md.
+
+    No-pack uses NR=32, MR=6 (24 accumulators, deepest ILP) when it divides M with
+    no tail, else MR=4 (divides every multiple-of-4 box). DESIGN.md "_nopack_gemm MR"."""
+    comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
-    if m % 6 == 0:
+    var n = c.cols
+    var k = a.cols
+    var b_bytes = k * n * size_of[Scalar[dtype]]()
+    if b_bytes > (3 << 17) and ceildiv(n, 4 * NELTS) >= compute_core_count():
+        # k <= 512 here (B <= 512 KB with N >= 4*NELTS), so KC=512 is a single
+        # whole-K panel: C is swept over all of K and stored once.
+        _prefill[dtype, 512, 4 * NELTS, False, False](c, a, b)
+    elif m % 6 == 0:
         _nopack_gemm[dtype, 6, 4](c, a, b)
     else:
         _nopack_gemm[dtype, 4, 4](c, a, b)
@@ -1233,7 +1249,7 @@ def matmul_dispatch[
         SME small  6<=M<16 (Apple f64)  _sme_small    8x32 FMOPA coprocessor tile
         SME  M>=16 (Apple f64)          _sme          16x32 FMOPA coprocessor tile
         thin-N  N<=8*NELTS, M>=64       _thin_n       M-parallel, no packing
-        small box  M>=N, B fits L2      _small_box    M-parallel, no packing
+        small box  M>=N, B fits L2      _small_box    no-pack (pack-B-only at B>384KB)
         narrow-N  N<=192                _narrow_n     packed NR=16 -> >= 4 j-tiles
         square-ish  N<=M                _square_ish   pack-B-only 6x32, TileK=K
         wide-N  N>=K                    _wide_n       packed 6x32 (8x24 for N>=9k, M<=32)

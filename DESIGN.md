@@ -176,6 +176,18 @@ small-N square-ish shape (or sq384, whose TileN=128 leaves 3 tiles) keeps the
 pack-both fallback. The headline wide/tall/decode shapes never enter square-ish,
 so they are untouched.
 
+The same pack-B-only path also took the **big boxes** off the no-pack route. The
+small-box branch (`_small_box`, M-parallel no-pack: re-reads all of B per MR-row
+block) is right only while B is genuinely small; at the top of its admission
+window (B ~ 512 KB) packing B once and reading A unpacked wins, given N splits
+into >= num_workers NR-tiles. A pack-B-only/no-pack sweep: sq256 1.14,
+512x128x512 1.10, 256x128x512 1.11 (2-sigma WIN at B=512 KB), versus sq192 0.76,
+sq128 0.95, sq96 0.82 (no-pack wins below). The cut is B > 384 KB (with the
+>= num_workers NR-tile guard); `_small_box` routes those to the same
+`_prefill[..., PACK_A=False]` at TileN=4*NELTS, KC=512 (k <= 512 there, so a
+single whole-K panel). sq384 stays put (pack-B-only measured 0.97-0.98 vs its
+pack-both fallback: at K=384 the avoided A-pack is too small to pay).
+
 ## Dead end: x86 M-blocking (GotoBLAS loop 3) for the squares
 
 The SME path's MC blocking (block M so an MC-tall packed-A block stays L2-resident

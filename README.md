@@ -214,8 +214,11 @@ kernels see the same turbo/thermal state:
   wide j-tiles per worker, else the finer 4·NELTS — the fine tile's extra
   j-tiles smooth the balance on the small squares: sq512, with 2 wide tiles per
   worker, runs +2–4% on the fine tile, while sq1024/sq2048 keep the wide tile;
-  see DESIGN.md), holding the large squares at
-  ~0.84 on Skylake / ~0.88–0.91 on the Xeon; (2) the small-box M-parallel route
+  see DESIGN.md). The same pack-B-only path also takes the **big boxes** (B ~ 512 KB,
+  the top of the small-box window) off the no-pack route — sq256, 512×128×512 and
+  256×128×512 lift ~+10–14% (bonly/no-pack) and move from LOSE to parity, while
+  the genuinely small boxes (sq96/128/192) keep no-pack (B > 384 KB cut); (2) the
+  small-box M-parallel route
   flipped the two worst shapes in the whole sweep — square sq96/sq128, which
   interleaved-A/B (peak/40) lifts 0.65–0.71 → 1.0–1.16 — plus the tall
   cache-resident boxes (512×128×512 0.56→0.84, 256×128×512 0.63→0.90); a later
