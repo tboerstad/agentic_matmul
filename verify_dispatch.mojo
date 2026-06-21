@@ -86,6 +86,10 @@ def main() raises:
     check(256, 256, 256)
     check(512, 512, 512)
     check(512, 256, 512)
+    # Large boxes (B ~ 512 KB) now take the pack-B-only path off the box branch:
+    # narrow-N (N=128, no partial panel) and a tall box, both with M-tails.
+    check(512, 128, 512)          # box512: pack-B-only, M tail (512%6=2)
+    check(256, 128, 512)          # tall box: pack-B-only
     check(300, 256, 256)          # M tail (300%6) + square-ish
     check(257, 256, 1100)         # M tail + 3 k-panels (512+512+76)
     check(512, 200, 768)          # N=200, NOT a multiple of 32 (N remainder)

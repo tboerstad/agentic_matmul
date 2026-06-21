@@ -234,7 +234,7 @@ def _pack_b_slab[
 
 def _packed_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
-    NC_TILES: Int, SHARED_A: Bool = False,
+    NC_TILES: Int, SHARED_A: Bool = False, PACK_A: Bool = True,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     """Packed C = A * B: pack A and B into cache-friendly panels, then run the
     `RegisterTile` micro-kernel over them, parallelized across N (j-tiles).
@@ -269,31 +269,33 @@ def _packed_gemm[
     var bp_buf = alloc[Scalar[dtype]](bp_total)
 
     var num_full_panels = m // MR
-    var ap_per_worker: Int
-    var ap_total: Int
-    if SHARED_A:
-        # One shared copy of packed A, laid out [i-panel][k][MR]. ap_per_worker
-        # = 0 so every worker indexes the same buffer (ap_worker == ap_buf).
-        ap_per_worker = 0
-        ap_total = num_i_panels * MR * k
-    else:
-        ap_per_worker = num_i_panels * MR * KC
-        ap_total = num_workers * ap_per_worker
+    var ap_per_worker: Int = 0
+    var ap_total: Int = 1  # min size-1 alloc when PACK_A is off (A read unpacked)
+    comptime if PACK_A:
+        if SHARED_A:
+            # One shared copy of packed A, laid out [i-panel][k][MR].
+            # ap_per_worker = 0 so every worker indexes the same buffer.
+            ap_per_worker = 0
+            ap_total = num_i_panels * MR * k
+        else:
+            ap_per_worker = num_i_panels * MR * KC
+            ap_total = num_workers * ap_per_worker
     var ap_buf = alloc[Scalar[dtype]](ap_total)
 
-    if SHARED_A:
-        # Pre-pack the full A once, in parallel over full MR-row i-panels. Each
-        # panel block is MR*k contiguous, organized [k][MR] so the micro-kernel's
-        # ap_panel + pk*MR + mr indexing matches the per-worker layout (just with
-        # a full-k stride + pc offset instead of a per-panel kc stride).
-        def pack_a_panel(ip: Int) {mut ap_buf, read a_view, read k}:
-            var i0 = ip * MR
-            var ap_panel = ap_buf + ip * MR * k
-            for pk in range(k):
-                var dst = ap_panel + pk * MR
-                comptime for mr in range(MR):
-                    dst[mr] = a_view.row(i0 + mr)[pk]
-        parallelize(pack_a_panel, num_full_panels, num_workers)
+    comptime if PACK_A:
+        if SHARED_A:
+            # Pre-pack the full A once, in parallel over full MR-row i-panels. Each
+            # panel block is MR*k contiguous, organized [k][MR] so the micro-kernel's
+            # ap_panel + pk*MR + mr indexing matches the per-worker layout (just with
+            # a full-k stride + pc offset instead of a per-panel kc stride).
+            def pack_a_panel(ip: Int) {mut ap_buf, read a_view, read k}:
+                var i0 = ip * MR
+                var ap_panel = ap_buf + ip * MR * k
+                for pk in range(k):
+                    var dst = ap_panel + pk * MR
+                    comptime for mr in range(MR):
+                        dst[mr] = a_view.row(i0 + mr)[pk]
+            parallelize(pack_a_panel, num_full_panels, num_workers)
 
     def process_worker(worker_id: Int) {read c_view, read a_view, read b_view, mut bp_buf, mut ap_buf, read m, read n, read k, read num_j_tiles, read num_workers, read bp_per_worker, read ap_per_worker}:
         var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
@@ -318,18 +320,20 @@ def _packed_gemm[
                 is_first_k = (pc == 0)
 
                 # Pack A: KC outer, MR inner so each pk gives MR contiguous
-                # doubles. Skipped under SHARED_A, since A was packed once up front.
+                # doubles. Skipped under SHARED_A (packed once up front) and under
+                # not-PACK_A (the micro-kernel reads A unpacked, linalg-style).
                 var i = 0
                 var ip = 0
-                if not SHARED_A:
-                    while i + MR <= m:
-                        var ap_panel = ap_worker + ip * MR * kc
-                        for pk in range(kc):
-                            var dst = ap_panel + pk * MR
-                            comptime for mr in range(MR):
-                                dst[mr] = a_view.row(i + mr)[pc + pk]
-                        i += MR
-                        ip += 1
+                comptime if PACK_A:
+                    if not SHARED_A:
+                        while i + MR <= m:
+                            var ap_panel = ap_worker + ip * MR * kc
+                            for pk in range(kc):
+                                var dst = ap_panel + pk * MR
+                                comptime for mr in range(MR):
+                                    dst[mr] = a_view.row(i + mr)[pc + pk]
+                            i += MR
+                            ip += 1
 
                 for j_tile_idx in range(jt, jt_batch_end):
                     var j0 = j_tile_idx * TILE_N
@@ -385,8 +389,11 @@ def _packed_gemm[
                         i = 0
                         ip = 0
                         while i + MR <= m:
-                            # SHARED_A: full-k stride per i-panel + pc offset into
-                            # the one shared pack; else per-worker per-kc layout.
+                            # A operand source per K-step: PACK_A reads the packed
+                            # panel at unit stride (SHARED_A: full-k stride per
+                            # i-panel + pc offset; else per-worker per-kc layout);
+                            # not-PACK_A reads A straight from source at stride k
+                            # (a column gather), the linalg-style no-A-pack path.
                             var ap_panel = (
                                 ap_worker + ip * MR * k + pc * MR
                             ) if SHARED_A else (ap_worker + ip * MR * kc)
@@ -411,17 +418,29 @@ def _packed_gemm[
                             while pk < pk_end:
                                 comptime for ku in range(KU):
                                     var step = pk + ku
-                                    tile.rank1_update(
-                                        load_a_col[MR](ap_panel + step * MR, 1),
-                                        load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
-                                    )
+                                    comptime if PACK_A:
+                                        tile.rank1_update(
+                                            load_a_col[MR](ap_panel + step * MR, 1),
+                                            load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
+                                        )
+                                    else:
+                                        tile.rank1_update(
+                                            load_a_col[MR](a_view.addr(i, pc + step), k),
+                                            load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
+                                        )
                                 pk += KU
 
                             while pk < kc:
-                                tile.rank1_update(
-                                    load_a_col[MR](ap_panel + pk * MR, 1),
-                                    load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
-                                )
+                                comptime if PACK_A:
+                                    tile.rank1_update(
+                                        load_a_col[MR](ap_panel + pk * MR, 1),
+                                        load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
+                                    )
+                                else:
+                                    tile.rank1_update(
+                                        load_a_col[MR](a_view.addr(i, pc + pk), k),
+                                        load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
+                                    )
                                 pk += 1
 
                             tile.store(c_block)
@@ -448,29 +467,32 @@ def _packed_gemm[
 
 @always_inline
 def _prefill[
-    dtype: DType, KC: Int, TILE_N: Int, SHARED_A: Bool = False
+    dtype: DType, KC: Int, TILE_N: Int, SHARED_A: Bool = False,
+    PACK_A: Bool = True,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     """The SOTA packed GEMM at its standard 6 x (4*NELTS) register tile (KU=2,
-    NC_TILES=64). KC, TILE_N and SHARED_A are the only levers that vary across
-    shapes, so naming the rest here keeps each dispatch branch a one-liner."""
+    NC_TILES=64). KC, TILE_N, SHARED_A and PACK_A are the only levers that vary
+    across shapes, so naming the rest here keeps each dispatch branch a one-liner."""
     comptime NELTS = simd_width_of[dtype]()
-    _packed_gemm[dtype, 6, 4 * NELTS, KC, 2, TILE_N, 64, SHARED_A](c, a, b)
+    _packed_gemm[dtype, 6, 4 * NELTS, KC, 2, TILE_N, 64, SHARED_A, PACK_A](
+        c, a, b
+    )
 
 
 @always_inline
 def _prefill_kc[
-    dtype: DType, TILE_N: Int, SHARED_A: Bool = False
+    dtype: DType, TILE_N: Int, SHARED_A: Bool = False, PACK_A: Bool = True
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype], kc: Int):
     """Run `_prefill` at the comptime KC rung nearest the runtime cache-aware `kc`.
     KC must be a compile-time constant for the micro-kernel, so the measured rungs
     {512, 1024, 2048} are spelled out here and each large-M branch just passes its
     computed kc, snapping down (kc >= rung)."""
     if kc >= 2048:
-        _prefill[dtype, 2048, TILE_N, SHARED_A](c, a, b)
+        _prefill[dtype, 2048, TILE_N, SHARED_A, PACK_A](c, a, b)
     elif kc >= 1024:
-        _prefill[dtype, 1024, TILE_N, SHARED_A](c, a, b)
+        _prefill[dtype, 1024, TILE_N, SHARED_A, PACK_A](c, a, b)
     else:
-        _prefill[dtype, 512, TILE_N, SHARED_A](c, a, b)
+        _prefill[dtype, 512, TILE_N, SHARED_A, PACK_A](c, a, b)
 
 
 # ===========================================================================
@@ -811,15 +833,20 @@ def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
 def _square_ish_kc(m: Int, n: Int, k: Int) -> Int:
     """Per-L2 KC for the square-ish branch: HALF the wide/tall branches' KC,
     because here the M*KC packed-A competes with the packed-B tile for L2. Yields
-    KC=512 on a 1 MB/core L2 and KC=1024 on a 2 MB/core L2, each the measured
-    best on its machine.
+    KC=1024 from a 1 MB/core L2 up, KC=512 below, each the measured best.
 
-    KC only matters when k > 512, and such a square-ish op (with M*N*K >= 2^28)
-    is multi-ms, so the l2_cache_size() probe is < 2.5%. Smaller shapes skip the
-    probe and take KC=512, keeping cpuid off the hot path for the few-us shapes."""
+    KC only bites when k > 512 (a single panel covers shorter K either way), and
+    such a square-ish op (with M*N*K >= 2^28) is multi-ms, so the l2_cache_size()
+    probe is < 2.5%. Smaller shapes skip the probe and take KC=512, keeping cpuid
+    off the hot path for the few-us shapes. The 1 MB cut (was 1.5 MB, picking
+    KC=512 on the 1 MB Skylake) followed a current-nightly interleaved A/B: KC1024
+    beats KC512 on that part, sq1024 +3.6% / sq2048 +2.9% (2-sigma WIN), reusing
+    each L2-resident C micro-tile across twice the K before its load/store. The
+    512 KB packed-B tile (wide TILE_N x 1024) needs the full 1 MB L2 to coexist
+    with packed A and C, so sub-1 MB parts stay on KC=512. DESIGN.md."""
     if k <= 512 or m * n * k < (1 << 28):
         return 512
-    return 1024 if l2_cache_size() >= (3 << 19) else 512
+    return 1024 if l2_cache_size() >= (1 << 20) else 512
 
 
 def _box_l2_budget() -> Int:
@@ -1063,12 +1090,28 @@ def _thin_n[
 def _small_box[
     dtype: DType
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """Small M-dominant box whose B is L2-resident (see _box_fits_l2): the same
-    no-pack M-parallel kernel (NR=32). MR=6 (24 accumulators, deepest ILP) when it
-    divides M with no tail, else MR=4 (16 accumulators, divides every multiple-of-4
-    box). DESIGN.md "_nopack_gemm MR"."""
+    """Small M-dominant box whose B is L2-resident (see _box_fits_l2).
+
+    The bigger boxes (B ~ 512 KB, the top of the admission window) take the same
+    pack-B-only / TileK=K path as the squares: packing B once and reading A
+    unpacked beats re-reading all of B per MR-row block once B is large, as long
+    as N splits into >= num_workers NR-tiles to fill the cores. Measured
+    bonly/no-pack: sq256 1.14, 512x128x512 1.10, 256x128x512 1.11 (2-sigma WIN),
+    while the genuinely small boxes lose it (sq192 0.76, sq128 0.95, sq96 0.82) and
+    keep the no-pack M-parallel kernel. The cut is B > 384 KB. DESIGN.md.
+
+    No-pack uses NR=32, MR=6 (24 accumulators, deepest ILP) when it divides M with
+    no tail, else MR=4 (divides every multiple-of-4 box). DESIGN.md "_nopack_gemm MR"."""
+    comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
-    if m % 6 == 0:
+    var n = c.cols
+    var k = a.cols
+    var b_bytes = k * n * size_of[Scalar[dtype]]()
+    if b_bytes > (3 << 17) and ceildiv(n, 4 * NELTS) >= compute_core_count():
+        # k <= 512 here (B <= 512 KB with N >= 4*NELTS), so KC=512 is a single
+        # whole-K panel: C is swept over all of K and stored once.
+        _prefill[dtype, 512, 4 * NELTS, False, False](c, a, b)
+    elif m % 6 == 0:
         _nopack_gemm[dtype, 6, 4](c, a, b)
     else:
         _nopack_gemm[dtype, 4, 4](c, a, b)
@@ -1088,25 +1131,53 @@ def _narrow_n[
 def _square_ish[
     dtype: DType
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """Square-ish (192 < N <= M): a finer tile + smaller KC than the wide/tall
-    branches keep both packs L2-resident and multiply the j-tile count. KC by
-    detected L2 (_square_ish_kc). TILE_N wide (8*NELTS) only when each worker gets
-    >= 4 wide j-tiles, else fine (4*NELTS) to smooth load balance. SHARED_A, since
-    here A is as large as B/C. DESIGN.md "_square_ish TILE_N"."""
+    """Square-ish (192 < N <= M): the pack-B-only GEMM that matches stdlib linalg's
+    edge here (found by reading linalg/matmul/cpu + utils and emit-asm). On a square
+    A is as large as B, so packing A is pure overhead and the packed-A buffer
+    competes with B/C in cache; linalg packs ONLY B and reads A unpacked (strided
+    column broadcasts), and sets TileK = min(K, 2048) so each C micro-tile is swept
+    over the whole K and STORED ONCE. We do the same: PACK_A=False, KC at the rung
+    >= min(K, 2048), and TileN shrunk so the packed-B tile (TileN x KC) stays within
+    a ~512 KB pack budget (TileN = 128 / 64 / 32 as K = 512 / 1024 / 2048). Measured
+    interleaved A/B vs the old pack-both square path: sq512 +19%, sq768 +14%,
+    sq1024 +12%, sq1536 +12%, sq2048 +6.5%.
+
+    The pack-B-only path parallelizes over N (j-tiles), so it needs >= num_workers
+    j-tiles to fill the cores. A small-N square-ish shape (or sq384, whose budget
+    TileN=128 leaves only 3 tiles) keeps the old pack-both path. DESIGN.md
+    "Square-ish: pack-B-only / TileK=K"."""
     comptime NELTS = simd_width_of[dtype]()
-    comptime TN_WIDE = 8 * NELTS
-    comptime TN_FINE = 4 * NELTS
     var m = a.rows
     var n = c.cols
     var k = a.cols
-    var njt_wide = ceildiv(n, TN_WIDE)
     var num_workers = compute_core_count()
-    var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 4
-    var kc = _square_ish_kc(m, n, k)
-    if use_wide:
-        _prefill_kc[dtype, TN_WIDE, True](c, a, b, kc)
+
+    # linalg's budget rule: TileK = min(K, 2048) (C stored once), TileN shrunk so
+    # the packed-B tile stays ~512 KB. Snap K to the comptime KC rung that still
+    # covers it in a single panel.
+    comptime TN_K512 = 16 * NELTS   # 128: packed-B 128 x 512 x 8 = 512 KB
+    comptime TN_K1024 = 8 * NELTS   # 64:  64 x 1024 x 8 = 512 KB
+    comptime TN_K2048 = 4 * NELTS   # 32:  32 x 2048 x 8 = 512 KB
+
+    if k <= 512 and ceildiv(n, TN_K512) >= num_workers:
+        _prefill[dtype, 512, TN_K512, False, False](c, a, b)
+    elif k <= 1024 and ceildiv(n, TN_K1024) >= num_workers:
+        _prefill[dtype, 1024, TN_K1024, False, False](c, a, b)
+    elif k > 1024 and ceildiv(n, TN_K2048) >= num_workers:
+        _prefill[dtype, 2048, TN_K2048, False, False](c, a, b)
     else:
-        _prefill_kc[dtype, TN_FINE, True](c, a, b, kc)
+        # Too few j-tiles for the pack-B-only N-parallel path to fill the cores
+        # (small-N square-ish, sq384): keep the old pack-both path, L2-adaptive KC
+        # + load-balanced TILE_N (wide 8*NELTS at >= 4 wide j-tiles/worker, else fine).
+        comptime TN_WIDE = 8 * NELTS
+        comptime TN_FINE = 4 * NELTS
+        var njt_wide = ceildiv(n, TN_WIDE)
+        var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 4
+        var kc = _square_ish_kc(m, n, k)
+        if use_wide:
+            _prefill_kc[dtype, TN_WIDE, True](c, a, b, kc)
+        else:
+            _prefill_kc[dtype, TN_FINE, True](c, a, b, kc)
 
 
 @always_inline
@@ -1178,9 +1249,9 @@ def matmul_dispatch[
         SME small  6<=M<16 (Apple f64)  _sme_small    8x32 FMOPA coprocessor tile
         SME  M>=16 (Apple f64)          _sme          16x32 FMOPA coprocessor tile
         thin-N  N<=8*NELTS, M>=64       _thin_n       M-parallel, no packing
-        small box  M>=N, B fits L2      _small_box    M-parallel, no packing
+        small box  M>=N, B fits L2      _small_box    no-pack (pack-B-only at B>384KB)
         narrow-N  N<=192                _narrow_n     packed NR=16 -> >= 4 j-tiles
-        square-ish  N<=M                _square_ish   packed 6x32, L2-adaptive KC
+        square-ish  N<=M                _square_ish   pack-B-only 6x32, TileK=K
         wide-N  N>=K                    _wide_n       packed 6x32 (8x24 for N>=9k, M<=32)
         tall-K  N<K                     _tall_k       packed 6x32, cache-aware KC
 

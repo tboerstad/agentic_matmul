@@ -117,13 +117,94 @@ have since flipped. On the 1 MB Skylake, L2/3 = 341 KB sits below the
 compile-time 512 KB tier-1 cut, so that part simply keeps no-pack for B ≤ 512 KB
 (sq288/sq320 there already preferred packed).
 
-## `_square_ish_kc`: opposite picks per machine
+## `_square_ish_kc`: KC=1024 from 1 MB L2 up
 
-Interleaved A/B (peak/25) gives Machine A (1 MB) KC512 > KC1024 (sq2048 0.84 vs
-0.72, sq1024 0.84 vs 0.80), while Machine B (2 MB) measured KC1024 > KC512
-(sq768..2048 +3–6%) — opposite conclusions a single hardcoded KC can't satisfy.
-The `l2_cache_size()` probe is ~6 cpuid → ~61 µs VM-exit on a KVM guest, < 2.5%
-of a multi-ms square-ish op; smaller shapes skip it entirely.
+KC sets how many times each L2-resident C micro-tile is loaded and stored for
+k-panel accumulation: a deeper KC sweeps more of K per residency, so C is
+touched fewer times. The cut is where the KC-deep packed-B tile (wide TILE_N x
+KC = 512 KB at KC=1024) still coexists in L2 with the packed-A panel and the C
+accumulators. The probe (`l2_cache_size()`, ~6 cpuid → ~61 µs VM-exit on a KVM
+guest, < 2.5% of a multi-ms square-ish op) picks KC=1024 from a 1 MB/core L2 up,
+KC=512 below; smaller shapes skip it (k <= 512 is a single panel either way).
+
+The 1 MB cut replaced an earlier 1.5 MB one. On the 1 MB Skylake an older
+nightly measured KC512 > KC1024 (then sq2048 0.84 vs 0.72), so the cut kept that
+part on KC512. A current-nightly interleaved A/B (12 epochs, peak-of-15, KC the
+only lever at each shape's tile width) flipped it: KC1024/KC512 is sq1024 1.036
++/- 0.007 and sq2048 1.029 +/- 0.007 (both 2-sigma WIN), sq1536 1.015 (tie). The
+linalg/codegen the ratio is judged against also moved across nightlies, so the
+crossover is a measured, nightly-specific number, not a fixed property of the
+part (AGENTS.md warns picks flip across nightlies). Machine B (2 MB) was already
+on KC1024 and is unchanged. (This KC pick now governs only the square-ish
+*fallback* path; the balanced squares take the pack-B-only path below.)
+
+## Square-ish: pack-B-only / TileK=K (matching stdlib linalg)
+
+The square-ish branch was the residual loss (sq512 0.80, sq2048 0.93 vs linalg).
+emit-asm showed our FMA micro-kernel is byte-identical to linalg's (the same
+6x32 / 24-accumulator `vfmadd231pd` nest, no spills), so the gap is entirely in
+the orchestration. Reading linalg's open source (`max/kernels/src/linalg/`:
+`matmul/cpu/impl.mojo` + `utils.mojo`) pinned down two coupled choices its
+`TiledMatmul` makes that ours did not:
+
+1. **It packs only B, never A.** The inner kernel reads A straight from the
+   source as strided column broadcasts (the `vbroadcastsd (%r13,%r9)` with the
+   `addq %r13` row stride in the asm). On a square A is as large as B, so our
+   A-pack was a full M*K copy of pure overhead, and the packed-A buffer competed
+   with B and C for L3.
+2. **TileK = min(K, 2048)** (`calculate_tile_n_k`, from a 512 KB pack budget /
+   kernel_cols=32). For every benchmark square (K <= 2048) that is the *whole* K
+   in one panel, so each C micro-tile is swept over all of K and **stored once**,
+   versus our KC-panel splitting that re-loaded and re-stored C per panel. TileN
+   is then shrunk (128 / 64 / 32 as K = 512 / 1024 / 2048) to keep the packed-B
+   tile (TileN x TileK) within the 512 KB budget.
+
+Neither half works alone, which is why the earlier single-lever attempts all
+missed (KC sweep = C-once without dropping the A-pack; M-blocking = A-residency
+at KC=512; 2D = a tie; each had only one piece). They are also coupled the wrong
+way if you keep A-packing: TileK=K with a narrow TileN and a *packed* A explodes
+the packed-A re-read (measured 0.43). Dropping the A-pack removes that, because
+the unpacked source-A re-read streams from L3 and the HW prefetcher hides it.
+
+Implemented as `PACK_A=False` on `_packed_gemm` (skip the A-pack; the micro-kernel
+reads A via `load_a_col[MR](a_view.addr(i, pc+step), k)` at row-stride k) plus the
+budget (KC, TileN) rungs. Interleaved A/B vs the old pack-both square path: sq512
+1.188, sq768 1.141, sq1024 1.118, sq1536 1.117, sq2048 1.065 (all 2-sigma WIN);
+bit-identical to naive (verify_dispatch max_err 0.0). The path parallelizes over
+N, so it is gated to shapes with >= num_workers j-tiles at the budget TileN; a
+small-N square-ish shape (or sq384, whose TileN=128 leaves 3 tiles) keeps the
+pack-both fallback. The headline wide/tall/decode shapes never enter square-ish,
+so they are untouched.
+
+The same pack-B-only path also took the **big boxes** off the no-pack route. The
+small-box branch (`_small_box`, M-parallel no-pack: re-reads all of B per MR-row
+block) is right only while B is genuinely small; at the top of its admission
+window (B ~ 512 KB) packing B once and reading A unpacked wins, given N splits
+into >= num_workers NR-tiles. A pack-B-only/no-pack sweep: sq256 1.14,
+512x128x512 1.10, 256x128x512 1.11 (2-sigma WIN at B=512 KB), versus sq192 0.76,
+sq128 0.95, sq96 0.82 (no-pack wins below). The cut is B > 384 KB (with the
+>= num_workers NR-tile guard); `_small_box` routes those to the same
+`_prefill[..., PACK_A=False]` at TileN=4*NELTS, KC=512 (k <= 512 there, so a
+single whole-K panel). sq384 stays put (pack-B-only measured 0.97-0.98 vs its
+pack-both fallback: at K=384 the avoided A-pack is too small to pay).
+
+## Dead end: x86 M-blocking (GotoBLAS loop 3) for the squares
+
+The SME path's MC blocking (block M so an MC-tall packed-A block stays L2-resident
+across a worker's j-tiles, instead of re-reading the full M x KC panel per j-tile)
+lifts the squares a lot on Apple, where SME's ~1000 GFLOPS makes memory the wall.
+Ported to the x86 `_packed_gemm` (a comptime-gated BLOCK_M variant that pre-packs
+the worker's j-tile B slabs, then sweeps MC-row blocks outside the j-tile loop) it
+did not pay. An interleaved A/B blocked-vs-flat (10 epochs, peak-of-12) measured
+sq1024 0.973 and sq1536 0.982 (2-sigma LOSE), sq384/sq512/sq768/sq2048 ~1.0 (tie):
+a tie-to-slight-loss, never a win. The full M x KC packed-A panel (8 MB on sq2048)
+fits the 33 MB L3, and at the ~290 GFLOPS AVX-512 ceiling L3 bandwidth absorbs the
+per-j-tile re-read the blocking removes, while pre-packing all the worker's B adds
+its own L3 traffic. A separate clean 2D (M-block x N-block) decomposition A/B was
+also a dead tie (sq384 1.02, sq2048 0.99). The actual gap was not A-panel reuse
+or 2D at all: it was the A-pack overhead + per-panel C reloads, fixed by the
+pack-B-only / TileK=K path above (which reads linalg's source rather than guessing
+at the structure from the asm).
 
 ## Apple Silicon (M-series): big.LITTLE / shared-cache NEON adaptations
 

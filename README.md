@@ -200,15 +200,25 @@ kernels see the same turbo/thermal state:
 - General-shape `--full` sweep: a clear majority WIN after the small-N /
   wide-N-small-M / square-large-M / small-box fixes (the exact tally swings
   ±several with VM turbo/thermal, so judge per-shape via interleaved A/B, not the
-  single-run count). Two recent levers: (1) the square-ish branch now picks KC
-  by detected L2 (KC=512 on the 1 MB Skylake, KC=1024 on the 2 MB Xeon — each
-  the measured best on its machine; a single hardcoded KC=1024 had sunk Skylake
-  sq2048 to ~0.72) plus a load-balance-aware TILE_N (wide 8·NELTS only at >= 4
+  single-run count). Two recent levers: (1) the square-ish branch is now a
+  **pack-B-only / TileK=K** GEMM matching stdlib linalg (found by reading linalg's
+  open source + emit-asm: on a square A is as large as B, so linalg packs only B,
+  reads A unpacked, and sweeps the whole K so C is stored once). We do the same
+  (PACK_A=False, KC at the rung >= min(K,2048), TileN shrunk to a 512 KB pack
+  budget): interleaved A/B vs the old pack-both square path is sq512 +19%, sq768
+  +14%, sq1024 +12%, sq1536 +12%, sq2048 +6.5% (all 2σ WIN), bit-identical to
+  naive. Small-N square-ish and sq384 (too few j-tiles for the N-parallel
+  pack-B-only path) keep the old pack-both fallback, which picks KC by detected L2
+  (KC=1024 from a 1 MB/core L2 up, KC=512 below) plus a load-balance-aware TILE_N
+  (wide 8·NELTS only at >= 4
   wide j-tiles per worker, else the finer 4·NELTS — the fine tile's extra
   j-tiles smooth the balance on the small squares: sq512, with 2 wide tiles per
   worker, runs +2–4% on the fine tile, while sq1024/sq2048 keep the wide tile;
-  see DESIGN.md), holding the large squares at
-  ~0.84 on Skylake / ~0.88–0.91 on the Xeon; (2) the small-box M-parallel route
+  see DESIGN.md). The same pack-B-only path also takes the **big boxes** (B ~ 512 KB,
+  the top of the small-box window) off the no-pack route — sq256, 512×128×512 and
+  256×128×512 lift ~+10–14% (bonly/no-pack) and move from LOSE to parity, while
+  the genuinely small boxes (sq96/128/192) keep no-pack (B > 384 KB cut); (2) the
+  small-box M-parallel route
   flipped the two worst shapes in the whole sweep — square sq96/sq128, which
   interleaved-A/B (peak/40) lifts 0.65–0.71 → 1.0–1.16 — plus the tall
   cache-resident boxes (512×128×512 0.56→0.84, 256×128×512 0.63→0.90); a later
