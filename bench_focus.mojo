@@ -87,3 +87,6 @@ def main() raises:
     # Small cache-resident boxes (noisy; on all cores via _nopack_gemm).
     bench_shape("sq128   ", 128, 128, 128, n_runs)
     bench_shape("sq256   ", 256, 256, 256, n_runs)
+    bench_shape("sq384   ", 384, 384, 384, n_runs)
+    bench_shape("box512  ", 512, 128, 512, n_runs)
+    bench_shape("oddN    ", 512, 11007, 2048, n_runs)
