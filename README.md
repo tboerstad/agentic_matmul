@@ -6,11 +6,10 @@ An experiment in writing optimized matmul kernels in Mojo using only [Claude Cod
 - **Prefill:** 96 × 11008 × 2048 (compute-bound)
 
 Beyond those, the dispatch kernel and the `bench_focus.mojo` harness now run a
-wider shape set and other element types (`--dtype f32/f16/bf16`); see
-COMPARISON.md for the float64 and float32 results vs `linalg` and OpenBLAS.
-The kernel tiles and cache-blocking constants are tuned for float64, so float32
-currently trails `linalg` by a few percent on the compute-bound square band
-(an open tuning item, tracked in COMPARISON.md).
+wider shape set and other element types (`--dtype f32/f16/bf16`). The kernel
+tiles and cache-blocking constants are tuned for float64, so float32 currently
+trails `linalg` by a few percent on the compute-bound square band (an open
+tuning item).
 
 ## Results
 
