@@ -128,6 +128,26 @@ Reading of the f32 results:
   others. OpenBLAS pulls ahead only on the small / odd corners (sq128 203 vs
   158, sq384 436 vs 274).
 
+### Open tuning item: the f32 compute-band gap
+
+The f32 losses are spread across both the square-ish path (sq1024, sq2048) and
+the wide/tall path (M512-g, up-m512, dn-m512), which share the same register
+micro-kernel (`6 x 4*NELTS`, i.e. 6x64 in f32). Two contained KC ideas were
+investigated and ruled out by measurement, not committed:
+
+- Making `_square_ish_kc` dtype-aware is a no-op for the losing shapes. sq1024
+  and sq2048 ride the pack-B-only path (KC rungs 1024 / 2048), which never calls
+  `_square_ish_kc`; the helper only fires in the fallback where k <= 512, so
+  KC=512 already covers all of K.
+- Raising the square pack-B-only packed-B tile from the 512 KB target to the
+  half-L2 (1 MB) BLIS budget used by the wide/tall band did not clear the 2-sigma
+  bar in f32 (sq1024 0.961 +/- 0.013 vs 0.962 baseline; sq2048 0.947 +/- 0.014 vs
+  0.931, bands fully overlapping, both still LOSE). Reverted.
+
+The common factor is the f64-shaped micro-kernel tile, so closing the f32 gap is
+a per-dtype micro-kernel tuning pass (tile shape / register pressure at 6x64),
+not a cache-constant tweak. Left as future work.
+
 float16 and bfloat16: the kernels compile and run at these dtypes (via
 `--dtype f16` / `--dtype bf16`), and `matmul_dispatch` is generic over dtype,
 but on this x86 build there is no vectorized half-precision FMA path, so they
