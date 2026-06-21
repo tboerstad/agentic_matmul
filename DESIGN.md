@@ -125,11 +125,12 @@ Interleaved A/B (peak/25) gives Machine A (1 MB) KC512 > KC1024 (sq2048 0.84 vs
 The `l2_cache_size()` probe is ~6 cpuid → ~61 µs VM-exit on a KVM guest, < 2.5%
 of a multi-ms square-ish op; smaller shapes skip it entirely.
 
-## Apple Silicon (M-series): four big.LITTLE / shared-cache adaptations
+## Apple Silicon (M-series): big.LITTLE / shared-cache NEON adaptations
 
 The kernels were tuned on 4-core AVX-512 Xeons; the constants above are x86.
-Apple Silicon differs on three axes that the original picks get wrong, so the
-five adaptations below are each behind `comptime CompilationTarget.is_apple_silicon()`
+Apple Silicon differs on several axes that the original picks get wrong, so the
+five NEON adaptations below (and the SME / decode rewrites in the next two
+sections) are each behind `comptime CompilationTarget.is_apple_silicon()`
 and compile away to the byte-for-byte x86 path off Apple. NELTS auto-scales
 (2 for f64 NEON vs 8 for AVX-512), so the register tile is already correct: the
 6×(4·NELTS) tile is 24 SIMD accumulators on both, and with KU=2 it needs 32
@@ -195,7 +196,69 @@ What did **not** move on Apple (all within the noise floor, so left at the x86
 pick): the large-band KC (the 16 MB shared L2 keeps even KC=2048 resident), the
 square-ish wide-vs-fine TILE_N, the prefill-band TILE_N, the decode worker count
 below P, the thin-N tile width, and the software-prefetch distance (the HW
-prefetcher is strong enough that `PREFETCH_B_DIST` is irrelevant). The residual
-gap to OpenBLAS on the big squares (~430 vs ~635 GFLOPS) is the same algorithmic
-gap noted in the README "Still open" (pack/compute overlap or M-blocking), not a
-tunable constant.
+prefetcher is strong enough that `PREFETCH_B_DIST` is irrelevant).
+
+## SME (matrix coprocessor): breaking the NEON ceiling (`sme_kernel.mojo`)
+
+The five adaptations above are all *NEON* wins, and NEON is the wall: a memory-free
+f64 FMA microbenchmark measures **51 GFLOPS/core**, so the 10 P-cores cap near
+**515 GFLOPS** f64. Yet Accelerate hits ~700–790 on the heavy GEMMs and its decode
+is single-thread == multi-thread — the signature of the **SME matrix coprocessor**
+(`hw.optional.arm.FEAT_SME_F64F64 = 1`, SVL = 512 bit). f64 `FMOPA` does an 8×8
+outer-product accumulate into a ZA tile (128 flops/instr). A throughput sweep finds
+**two** SME units on the M4 Max (one per P-cluster): 1 thread → 490, 2 → 985,
+plateau ~1035 GFLOPS. So NEON cannot reach Accelerate, but a two-thread SME GEMM can
+beat it.
+
+`sme_kernel.mojo` drives SME from Mojo via `inlined_assembly`:
+
+- **Micro-kernel:** a 16×32 C block held in all eight ZA.D tiles (a 2×4 grid of
+  8×8). Per K-step: 2 A-loads + 4 B-loads + 8 FMOPA. A is packed column-major
+  (16-row panels); B is read in place (its 32 row-columns are contiguous), advancing
+  one row (`ldb`) per step — only A needs packing.
+- **Blocking:** GotoBLAS (pc, ic-block, jt, it). pc blocks K by KC, ic-block blocks
+  M by MC so the MC-tall A block stays L2-resident across the worker's j-tiles (A
+  read from DRAM once per worker, not once per j-strip — this is what lifts sq2048
+  534→757 and dn-m512 439→781). C accumulates across k-panels in ZA: the first panel
+  zeroes ZA (`_sme_micro_z`), later panels reload C into ZA, add, store
+  (`_sme_micro_a`). Config: no blocking when A fits L2 and N is wide (prefill,
+  up-proj); KC=512/MC=128 for squares; KC=384/MC=256 for K ≥ 4096.
+- **Two SME units:** parallelize the N j-strips across `nw=2` workers.
+- **Any M/N:** N % 32 uses a column overlap tile (a full 32-wide tile shifted to start
+  at N−32, separate pass, overwrites the small overlap with identical full-sum values).
+  M % 16 is **folded into the main sweep** as a partial last i-tile — A's panel is
+  zero-padded past row M, the full tile is computed, and only the rM valid rows are
+  written straight to C by row-limited micro-kernels (`_sme_micro_z_part`/`_a_part`,
+  two bounded asm loops over za0–3 / za4–7). Keeping it in the blocked sweep preserves
+  B-reuse/pipelining: a separate M-remainder pass had left M100 at 0.81×; folded it is
+  0.92× (and large M%16 ≈ 0.98×). Odd-N large shapes (512×11007×2048: 514→822) stay on
+  SME instead of dropping to the NEON ceiling.
+- **The register-file trap:** `smstart` zeroes the whole SVE register file (z0–z31,
+  p0–p15). The inline asm MUST clobber all of them, or the compiler assumes the
+  callee-saved v8–v15 survive and silently corrupts the caller's FP — a heisenbug
+  that made a folded constant `2.0*1000/4` evaluate to 0.0.
+
+Routed for f64, `m ≥ 64`, `n ≥ 32`, `M·N·K ≥ 2^21`. Measured dispatch-vs-Accelerate
+peak: prefill 1.02×, sq512 1.50×, sq1024 1.27×, sq2048 1.10×, sq256 1.38×, sq384
+0.97×, M512-g 0.97×, up-proj 1.06–1.12×, dn-proj 0.98×, odd-N 1.01×.
+
+**Open residual:** tiny (128³, ~0.77×), narrow-N box (512×128×512, ~0.90× at peak),
+and sub-16-M batch (M=6, ~0.68×) shapes. Each needs a specialized micro-kernel a
+production BLAS keeps on hand — a low-overhead small-matrix path (sq128: too few
+j-tiles for two SME units, per-tile `smstart`/`smstop` bites), a narrow-N tile
+orientation (box512), or an 8-row tile (M<16, where the 16-row tile wastes >half its
+FMOPA). These sit below the NEON ceiling too, so NEON does not reach them either, and
+Accelerate's mature AMX small/narrow path wins. The square decode GEMV (1×4096×4096)
+and M%16 batches (M100) are now handled (over-decomposed K / folded partial tile).
+
+Decode (M = 1) is bandwidth-bound, not an SME problem: a memory-free read sweep hits
+242 GB/s on the P-cores with plain NEON, *above* Accelerate's ~228 GB/s decode, but
+the old column-split GEMV only sustained 132 (it read a strided column slice of
+row-major B). Splitting by K-rows — each worker streams contiguous B rows into a
+private partial-C, then a parallel reduce — fixes the access pattern. A fixed nw-way
+K split, though, left ~1/3 of bandwidth on the table when K did not divide evenly
+across the P-cores (1×4096×4096 ran 0.68× at nw=10); **over-decomposing K into ~4×
+more chunks than workers** lets `parallelize` work-steal a balanced share, taking both
+the headline 1×11008×2048 and the square 1×4096×4096 to ~1.0× Accelerate (37→57,
+40→58). (Apple-gated: the partial reduction reorders the f64 sum, ~1e-12, within the
+dispatch's 1e-7 tolerance but not bit-identical to the x86 column-split.)

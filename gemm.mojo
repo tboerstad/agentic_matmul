@@ -1,5 +1,6 @@
 from cpu_cache import l2_cache_size, compute_core_count
 from matrix import Matrix
+from sme_kernel import sme_gemm_ptr, sme_gemm_small_ptr
 from tile import Tile
 from std.algorithm.functional import parallelize, vectorize
 from std.collections import InlineArray
@@ -536,6 +537,59 @@ def _decode_gemv[
     var k = a_view.cols
     var nw = compute_core_count()
 
+    comptime if CompilationTarget.is_apple_silicon():
+        # Apple Silicon: split by K-ROWS, not by N-columns. The column-split below
+        # has each worker read a strided column slice of row-major B (stride N
+        # between consecutive K rows), which only sustains ~132 GB/s of the ~242
+        # GB/s the P-cores can read sequentially. Splitting by K instead lets each
+        # worker stream a CONTIGUOUS block of B's rows (fully sequential, full
+        # bandwidth) into a private full-width partial-C, then a parallel reduce
+        # sums the partials. Decode 1x11008x2048: 33 -> ~58 GFLOPS (matches
+        # Accelerate). The partials sum in a different order than the column-split,
+        # so this is not bit-identical to the x86 path (~1e-12 f64 reorder, well
+        # inside the 1e-7 dispatch tolerance), which is why it is Apple-gated.
+        comptime W = 4 * NELTS
+        var a_ptr = a_view.ptr
+        var b_ptr = b_view.ptr
+        var c_ptr = c_view.ptr
+        # Over-decompose K into more chunks than workers (~4x) so parallelize
+        # work-steals a balanced share regardless of how K divides across the
+        # P-cores. A fixed nw-way split left ~1/3 of bandwidth on the table when K
+        # did not divide evenly (1x4096x4096 ran 40 at nw=10 vs 61 at 40 chunks);
+        # over-decomposition takes both decode shapes to ~102-103% of Accelerate.
+        var nchunks = 4 * nw
+        if nchunks > k: nchunks = k
+        var partials = alloc[Scalar[dtype]](nchunks * m * n)
+        def row_worker(ch: Int) {read partials, read a_ptr, read b_ptr, read m, read n, read k, read nchunks}:
+            var per = ceildiv(k, nchunks)
+            var k0 = ch * per
+            var k1 = min(k0 + per, k)
+            var pbase = partials + ch * m * n
+            for x in range(m * n):
+                pbase[x] = 0
+            for kk in range(k0, k1):
+                var brow = b_ptr + kk * n
+                for i in range(m):
+                    var aik = a_ptr[i * k + kk]
+                    var p = pbase + i * n
+                    var j = 0
+                    while j + W <= n:
+                        p.store(j, p.load[width=W](j) + aik * brow.load[width=W](j))
+                        j += W
+                    while j < n:
+                        p.store(j, p.load(j) + aik * brow.load(j))
+                        j += 1
+        parallelize(row_worker, nchunks, nw)
+        # Reduce the nchunks partials into C, parallelized over output elements.
+        def reduce(x: Int) {read partials, read c_ptr, read m, read n, read nchunks}:
+            var s = Scalar[dtype](0)
+            for w in range(nchunks):
+                s += partials[w * m * n + x]
+            c_ptr[x] = s
+        parallelize(reduce, m * n, nw)
+        partials.free()
+        return
+
     memset_zero(c_view.ptr, m * n)
 
     def worker(wid: Int) {read c_view, read a_view, read b_view, read m, read n, read k, read nw}:
@@ -828,6 +882,27 @@ def matmul_dispatch[
     # parallelize (e.g. 8x8x4096 stays serial), so it keeps the 2^19 cutoff. On
     # x86 both arms are 2^19, byte-for-byte unchanged.
     comptime APPLE = CompilationTarget.is_apple_silicon()
+    # The SME f64 coprocessor path is Apple-Silicon + float64 only (the FMOPA
+    # micro-kernel is f64-specific). On x86 / other dtypes APPLE_F64 is comptime
+    # False, so sme_eligible is always False and the whole branch compiles away.
+    comptime APPLE_F64 = APPLE and (dtype == DType.float64)
+    var sme_eligible = False
+    var sme_small_eligible = False
+    comptime if APPLE_F64:
+        # At least one 16-row tile (m >= 16, the overlap remainder path needs M >= 16),
+        # N >= 32 (the column overlap-tile needs N - 32 >= 0), and large enough that
+        # driving the coprocessor beats the NEON kernels (~2M MACs: below that the
+        # streaming-mode entry + per-tile setup dominates; sq64 stays serial/NEON).
+        # M % 16 / N % 32 need not be zero: sme_gemm_ptr handles the remainder rows
+        # and columns with in-bounds overlap tiles, so odd-N/odd-M large shapes (which
+        # would otherwise fall to the ~515 GFLOPS NEON ceiling) also reach the SME band.
+        sme_eligible = m >= 16 and n >= 32 and (m * n * k >= (1 << 21))
+        # Small-M batch (6 <= M < 16): the 16-row tile would waste over half its
+        # FMOPA, so use the 8x32 tile (sme_gemm_small_ptr). n >= 256 keeps thin-N
+        # small-M on the NEON no-pack path.
+        sme_small_eligible = (
+            m >= 6 and m < 16 and n >= 256 and (m * n * k >= (1 << 21))
+        )
     var tiny_macs = (1 << 18) if (APPLE and m >= 64) else (1 << 19)
     if m * n * k < tiny_macs:
         # Tiny: a plain serial register-tiled loop. Below the cutoff the parallel
@@ -850,6 +925,60 @@ def matmul_dispatch[
             _packed_gemm[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
         else:
             _packed_gemm[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    elif sme_small_eligible:
+        # Small-M batch on the 8x32 SME tile (wastes far less FMOPA than the 16-row
+        # tile when M < 16). M6x4096x4096 0.68x -> 0.87x Accelerate.
+        comptime if APPLE_F64:
+            sme_gemm_small_ptr(
+                c.data.unsafe_ptr().bitcast[Float64](),
+                a.data.unsafe_ptr().bitcast[Float64](),
+                b.data.unsafe_ptr().bitcast[Float64](),
+                m, n, k, 2,
+            )
+    elif sme_eligible:
+        # Apple SME (matrix coprocessor) f64 path. The NEON kernels below cap at
+        # the ~515 GFLOPS f64 NEON ceiling of the 10 P-cores; Accelerate beats that
+        # by driving the SME units (two of them on M4 Max, ~1035 GFLOPS aggregate).
+        # The 16x32 FMOPA micro-kernel (sme_kernel.mojo) reaches that band: 98-150%
+        # of Accelerate on the compute-bound shapes. Gated to f64 + Apple Silicon +
+        # enough work to amortize the coprocessor entry; x86 and every other dtype
+        # skip this branch (sme_eligible is comptime-false). Non-divisible M/N is
+        # handled by the kernel's overlap-tile remainder path.
+        comptime if APPLE_F64:
+            # Pick (KC, MC). Skip blocking and run one full sweep when either the
+            # packed A fits L2 and N is wide (many j-strips keep A L2-resident:
+            # prefill, up-proj) or N is narrow (n < 192, too few j-tiles for the
+            # MC-block's A-reuse to pay, and blocking only adds C-reload traffic:
+            # box512). Otherwise block: the MC-tall A block stays L2-resident across
+            # the worker's j-tiles (A read from DRAM once per worker, not once per
+            # j-strip), KC keeps the B k-panel L1-resident, and large K wants a finer KC.
+            var BIG = 1 << 30
+            var kc = BIG
+            var mc = BIG
+            # No-block only when the B k-strip itself stays cache-friendly: A fits
+            # L2, N wide, AND K small enough (<= 2048) that the in-place strided
+            # B-strip (K x 32) does not thrash. Large K needs KC blocking to keep the
+            # B k-panel L1-resident even when A fits (small-M wide shapes at K=4096
+            # ran 316 no-block vs 468 blocked). Narrow N (< 192) has too few j-tiles
+            # for blocking to pay regardless.
+            var a_fits_wide = n >= 4096 and m * k * 8 <= (12 << 20) and k <= 2048
+            if not (a_fits_wide or n < 192):
+                # Squares / moderate-K: KC=512, MC=128 (8 i-tiles per block) measured
+                # best. Large K (>= 4096): a finer KC=384 with MC=256.
+                if k >= 4096:
+                    kc = 384
+                    mc = 256
+                else:
+                    kc = 512
+                    mc = 128
+            # dtype is float64 here (comptime), so bitcast is a no-op reinterpret
+            # that satisfies the f64 pointer type sme_gemm_ptr expects.
+            sme_gemm_ptr(
+                c.data.unsafe_ptr().bitcast[Float64](),
+                a.data.unsafe_ptr().bitcast[Float64](),
+                b.data.unsafe_ptr().bitcast[Float64](),
+                m, n, k, 2, kc, mc,
+            )
     elif n <= NELTS * 8 and m >= 64:
         # Thin-N, tall-M (N <= 64): the work is along M, but the prefill kernel
         # parallelizes only over N, starving the cores. _nopack_gemm parallelizes

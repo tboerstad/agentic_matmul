@@ -13,31 +13,30 @@ Peak GFLOPS by hardware (higher is better):
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Emerald Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | 144.6 | 200.8 | **666** |
-| NumPy (OpenBLAS) | 216.9 | 235.6 | 635 |
-| **Mojo (agentic matmul)** | 208.4 | **256.6** | 435 |
-| Mojo linalg (stdlib) | 182.4 | **247.5** | 365 |
+| SciPy dgemm (Accelerate/SME) | 144.6 | 200.8 | 709 |
+| NumPy (Accelerate/SME) | 216.9 | 235.6 | 640 |
+| **Mojo (agentic matmul)** | 208.4 | **256.6** | **721** |
+| Mojo linalg (stdlib) | 182.4 | **247.5** | 382 |
 
 ### Decode (1 × 11008 × 2048)
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Emerald Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | **5.5** | 8.4 | 50 |
-| NumPy (OpenBLAS) | 13.4 | 25.0 | **58** |
-| **Mojo (agentic matmul)** | 13.9 | **28.5** | 37 |
+| SciPy dgemm (Accelerate) | **5.5** | 8.4 | 52 |
+| NumPy (Accelerate) | 13.4 | 25.0 | 57 |
+| **Mojo (agentic matmul)** | 13.9 | **28.5** | **57** |
 | Mojo linalg (stdlib) | 5.9 | 11.4 | 22 |
 
-The Apple M4 Max column was re-measured on the current Mojo nightly (1.0.0b3,
-2026-06) with the Apple Silicon dispatch optimizations and the OpenBLAS the
-local NumPy/SciPy ship; the two Xeon columns predate that toolchain (their stdlib
-`linalg` was much slower then), so a cross-column read mixes software versions.
-The headline is the agentic-vs-linalg ratio within the M4 Max column: on this
-newer, far stronger stdlib `linalg`, the Apple Silicon optimizations take the
-prefill from losing (0.88) to winning (1.20), and decode from 1.5x to ~1.7x. The
-NumPy/SciPy figures use OpenBLAS NEON kernels (no AMX); the residual gap to them
-on prefill is the algorithmic pack/compute-overlap gap noted under "Still open",
-not a tuning constant. Decode peaks single-threaded for the BLAS libraries (the
-58 is OpenBLAS on one thread; multi-thread is ~45).
+On the Apple M4 Max the NumPy/SciPy figures are **Apple Accelerate**, which on
+this NumPy (2.5, macOS) drives the **SME matrix coprocessor** (single-thread ==
+multi-thread is the tell). SME exceeds the ~515 GFLOPS f64 NEON ceiling of the 10
+P-cores, so the earlier NEON-only kernel (prefill 435, decode 37) could not reach
+it. The agentic matmul now drives SME itself (see "Apple Silicon" below): a
+hand-written f64 FMOPA outer-product GEMM (`sme_kernel.mojo`) takes prefill from
+435 to **721** (matches/edges Accelerate, the M4 Max has two SME units so two
+threads reach ~1035 GFLOPS aggregate), and a bandwidth-tuned row-split GEMV takes
+decode from 37 to **57** (matches Accelerate, both bound by ~228 GB/s of memory
+bandwidth). The two Xeon columns predate this toolchain and are NEON/AVX-512 only.
 
 ## Kernels
 
@@ -75,6 +74,11 @@ The four kernels:
   large M·K) and small M-dominant boxes whose B stays L2-resident.
 - **`_serial_gemm`** — serial register-tiled kernel for tiny shapes, where
   any thread launch / packing overhead dwarfs the compute.
+
+On Apple Silicon a fifth kernel, **`sme_gemm_ptr`** (`sme_kernel.mojo`), drives the
+SME matrix coprocessor for the compute-bound band (see "Apple Silicon" below). It
+is the only path that exceeds the NEON ceiling; the four NEON kernels above remain
+the fallback for tiny / narrow / non-Apple shapes and the whole x86 build.
 
 ## Dispatch logic
 
@@ -132,11 +136,30 @@ Tunable parameters (tile MR×NR, KC, KU) are hardware-specific — see notes bel
 
 The dispatch above was tuned on 4-core AVX-512 Xeons. Apple Silicon is a
 big.LITTLE part (P-cores + much slower E-cores) with a large cluster-shared L2,
-so four picks are overridden behind `comptime CompilationTarget.is_apple_silicon()`
+so the picks below are overridden behind `comptime CompilationTarget.is_apple_silicon()`
 (x86 compiles to the byte-for-byte original — Intel is never touched). Full
 measured rationale in `DESIGN.md`; in short:
 
-- **Heavy kernels parallelize over P-cores only** (`compute_core_count()`, from
+- **SME (matrix coprocessor) for the compute-bound band.** The NEON kernels cap at
+  the ~515 GFLOPS f64 NEON peak of the 10 P-cores (measured: 51 GFLOPS/core), but
+  Accelerate hits ~700–790 by driving the SME unit (`FEAT_SME_F64F64`), whose f64
+  `FMOPA` does an 8×8 outer-product accumulate into a ZA tile. `sme_kernel.mojo`
+  drives it from Mojo via inline assembly: a 16×32 micro-kernel (the eight ZA.D
+  tiles), GotoBLAS (pc, ic-block, jt, it) blocking, A packed column-major, B read
+  in place, and an in-bounds overlap-tile remainder path for any M/N. The M4 Max
+  has **two** SME units (one per P-cluster), so two worker threads reach ~1035
+  GFLOPS f64 aggregate — above Accelerate. Dispatch routes f64, `m ≥ 64`, `n ≥ 32`,
+  `M·N·K ≥ 2^21` shapes here: prefill 435→721 (1.02× Accelerate), the up/down-proj
+  and large squares 0.97–1.50× Accelerate, odd-N (11007) 514→822. The crux was
+  clobbering the whole SVE register file (`smstart` zeroes z0–z31/p0–p15) so the
+  compiler does not lose caller FP state. Tiny (128³) and narrow-N (512×128×512)
+  shapes stay below Accelerate's mature small-matrix path and are the open residual.
+- **Decode GEMV split by K-rows, not N-columns.** The column-split GEMV read a
+  strided slice of row-major B (~132 GB/s of the ~242 the P-cores can read
+  sequentially); splitting by K lets each worker stream contiguous B rows into a
+  private partial-C, then a parallel reduce. Decode 37→57 GFLOPS (matches
+  Accelerate, both bandwidth-bound at ~228 GB/s).
+- **Heavy NEON kernels parallelize over P-cores only** (`compute_core_count()`, from
   `hw.perflevel0.physicalcpu`). A static even split hands the E-cores an equal
   share of the compute-bound micro-kernel and they straggle. +24–31% across the
   heavy band; the M=96 prefill headline flips from losing (0.88) to winning
