@@ -76,6 +76,22 @@ The code targets Mojo 1.0.0b3+.
 - The Mojo compiler and runtime are installed in `.venv/` via `uv`
 - Always activate the venv before running `mojo` commands
 
+## Judging a perf change (read before you claim a win or a loss)
+
+A single dispatch/linalg ratio is noise. On shared VMs it swings ±5–10% with the
+turbo/thermal state a process launches into, and we have repeatedly reported those
+swings as real kernel wins or losses (e.g. up-m512 at 0.79 in one launch, 1.04 in
+the next, byte-identical code). Do not trust one ratio, and do not compare
+absolute GFLOPS across separate process launches.
+
+To decide whether a shape genuinely won or lost, run `mojo bench_focus.mojo`
+(no flag). It runs the shape set for 10 independent epochs, each a peak over 12
+interleaved A/B reps, and prints the ratio's mean ± stdev with a 2σ verdict:
+WIN (mean − 2σ > 1.0), LOSE (mean + 2σ < 1.0), or tie (band straddles 1.0). Only
+call a shape a win or loss when its verdict says so; a `tie` is within noise.
+`--quick` gives the old single-epoch ratios for a fast edit-loop check, but it is
+NOT a basis for judging a change.
+
 ## Style preferences
 
 - When providing links to the user, always use raw plain text. Do not wrap them in markdown bold (`**`) or other formatting
