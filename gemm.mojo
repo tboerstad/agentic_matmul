@@ -1,4 +1,4 @@
-from cpu_cache import l2_cache_size
+from cpu_cache import l2_cache_size, compute_core_count
 from matrix import Matrix
 from tile import Tile
 from std.algorithm.functional import parallelize, vectorize
@@ -6,7 +6,12 @@ from std.collections import InlineArray
 from std.math import ceildiv, fma
 from std.memory import memset_zero
 from std.memory.unsafe_pointer import alloc
-from std.sys import num_physical_cores, simd_width_of, size_of
+from std.sys import (
+    CompilationTarget,
+    num_physical_cores,
+    simd_width_of,
+    size_of,
+)
 from std.sys.intrinsics import prefetch, PrefetchOptions
 
 
@@ -255,7 +260,7 @@ def _packed_gemm[
 
     var num_j_tiles = ceildiv(n, TILE_N)
     var num_i_panels = ceildiv(m, MR)
-    var num_workers = num_physical_cores()
+    var num_workers = compute_core_count()
 
     var num_nr_panels = ceildiv(TILE_N, NR)
     var bp_per_worker = num_nr_panels * KC * NR + KU * NR
@@ -529,7 +534,7 @@ def _decode_gemv[
     var m = a_view.rows
     var n = c_view.cols
     var k = a_view.cols
-    var nw = num_physical_cores()
+    var nw = compute_core_count()
 
     memset_zero(c_view.ptr, m * n)
 
@@ -658,6 +663,11 @@ def _nopack_gemm[
     var m = a_view.rows
     var n = c_view.cols
     var k = a_view.cols
+    # All physical cores (incl. Apple E-cores): the boxes that reach this kernel
+    # are small and cache-resident (the Apple box-budget cut routes the heavier
+    # ones to the packed P-core path), so the compute per block is tiny, the
+    # E-cores never straggle, and capping to P-cores only idles 4 cores
+    # (P-core no-pack measured worse: sq256 0.82 vs 1.11, sq320 0.91 vs 1.04).
     var nw = num_physical_cores()
     var num_blocks = ceildiv(m, MR)
 
@@ -752,6 +762,18 @@ def _box_l2_budget() -> Int:
     var l2 = l2_cache_size()
     if l2 == 0:
         return (1 << 19)
+    comptime if CompilationTarget.is_apple_silicon():
+        # On Apple Silicon l2_cache_size() reports the cluster-shared L2 (16 MB
+        # on M4 Max), so the Intel per-core l2/3 rule (~5.6 MB here) wildly
+        # over-admits boxes to the no-pack route. That route skips packing but
+        # re-reads all of B once per MR-row block and runs on all cores (incl.
+        # the slow E-cores), so measured on M4 Max it only beats the packed
+        # P-core path for genuinely small boxes: it wins to ~sq320 (B 800 KB,
+        # ratio 1.04) and loses above (sq512 B 2 MB 0.76, box768 B 1 MB 0.73,
+        # box640 0.83), where the packed path is both algorithmically better
+        # (B packed once, reused) and P-core-only (no straggler). Cut at the
+        # measured ~900 KB crossover.
+        return (7 << 17)  # 896 KB
     return l2 // 3
 
 
@@ -780,14 +802,35 @@ def matmul_dispatch[
     and measurements live in README.md and DESIGN.md. The N<=M and M>=N gates keep
     the square-ish and no-pack routes off every
     wide headline shape (the Qwen up/down projections are N >> M), where those
-    kernels are catastrophic."""
+    kernels are catastrophic.
+
+    On Apple Silicon (big.LITTLE + cluster-shared L2) five picks are overridden
+    behind `comptime CompilationTarget.is_apple_silicon()`, so x86 is unchanged:
+    the heavy kernels and the decode GEMV parallelize over P-cores only
+    (`compute_core_count()`, so the slow E-cores do not straggle), the no-pack
+    box budget is capped (l2_cache_size() is the cluster-shared L2, not
+    per-core), the tiny serial cutoff drops to 2^18 for M >= 64, and SHARED_A
+    (pack A once) extends down to the small-M band (10 P-cores make the
+    per-worker re-pack ~10x redundant, so the M>=192 Xeon crossover drops below
+    the headline band). See DESIGN.md "Apple Silicon" for the measured
+    rationale."""
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
     var k = a.cols
 
-    if m * n * k < (1 << 19):
-        # Tiny: a plain serial register-tiled loop. Below ~2^19 MACs the parallel
+    # Tiny cutoff (MACs below which the serial loop beats the parallel kernels'
+    # fixed launch/packing overhead). 2^19 on x86. On Apple Silicon the parallel
+    # launch is cheap enough that a shape with enough M-row blocks to fill the
+    # cores (m >= 64, the no-pack box branch's own floor) wants parallelism well
+    # below 2^19: sq64/sq80 ran 0.29-0.55 serial vs ~0.6-0.8 parallel, so they
+    # take the 2^18 cutoff. A small-M shape (m < 64) has too few row blocks to
+    # parallelize (e.g. 8x8x4096 stays serial), so it keeps the 2^19 cutoff. On
+    # x86 both arms are 2^19, byte-for-byte unchanged.
+    comptime APPLE = CompilationTarget.is_apple_silicon()
+    var tiny_macs = (1 << 18) if (APPLE and m >= 64) else (1 << 19)
+    if m * n * k < tiny_macs:
+        # Tiny: a plain serial register-tiled loop. Below the cutoff the parallel
         # kernels' fixed cost dwarfs the compute (sq8..32 ran 0.03-0.17x linalg
         # parallel vs 1.2-2.6x serial). Can never fire for a headline shape.
         _serial_gemm[dtype, 6, 2](c, a, b)
@@ -870,7 +913,7 @@ def matmul_dispatch[
         comptime TN_WIDE = 8 * NELTS
         comptime TN_FINE = 4 * NELTS
         var njt_wide = ceildiv(n, TN_WIDE)
-        var num_workers = num_physical_cores()
+        var num_workers = compute_core_count()
         var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 4
         var kc = 1024 if _square_ish_kc(m, n, k) >= 1024 else 512
         if use_wide:
@@ -894,7 +937,10 @@ def matmul_dispatch[
         elif m <= 192:
             # Small-M band: KC=256, per-worker A pack (below the SHARED_A crossover
             # at M~192, so the M=96 headline keeps the byte-for-byte path).
-            _prefill[dtype, 256, 8 * NELTS](c, a, b)
+            comptime if CompilationTarget.is_apple_silicon():
+                _prefill[dtype, 256, 8 * NELTS, True](c, a, b)  # EXPERIMENT
+            else:
+                _prefill[dtype, 256, 8 * NELTS](c, a, b)
         elif m <= 288:
             # Past the SHARED_A crossover: pack A once (+3%, up-proj M=256).
             _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
@@ -924,7 +970,10 @@ def matmul_dispatch[
             if m >= 192:
                 _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
             else:
-                _prefill[dtype, 512, 8 * NELTS](c, a, b)
+                comptime if CompilationTarget.is_apple_silicon():
+                    _prefill[dtype, 512, 8 * NELTS, True](c, a, b)  # EXPERIMENT
+                else:
+                    _prefill[dtype, 512, 8 * NELTS](c, a, b)
         else:
             # Large M: cache-aware KC (1024 on 1 MB/core L2, 2048 on 2 MB/core).
             var kc = _l2_resident_kc[dtype](64, k)

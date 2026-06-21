@@ -13,19 +13,31 @@ Peak GFLOPS by hardware (higher is better):
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Emerald Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | 144.6 | 200.8 | **538.1** |
-| NumPy (Accelerate/OpenBLAS) | 216.9 | 235.6 | **483.1** |
-| **Mojo (agentic matmul)** | 208.4 | **256.6** | 189.9 |
-| Mojo linalg (stdlib) | 182.4 | **247.5** | 104.9 |
+| SciPy dgemm | 144.6 | 200.8 | **666** |
+| NumPy (OpenBLAS) | 216.9 | 235.6 | 635 |
+| **Mojo (agentic matmul)** | 208.4 | **256.6** | 435 |
+| Mojo linalg (stdlib) | 182.4 | **247.5** | 365 |
 
 ### Decode (1 × 11008 × 2048)
 
 | Kernel | Xeon Skylake 2.80 GHz (4c) | Xeon Emerald Rapids 2.10 GHz (4c) | Apple M4 Max (14c) |
 |---|---|---|---|
-| SciPy dgemm | **5.5** | 8.4 | — |
-| NumPy (Accelerate/OpenBLAS) | 13.4 | 25.0 | **54.3** |
-| **Mojo (agentic matmul)** | 13.9 | **28.5** | 20.7 |
-| Mojo linalg (stdlib) | 5.9 | 11.4 | 4.8 |
+| SciPy dgemm | **5.5** | 8.4 | 50 |
+| NumPy (OpenBLAS) | 13.4 | 25.0 | **58** |
+| **Mojo (agentic matmul)** | 13.9 | **28.5** | 37 |
+| Mojo linalg (stdlib) | 5.9 | 11.4 | 22 |
+
+The Apple M4 Max column was re-measured on the current Mojo nightly (1.0.0b3,
+2026-06) with the Apple Silicon dispatch optimizations and the OpenBLAS the
+local NumPy/SciPy ship; the two Xeon columns predate that toolchain (their stdlib
+`linalg` was much slower then), so a cross-column read mixes software versions.
+The headline is the agentic-vs-linalg ratio within the M4 Max column: on this
+newer, far stronger stdlib `linalg`, the Apple Silicon optimizations take the
+prefill from losing (0.88) to winning (1.20), and decode from 1.5x to ~1.7x. The
+NumPy/SciPy figures use OpenBLAS NEON kernels (no AMX); the residual gap to them
+on prefill is the algorithmic pack/compute-overlap gap noted under "Still open",
+not a tuning constant. Decode peaks single-threaded for the BLAS libraries (the
+58 is OpenBLAS on one thread; multi-thread is ~45).
 
 ## Kernels
 
@@ -115,6 +127,43 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
   instead of once per N-worker — a +3–10% win across the whole large-M band.
 
 Tunable parameters (tile MR×NR, KC, KU) are hardware-specific — see notes below.
+
+### Apple Silicon (M-series) adaptations
+
+The dispatch above was tuned on 4-core AVX-512 Xeons. Apple Silicon is a
+big.LITTLE part (P-cores + much slower E-cores) with a large cluster-shared L2,
+so four picks are overridden behind `comptime CompilationTarget.is_apple_silicon()`
+(x86 compiles to the byte-for-byte original — Intel is never touched). Full
+measured rationale in `DESIGN.md`; in short:
+
+- **Heavy kernels parallelize over P-cores only** (`compute_core_count()`, from
+  `hw.perflevel0.physicalcpu`). A static even split hands the E-cores an equal
+  share of the compute-bound micro-kernel and they straggle. +24–31% across the
+  heavy band; the M=96 prefill headline flips from losing (0.88) to winning
+  (1.20) vs the current stdlib `linalg`. The no-pack box kernel stays on all
+  cores (its boxes are too small for an E-core to straggle).
+- **No-pack box budget capped at 896 KB.** `l2_cache_size()` reports the 16 MB
+  *cluster-shared* L2, so the Intel `l2/3` rule over-admits mid boxes to the
+  no-pack route; capping it routes B > ~900 KB to the packed P-core path
+  (sq512 0.83→0.99).
+- **Tiny serial cutoff lowered to 2^18 for `M ≥ 64`.** On a 14-core part the
+  parallel launch is cheap enough that box-eligible shapes want threads below
+  the 2^19 Xeon cutoff (sq64/sq80 ~0.3–0.55 → 0.7–0.75); small-M shapes keep
+  2^19 so they stay serial.
+- **Decode GEMV on P-cores** too (bandwidth-bound, but the E-cores contend
+  rather than add bandwidth).
+- **SHARED_A (pack A once) down to the small-M band.** The M≥192 crossover was
+  set for 4 Xeon cores; the per-worker re-pack is `(workers − 1)×` redundant, so
+  on 10 P-cores it pays below the headline band. Enabled for the wide-N (M≤192)
+  and tall-K small-M branches: both Qwen M=96 headlines improve (up-proj
+  1.11→1.20, down-proj 1.20→1.27).
+
+The 6×(4·NELTS) register tile needs no change: `NELTS` auto-scales (2 for f64
+NEON, 8 for AVX-512) and the 24-accumulator / KU=2 tile fills the 32-register
+NEON file exactly as it fills the 32-register AVX-512 file, so it is
+register-optimal on both. Every other knob (KC, the square/prefill TILE_N, the
+prefetch distance, sub-P decode workers) was tested and left at the x86 pick
+because it sat within the measurement noise on Apple.
 
 ## Current standing vs `linalg.matmul`
 

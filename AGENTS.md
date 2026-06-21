@@ -8,9 +8,23 @@ different CPUs, core counts, cache sizes, SIMD widths, and virtualization enviro
 
 Run this immediately:
 ```bash
+# Linux
 lscpu | grep -E "Model name|CPU\(s\)|MHz|cache|Flags"
 python -c "import numpy; numpy.show_config()"
 ```
+```bash
+# macOS / Apple Silicon (no lscpu)
+sysctl -n machdep.cpu.brand_string; uname -m
+sysctl -n hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu  # P-cores, E-cores
+sysctl -n hw.perflevel0.l2cachesize                            # cluster-SHARED L2, not per-core
+python -c "import numpy; numpy.show_config()"
+```
+
+On Apple Silicon note two things the kernels depend on: the part is big.LITTLE
+(`num_physical_cores()` counts the slow E-cores, e.g. 14 = 10 P + 4 E on an
+M4 Max — the compute kernels parallelize over P-cores only), and
+`hw.perflevel0.l2cachesize` is the **cluster-shared** L2, not a per-core figure.
+See the "Apple Silicon" sections of README.md / DESIGN.md.
 
 Check for:
 - **CPU model and clock speed** (e.g. Intel Xeon @ 2.80 GHz)
@@ -34,6 +48,12 @@ Intel Xeon @ 2.10 GHz Granite Rapids; both 4 cores, AVX-512, KVM). Your results 
 1. Run `bash setup.sh` to install dependencies (uv, latest Mojo nightly — MAX 26.5 → Mojo 1.0.0b3)
 2. Activate the venv: `source .venv/bin/activate`
 3. Verify the setup works: `mojo main.mojo`
+
+If an existing `.venv` has a stale nightly, the build can fail with errors like
+`'def' functions will soon stop implying 'raises'` (an intermediate nightly
+promoted that deprecation to an error). Upgrade in place:
+`uv pip install --upgrade modular --index https://whl.modular.com/nightly/simple/ --prerelease allow`.
+The code targets Mojo 1.0.0b3+.
 
 ## Mojo 101
 
