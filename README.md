@@ -201,9 +201,13 @@ kernels see the same turbo/thermal state:
   wide-N-small-M / square-large-M / small-box fixes (the exact tally swings
   ±several with VM turbo/thermal, so judge per-shape via interleaved A/B, not the
   single-run count). Two recent levers: (1) the square-ish branch now picks KC
-  by detected L2 (KC=512 on the 1 MB Skylake, KC=1024 on the 2 MB Xeon — each
-  the measured best on its machine; a single hardcoded KC=1024 had sunk Skylake
-  sq2048 to ~0.72) plus a load-balance-aware TILE_N (wide 8·NELTS only at >= 4
+  by detected L2 (KC=1024 from a 1 MB/core L2 up, KC=512 below — a deeper KC
+  sweeps more of K per L2-resident C micro-tile, so C is loaded/stored fewer
+  times for k-panel accumulation; a current-nightly interleaved A/B lifts Skylake
+  sq1024 +3.6% and sq2048 +2.9% at KC1024, both 2σ WIN. An earlier nightly had
+  measured the opposite on the 1 MB part, so the cut was 1.5 MB; the crossover
+  moved with the toolchain, see DESIGN.md) plus a load-balance-aware TILE_N
+  (wide 8·NELTS only at >= 4
   wide j-tiles per worker, else the finer 4·NELTS — the fine tile's extra
   j-tiles smooth the balance on the small squares: sq512, with 2 wide tiles per
   worker, runs +2–4% on the fine tile, while sq1024/sq2048 keep the wide tile;

@@ -811,15 +811,20 @@ def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
 def _square_ish_kc(m: Int, n: Int, k: Int) -> Int:
     """Per-L2 KC for the square-ish branch: HALF the wide/tall branches' KC,
     because here the M*KC packed-A competes with the packed-B tile for L2. Yields
-    KC=512 on a 1 MB/core L2 and KC=1024 on a 2 MB/core L2, each the measured
-    best on its machine.
+    KC=1024 from a 1 MB/core L2 up, KC=512 below, each the measured best.
 
-    KC only matters when k > 512, and such a square-ish op (with M*N*K >= 2^28)
-    is multi-ms, so the l2_cache_size() probe is < 2.5%. Smaller shapes skip the
-    probe and take KC=512, keeping cpuid off the hot path for the few-us shapes."""
+    KC only bites when k > 512 (a single panel covers shorter K either way), and
+    such a square-ish op (with M*N*K >= 2^28) is multi-ms, so the l2_cache_size()
+    probe is < 2.5%. Smaller shapes skip the probe and take KC=512, keeping cpuid
+    off the hot path for the few-us shapes. The 1 MB cut (was 1.5 MB, picking
+    KC=512 on the 1 MB Skylake) followed a current-nightly interleaved A/B: KC1024
+    beats KC512 on that part, sq1024 +3.6% / sq2048 +2.9% (2-sigma WIN), reusing
+    each L2-resident C micro-tile across twice the K before its load/store. The
+    512 KB packed-B tile (wide TILE_N x 1024) needs the full 1 MB L2 to coexist
+    with packed A and C, so sub-1 MB parts stay on KC=512. DESIGN.md."""
     if k <= 512 or m * n * k < (1 << 28):
         return 512
-    return 1024 if l2_cache_size() >= (3 << 19) else 512
+    return 1024 if l2_cache_size() >= (1 << 20) else 512
 
 
 def _box_l2_budget() -> Int:

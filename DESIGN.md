@@ -117,13 +117,42 @@ have since flipped. On the 1 MB Skylake, L2/3 = 341 KB sits below the
 compile-time 512 KB tier-1 cut, so that part simply keeps no-pack for B ≤ 512 KB
 (sq288/sq320 there already preferred packed).
 
-## `_square_ish_kc`: opposite picks per machine
+## `_square_ish_kc`: KC=1024 from 1 MB L2 up
 
-Interleaved A/B (peak/25) gives Machine A (1 MB) KC512 > KC1024 (sq2048 0.84 vs
-0.72, sq1024 0.84 vs 0.80), while Machine B (2 MB) measured KC1024 > KC512
-(sq768..2048 +3–6%) — opposite conclusions a single hardcoded KC can't satisfy.
-The `l2_cache_size()` probe is ~6 cpuid → ~61 µs VM-exit on a KVM guest, < 2.5%
-of a multi-ms square-ish op; smaller shapes skip it entirely.
+KC sets how many times each L2-resident C micro-tile is loaded and stored for
+k-panel accumulation: a deeper KC sweeps more of K per residency, so C is
+touched fewer times. The cut is where the KC-deep packed-B tile (wide TILE_N x
+KC = 512 KB at KC=1024) still coexists in L2 with the packed-A panel and the C
+accumulators. The probe (`l2_cache_size()`, ~6 cpuid → ~61 µs VM-exit on a KVM
+guest, < 2.5% of a multi-ms square-ish op) picks KC=1024 from a 1 MB/core L2 up,
+KC=512 below; smaller shapes skip it (k <= 512 is a single panel either way).
+
+The 1 MB cut replaced an earlier 1.5 MB one. On the 1 MB Skylake an older
+nightly measured KC512 > KC1024 (then sq2048 0.84 vs 0.72), so the cut kept that
+part on KC512. A current-nightly interleaved A/B (12 epochs, peak-of-15, KC the
+only lever at each shape's tile width) flipped it: KC1024/KC512 is sq1024 1.036
++/- 0.007 and sq2048 1.029 +/- 0.007 (both 2-sigma WIN), sq1536 1.015 (tie). The
+linalg/codegen the ratio is judged against also moved across nightlies, so the
+crossover is a measured, nightly-specific number, not a fixed property of the
+part (AGENTS.md warns picks flip across nightlies). Machine B (2 MB) was already
+on KC1024 and is unchanged.
+
+## Dead end: x86 M-blocking (GotoBLAS loop 3) for the squares
+
+The SME path's MC blocking (block M so an MC-tall packed-A block stays L2-resident
+across a worker's j-tiles, instead of re-reading the full M x KC panel per j-tile)
+lifts the squares a lot on Apple, where SME's ~1000 GFLOPS makes memory the wall.
+Ported to the x86 `_packed_gemm` (a comptime-gated BLOCK_M variant that pre-packs
+the worker's j-tile B slabs, then sweeps MC-row blocks outside the j-tile loop) it
+did not pay. An interleaved A/B blocked-vs-flat (10 epochs, peak-of-12) measured
+sq1024 0.973 and sq1536 0.982 (2-sigma LOSE), sq384/sq512/sq768/sq2048 ~1.0 (tie):
+a tie-to-slight-loss, never a win. The full M x KC packed-A panel (8 MB on sq2048)
+fits the 33 MB L3, and at the ~290 GFLOPS AVX-512 ceiling L3 bandwidth absorbs the
+per-j-tile re-read the blocking removes, while pre-packing all the worker's B adds
+its own L3 traffic. The residual square gap is C-residency / pack-compute overlap
+(linalg runs squares *faster* than its own wide shapes, the signature of 2D
+C-block-resident blocking), not A-panel reuse. KC=1024 above captures the cheap
+part of that (fewer C load/stores) without the restructure.
 
 ## Apple Silicon (M-series): big.LITTLE / shared-cache NEON adaptations
 
