@@ -27,26 +27,246 @@ alias MR = 16   # micro-tile rows  (2 ZA row-blocks of 8)
 alias NR = 32   # micro-tile cols  (4 ZA col-blocks of 8)
 
 
-@always_inline
-def _sme_micro_z(
-    pA: UnsafePointer[Float64, ...],
-    pB: UnsafePointer[Float64, ...],
-    pC: UnsafePointer[Float64, ...],
-    ldc: Int,
-    kc: Int,
-    ldb: Int,
-):
-    """16x32 SME micro-kernel over a kc-deep K-panel. zeroes ZA (first k-panel: C is overwritten). pA is packed
-    column-major (16-row panels); B is read in place from pB with row stride ldb
-    (the 32 columns of a B row are contiguous). C is row-major, row stride ldc."""
-    inlined_assembly[
-        """
+# ---------------------------------------------------------------------------
+# Shared SME assembly fragments.
+#
+# The four 16x32 micro-kernels below are the same instruction stream with two
+# independent choices: seed ZA from zero vs load C (the first vs a later k-panel),
+# and store all 16 rows vs only the `vr` valid rows of a partial last i-tile. The
+# FMA K-sweep (_SME_KSWEEP16) was identical in all four, the full ZA->C store
+# (_SME_TAIL_FULL) in two, the masked store (_SME_TAIL_PART) in two. Naming each
+# once and composing the template per kernel is pure comptime string
+# concatenation, so every kernel emits the exact instruction stream it did when
+# spelled out in full -- the operand slots ($0=pA $1=pB $2=pC $3=ldc $4=kc $5=ldb
+# $6=vr) line up because every kernel passes its args in that order.
+# ---------------------------------------------------------------------------
+
+comptime _SME_HEAD_ZERO = """
         smstart
         ptrue p0.d
         zero {za}
         lsl x13, $3, #3
         lsl x16, $5, #3
-        mov x9, $0
+"""
+
+comptime _SME_HEAD_A = """
+        smstart
+        ptrue p0.d
+        lsl x13, $3, #3
+        lsl x16, $5, #3
+        mov x14, $2
+        mov w12, #0
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #1
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #2
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #3
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #4
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #5
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #6
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #7
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #0
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #1
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #2
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #3
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #4
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #5
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #6
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        mov w12, #7
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+"""
+
+comptime _SME_HEAD_A_PART = """
+        smstart
+        ptrue p0.d
+        zero {za}
+        lsl x13, $3, #3
+        lsl x16, $5, #3
+        mov x9, #8
+        mov x14, $2
+        mov x17, $6
+        cmp x17, #8
+        csel x19, x17, x9, lt
+        mov x18, #0
+    7:
+        cmp x18, x19
+        b.ge 8f
+        mov w12, w18
+        mov x15, x14
+        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        add x18, x18, #1
+        b 7b
+    8:
+        cmp x17, #8
+        b.le 9f
+        mov x18, #8
+    10:
+        cmp x18, x17
+        b.ge 9f
+        sub w12, w18, #8
+        mov x15, x14
+        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
+        add x15, x15, #64
+        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
+        add x14, x14, x13
+        add x18, x18, #1
+        b 10b
+    9:
+        lsl x16, $5, #3
+"""
+
+comptime _SME_KSWEEP16 = """        mov x9, $0
         mov x10, $1
         mov x11, $4
     1:
@@ -68,7 +288,9 @@ def _sme_micro_z(
         add x10, x10, x16
         subs x11, x11, #1
         b.ne 1b
-        mov x14, $2
+"""
+
+comptime _SME_TAIL_FULL = """        mov x14, $2
         mov w12, #0
         mov x15, x14
         st1d {za0h.d[w12, 0]}, p0, [x15]
@@ -229,7 +451,73 @@ def _sme_micro_z(
         add x15, x15, #64
         st1d {za7h.d[w12, 0]}, p0, [x15]
         smstop
-        """,
+        """
+
+comptime _SME_TAIL_PART = """        mov x9, #8
+        mov x14, $2
+        mov x17, $6
+        cmp x17, #8
+        csel x19, x17, x9, lt
+        mov x18, #0
+    7:
+        cmp x18, x19
+        b.ge 8f
+        mov w12, w18
+        mov x15, x14
+        st1d {za0h.d[w12, 0]}, p0, [x15]
+        add x15, x15, #64
+        st1d {za1h.d[w12, 0]}, p0, [x15]
+        add x15, x15, #64
+        st1d {za2h.d[w12, 0]}, p0, [x15]
+        add x15, x15, #64
+        st1d {za3h.d[w12, 0]}, p0, [x15]
+        add x14, x14, x13
+        add x18, x18, #1
+        b 7b
+    8:
+        cmp x17, #8
+        b.le 9f
+        mov x18, #8
+    10:
+        cmp x18, x17
+        b.ge 9f
+        sub w12, w18, #8
+        mov x15, x14
+        st1d {za4h.d[w12, 0]}, p0, [x15]
+        add x15, x15, #64
+        st1d {za5h.d[w12, 0]}, p0, [x15]
+        add x15, x15, #64
+        st1d {za6h.d[w12, 0]}, p0, [x15]
+        add x15, x15, #64
+        st1d {za7h.d[w12, 0]}, p0, [x15]
+        add x14, x14, x13
+        add x18, x18, #1
+        b 10b
+    9:
+        smstop
+        """
+
+comptime _SME_ASM_Z = _SME_HEAD_ZERO + _SME_KSWEEP16 + _SME_TAIL_FULL
+comptime _SME_ASM_A = _SME_HEAD_A + _SME_KSWEEP16 + _SME_TAIL_FULL
+comptime _SME_ASM_Z_PART = _SME_HEAD_ZERO + _SME_KSWEEP16 + _SME_TAIL_PART
+comptime _SME_ASM_A_PART = _SME_HEAD_A_PART + _SME_KSWEEP16 + _SME_TAIL_PART
+
+
+
+@always_inline
+def _sme_micro_z(
+    pA: UnsafePointer[Float64, ...],
+    pB: UnsafePointer[Float64, ...],
+    pC: UnsafePointer[Float64, ...],
+    ldc: Int,
+    kc: Int,
+    ldb: Int,
+):
+    """16x32 SME micro-kernel over a kc-deep K-panel. zeroes ZA (first k-panel: C is overwritten). pA is packed
+    column-major (16-row panels); B is read in place from pB with row stride ldb
+    (the 32 columns of a B row are contiguous). C is row-major, row stride ldc."""
+    inlined_assembly[
+        _SME_ASM_Z,
         NoneType,
         constraints="r,r,r,r,r,r,~{z0},~{z1},~{z2},~{z3},~{z4},~{z5},~{z6},~{z7},~{z8},~{z9},~{z10},~{z11},~{z12},~{z13},~{z14},~{z15},~{z16},~{z17},~{z18},~{z19},~{z20},~{z21},~{z22},~{z23},~{z24},~{z25},~{z26},~{z27},~{z28},~{z29},~{z30},~{z31},~{p0},~{p1},~{p2},~{p3},~{p4},~{p5},~{p6},~{p7},~{p8},~{p9},~{p10},~{p11},~{p12},~{p13},~{p14},~{p15},~{x9},~{x10},~{x11},~{x13},~{x14},~{x15},~{x16},~{w12},~{memory}",
         has_side_effect=True,
@@ -249,355 +537,7 @@ def _sme_micro_a(
     column-major (16-row panels); B is read in place from pB with row stride ldb
     (the 32 columns of a B row are contiguous). C is row-major, row stride ldc."""
     inlined_assembly[
-        """
-        smstart
-        ptrue p0.d
-        lsl x13, $3, #3
-        lsl x16, $5, #3
-        mov x14, $2
-        mov w12, #0
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #1
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #2
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #3
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #4
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #5
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #6
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #7
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #0
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #1
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #2
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #3
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #4
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #5
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #6
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        mov w12, #7
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        mov x9, $0
-        mov x10, $1
-        mov x11, $4
-    1:
-        ld1d {z0.d}, p0/z, [x9]
-        ld1d {z1.d}, p0/z, [x9, #1, mul vl]
-        ld1d {z2.d}, p0/z, [x10]
-        ld1d {z3.d}, p0/z, [x10, #1, mul vl]
-        ld1d {z4.d}, p0/z, [x10, #2, mul vl]
-        ld1d {z5.d}, p0/z, [x10, #3, mul vl]
-        fmopa za0.d, p0/m, p0/m, z0.d, z2.d
-        fmopa za1.d, p0/m, p0/m, z0.d, z3.d
-        fmopa za2.d, p0/m, p0/m, z0.d, z4.d
-        fmopa za3.d, p0/m, p0/m, z0.d, z5.d
-        fmopa za4.d, p0/m, p0/m, z1.d, z2.d
-        fmopa za5.d, p0/m, p0/m, z1.d, z3.d
-        fmopa za6.d, p0/m, p0/m, z1.d, z4.d
-        fmopa za7.d, p0/m, p0/m, z1.d, z5.d
-        add x9, x9, #128
-        add x10, x10, x16
-        subs x11, x11, #1
-        b.ne 1b
-        mov x14, $2
-        mov w12, #0
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #1
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #2
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #3
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #4
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #5
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #6
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #7
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #0
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #1
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #2
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #3
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #4
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #5
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #6
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        mov w12, #7
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        smstop
-        """,
+        _SME_ASM_A,
         NoneType,
         constraints="r,r,r,r,r,r,~{z0},~{z1},~{z2},~{z3},~{z4},~{z5},~{z6},~{z7},~{z8},~{z9},~{z10},~{z11},~{z12},~{z13},~{z14},~{z15},~{z16},~{z17},~{z18},~{z19},~{z20},~{z21},~{z22},~{z23},~{z24},~{z25},~{z26},~{z27},~{z28},~{z29},~{z30},~{z31},~{p0},~{p1},~{p2},~{p3},~{p4},~{p5},~{p6},~{p7},~{p8},~{p9},~{p10},~{p11},~{p12},~{p13},~{p14},~{p15},~{x9},~{x10},~{x11},~{x13},~{x14},~{x15},~{x16},~{w12},~{memory}",
         has_side_effect=True,
@@ -619,77 +559,7 @@ def _sme_micro_z_part(
     full tile is computed, and only the vr valid rows are written (in-bounds, no
     recompute, no scratch)."""
     inlined_assembly[
-        """
-        smstart
-        ptrue p0.d
-        zero {za}
-        lsl x13, $3, #3
-        lsl x16, $5, #3
-        mov x9, $0
-        mov x10, $1
-        mov x11, $4
-    1:
-        ld1d {z0.d}, p0/z, [x9]
-        ld1d {z1.d}, p0/z, [x9, #1, mul vl]
-        ld1d {z2.d}, p0/z, [x10]
-        ld1d {z3.d}, p0/z, [x10, #1, mul vl]
-        ld1d {z4.d}, p0/z, [x10, #2, mul vl]
-        ld1d {z5.d}, p0/z, [x10, #3, mul vl]
-        fmopa za0.d, p0/m, p0/m, z0.d, z2.d
-        fmopa za1.d, p0/m, p0/m, z0.d, z3.d
-        fmopa za2.d, p0/m, p0/m, z0.d, z4.d
-        fmopa za3.d, p0/m, p0/m, z0.d, z5.d
-        fmopa za4.d, p0/m, p0/m, z1.d, z2.d
-        fmopa za5.d, p0/m, p0/m, z1.d, z3.d
-        fmopa za6.d, p0/m, p0/m, z1.d, z4.d
-        fmopa za7.d, p0/m, p0/m, z1.d, z5.d
-        add x9, x9, #128
-        add x10, x10, x16
-        subs x11, x11, #1
-        b.ne 1b
-        mov x9, #8
-        mov x14, $2
-        mov x17, $6
-        cmp x17, #8
-        csel x19, x17, x9, lt
-        mov x18, #0
-    7:
-        cmp x18, x19
-        b.ge 8f
-        mov w12, w18
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        add x18, x18, #1
-        b 7b
-    8:
-        cmp x17, #8
-        b.le 9f
-        mov x18, #8
-    10:
-        cmp x18, x17
-        b.ge 9f
-        sub w12, w18, #8
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        add x18, x18, #1
-        b 10b
-    9:
-        smstop
-        """,
+        _SME_ASM_Z_PART,
         NoneType,
         constraints="r,r,r,r,r,r,r,~{z0},~{z1},~{z2},~{z3},~{z4},~{z5},~{z6},~{z7},~{z8},~{z9},~{z10},~{z11},~{z12},~{z13},~{z14},~{z15},~{z16},~{z17},~{z18},~{z19},~{z20},~{z21},~{z22},~{z23},~{z24},~{z25},~{z26},~{z27},~{z28},~{z29},~{z30},~{z31},~{p0},~{p1},~{p2},~{p3},~{p4},~{p5},~{p6},~{p7},~{p8},~{p9},~{p10},~{p11},~{p12},~{p13},~{p14},~{p15},~{x9},~{x10},~{x11},~{x13},~{x14},~{x15},~{x16},~{x17},~{x18},~{x19},~{w12},~{memory}",
         has_side_effect=True,
@@ -711,119 +581,7 @@ def _sme_micro_a_part(
     full tile is computed, and only the vr valid rows are written (in-bounds, no
     recompute, no scratch)."""
     inlined_assembly[
-        """
-        smstart
-        ptrue p0.d
-        zero {za}
-        lsl x13, $3, #3
-        lsl x16, $5, #3
-        mov x9, #8
-        mov x14, $2
-        mov x17, $6
-        cmp x17, #8
-        csel x19, x17, x9, lt
-        mov x18, #0
-    7:
-        cmp x18, x19
-        b.ge 8f
-        mov w12, w18
-        mov x15, x14
-        ld1d {za0h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za1h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za2h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za3h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        add x18, x18, #1
-        b 7b
-    8:
-        cmp x17, #8
-        b.le 9f
-        mov x18, #8
-    10:
-        cmp x18, x17
-        b.ge 9f
-        sub w12, w18, #8
-        mov x15, x14
-        ld1d {za4h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za5h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za6h.d[w12, 0]}, p0/z, [x15]
-        add x15, x15, #64
-        ld1d {za7h.d[w12, 0]}, p0/z, [x15]
-        add x14, x14, x13
-        add x18, x18, #1
-        b 10b
-    9:
-        lsl x16, $5, #3
-        mov x9, $0
-        mov x10, $1
-        mov x11, $4
-    1:
-        ld1d {z0.d}, p0/z, [x9]
-        ld1d {z1.d}, p0/z, [x9, #1, mul vl]
-        ld1d {z2.d}, p0/z, [x10]
-        ld1d {z3.d}, p0/z, [x10, #1, mul vl]
-        ld1d {z4.d}, p0/z, [x10, #2, mul vl]
-        ld1d {z5.d}, p0/z, [x10, #3, mul vl]
-        fmopa za0.d, p0/m, p0/m, z0.d, z2.d
-        fmopa za1.d, p0/m, p0/m, z0.d, z3.d
-        fmopa za2.d, p0/m, p0/m, z0.d, z4.d
-        fmopa za3.d, p0/m, p0/m, z0.d, z5.d
-        fmopa za4.d, p0/m, p0/m, z1.d, z2.d
-        fmopa za5.d, p0/m, p0/m, z1.d, z3.d
-        fmopa za6.d, p0/m, p0/m, z1.d, z4.d
-        fmopa za7.d, p0/m, p0/m, z1.d, z5.d
-        add x9, x9, #128
-        add x10, x10, x16
-        subs x11, x11, #1
-        b.ne 1b
-        mov x9, #8
-        mov x14, $2
-        mov x17, $6
-        cmp x17, #8
-        csel x19, x17, x9, lt
-        mov x18, #0
-    7:
-        cmp x18, x19
-        b.ge 8f
-        mov w12, w18
-        mov x15, x14
-        st1d {za0h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za1h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za2h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za3h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        add x18, x18, #1
-        b 7b
-    8:
-        cmp x17, #8
-        b.le 9f
-        mov x18, #8
-    10:
-        cmp x18, x17
-        b.ge 9f
-        sub w12, w18, #8
-        mov x15, x14
-        st1d {za4h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za5h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za6h.d[w12, 0]}, p0, [x15]
-        add x15, x15, #64
-        st1d {za7h.d[w12, 0]}, p0, [x15]
-        add x14, x14, x13
-        add x18, x18, #1
-        b 10b
-    9:
-        smstop
-        """,
+        _SME_ASM_A_PART,
         NoneType,
         constraints="r,r,r,r,r,r,r,~{z0},~{z1},~{z2},~{z3},~{z4},~{z5},~{z6},~{z7},~{z8},~{z9},~{z10},~{z11},~{z12},~{z13},~{z14},~{z15},~{z16},~{z17},~{z18},~{z19},~{z20},~{z21},~{z22},~{z23},~{z24},~{z25},~{z26},~{z27},~{z28},~{z29},~{z30},~{z31},~{p0},~{p1},~{p2},~{p3},~{p4},~{p5},~{p6},~{p7},~{p8},~{p9},~{p10},~{p11},~{p12},~{p13},~{p14},~{p15},~{x9},~{x10},~{x11},~{x13},~{x14},~{x15},~{x16},~{x17},~{x18},~{x19},~{w12},~{memory}",
         has_side_effect=True,

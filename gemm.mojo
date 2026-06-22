@@ -186,6 +186,75 @@ def _masked_microkernel[
                         cr[col0 + e] = v[e]
 
 
+@always_inline
+def _full_microkernel[
+    dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int, NR: Int, KU: Int,
+    PACK_A: Bool,
+    c_org: MutOrigin, a_org: ImmutOrigin, b_org: MutOrigin, ap_org: MutOrigin,
+](
+    c_block: Tile[dtype, c_org],
+    ap_panel: UnsafePointer[Scalar[dtype], ap_org],
+    a_col_base: UnsafePointer[Scalar[dtype], a_org],
+    a_stride: Int,
+    bp_panel: UnsafePointer[Scalar[dtype], b_org],
+    kc: Int,
+    is_first_k: Bool,
+):
+    """Hot-path register tile for one full MR x NR block of C.
+
+    The full-NR-panel counterpart of `_masked_microkernel`: no masking, every row
+    and column live. Reads the packed B panel and, per K-step, the MR A scalars
+    either from the packed-A panel at unit stride (PACK_A: `ap_panel`, SHARED_A or
+    per-worker) or straight from a row-major A at column stride `a_stride` (not
+    PACK_A: `a_col_base`, the linalg-style no-A-pack gather). The unused A source is
+    ignored by the comptime branch. `c_block` is the block's C view (i, j0+jr).
+
+    The K-sweep is unrolled by KU so KU*NR_VECS B-vectors stay live per step (KU=2
+    keeps the 6x32 tile's 24 + 8 = 32 accumulator+B vectors inside the AVX-512
+    register file; KU=4 needs 40 and spills). The bv loads stay inline so the
+    noalias B-load hoist holds."""
+    comptime for mr in range(MR):
+        prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
+            c_block.row(mr)
+        )
+
+    var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
+    if not is_first_k:
+        tile.load(c_block)
+
+    var pk = 0
+    var pk_end = kc - (kc % KU)
+    while pk < pk_end:
+        comptime for ku in range(KU):
+            var step = pk + ku
+            comptime if PACK_A:
+                tile.rank1_update(
+                    load_a_col[MR](ap_panel + step * MR, 1),
+                    load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
+                )
+            else:
+                tile.rank1_update(
+                    load_a_col[MR](a_col_base + step, a_stride),
+                    load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
+                )
+        pk += KU
+
+    while pk < kc:
+        comptime if PACK_A:
+            tile.rank1_update(
+                load_a_col[MR](ap_panel + pk * MR, 1),
+                load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
+            )
+        else:
+            tile.rank1_update(
+                load_a_col[MR](a_col_base + pk, a_stride),
+                load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
+            )
+        pk += 1
+
+    tile.store(c_block)
+
+
 # ===========================================================================
 # The packed prefill GEMM: the workhorse
 # ===========================================================================
@@ -386,65 +455,22 @@ def _packed_gemm[
                             continue
 
                         # ---- Full NR-panel: the register-tile micro-kernel ----
+                        # PACK_A reads the packed panel at unit stride (SHARED_A:
+                        # full-k stride per i-panel + pc offset; else per-worker
+                        # per-kc layout); not-PACK_A reads A straight from source at
+                        # stride k (a column gather), the linalg-style no-A-pack path.
                         i = 0
                         ip = 0
                         while i + MR <= m:
-                            # A operand source per K-step: PACK_A reads the packed
-                            # panel at unit stride (SHARED_A: full-k stride per
-                            # i-panel + pc offset; else per-worker per-kc layout);
-                            # not-PACK_A reads A straight from source at stride k
-                            # (a column gather), the linalg-style no-A-pack path.
                             var ap_panel = (
                                 ap_worker + ip * MR * k + pc * MR
                             ) if SHARED_A else (ap_worker + ip * MR * kc)
-                            var c_block = c_view.sub(i, j0 + jr)
-
-                            comptime for mr in range(MR):
-                                prefetch[PrefetchOptions().for_write().high_locality().to_data_cache()](
-                                    c_block.row(mr)
-                                )
-
-                            var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
-                            if not is_first_k:
-                                tile.load(c_block)
-
-                            # K-sweep, unrolled by KU so KU*NR_VECS B-vectors stay
-                            # live per step. KU=2 keeps the 6x32 tile's 24 + 8 = 32
-                            # accumulator+B vectors inside the AVX-512 register file
-                            # (KU=4 needs 40 and spills). The bv loads stay inline
-                            # so the noalias B-load hoist holds.
-                            var pk = 0
-                            var pk_end = kc - (kc % KU)
-                            while pk < pk_end:
-                                comptime for ku in range(KU):
-                                    var step = pk + ku
-                                    comptime if PACK_A:
-                                        tile.rank1_update(
-                                            load_a_col[MR](ap_panel + step * MR, 1),
-                                            load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
-                                        )
-                                    else:
-                                        tile.rank1_update(
-                                            load_a_col[MR](a_view.addr(i, pc + step), k),
-                                            load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
-                                        )
-                                pk += KU
-
-                            while pk < kc:
-                                comptime if PACK_A:
-                                    tile.rank1_update(
-                                        load_a_col[MR](ap_panel + pk * MR, 1),
-                                        load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
-                                    )
-                                else:
-                                    tile.rank1_update(
-                                        load_a_col[MR](a_view.addr(i, pc + pk), k),
-                                        load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
-                                    )
-                                pk += 1
-
-                            tile.store(c_block)
-
+                            _full_microkernel[
+                                dtype, MR, NR_VECS, NELTS, NR, KU, PACK_A
+                            ](
+                                c_view.sub(i, j0 + jr), ap_panel,
+                                a_view.addr(i, pc), k, bp_panel, kc, is_first_k,
+                            )
                             i += MR
                             ip += 1
 
