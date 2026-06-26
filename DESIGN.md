@@ -138,6 +138,41 @@ part (AGENTS.md warns picks flip across nightlies). Machine B (2 MB) was already
 on KC1024 and is unchanged. (This KC pick now governs only the square-ish
 *fallback* path; the balanced squares take the pack-B-only path below.)
 
+## `_l2_resident_kc`: a single C-stored-once panel (KC = min(K, 2048))
+
+The large-M **wide-N / tall-K** band (the `_wide_n` / `_tall_k` `m > 192` SHARED_A
+branches) takes its KC from `_l2_resident_kc`. This used to size the packed-B tile
+(TILE_N x KC) at *half* the per-core L2 (the BLIS rule) — KC=1024 on a 1 MB/core
+L2, KC=2048 on a 2 MB/core L2 — and the `_wide_n` `m <= 288` rung was a hardcoded
+KC=512. On the current nightly that left the whole band 2-4% behind linalg:
+
+| Shape | M×N×K | old KC | old | KC=2048 |
+|---|---|---|---|---|
+| up-m256 | 256×11008×2048 | 512 | 0.964 LOSE | 1.001 tie |
+| up-m512 | 512×11008×2048 | 1024 | 0.970 LOSE | 0.997 tie |
+| odd-N | 512×11007×2048 | 1024 | 0.964 LOSE | 0.996 tie |
+| 512×4096×4096 | | 1024 | 0.986 tie | **1.020 WIN** |
+
+(interleaved A/B vs linalg, 8 epochs, peak-of-12, Machine A 1 MB/core L2.)
+
+The fix is the same "C stored once" insight the square-ish branch already uses:
+set **KC = min(K, 2048)** — a single k-panel for the benchmark K's (<= 2048), so
+each L2-resident C micro-tile is loaded/stored exactly once instead of once per
+k-panel. This is also linalg's `calculate_tile_n_k` TileK. The half-L2 KC=1024
+swept K in two panels and paid the extra C reload/store per panel; once linalg got
+faster across nightlies, that re-traffic was the whole margin. (The README already
+noted KC=2048 wins large-M on the 2 MB part for "fewer k-panels, less C re-traffic"
+— the same mechanism now reaches the 1 MB part.)
+
+Implemented by sizing the budget at the *full* per-core L2 and **capping at 2048**
+(the single-panel depth): 1 MB/core → KC=2048 (was 1024), 2 MB/core → KC=2048
+(unchanged, so Machine B is byte-for-byte identical). The `m <= 288` wide rung
+folds into the `m > 192` cache-aware branch instead of its hardcoded KC=512.
+Bit-identical (`verify_dispatch` max_err 0.0). The headline prefill (M=96) is in
+the `m <= 192` band (KC=256) and is untouched. The residual band losses are now
+just the heavy squares (sq512/sq1024) and the tall-K down-proj (dn-m512,
+K=11008, where K can't fit one panel) — the algorithmic pack/compute-overlap gap.
+
 ## Square-ish: pack-B-only / TileK=K (matching stdlib linalg)
 
 The square-ish branch was the residual loss (sq512 0.80, sq2048 0.93 vs linalg).
