@@ -328,11 +328,18 @@ it:
 
 Micro-kernel parity with `linalg` on the heaviest GEMMs (square M ≥ 256, now
 ~0.90–0.94 after the square-ish shared-A pack, where both kernels sit at ~55–66%
-of the 358 GFLOPS f64 peak). The large-M wide-N/tall-K band has now **flipped to
-a clean WIN** after the `KU=2` register-pressure fix (see *K-unroll* above): on
-the 2.80 GHz Skylake VM the full sweep shows the Qwen up-proj winning all 11 M
-values (M=256 0.99→1.01, M=512 0.99→1.07), down-proj M=256 0.96→1.00, and
-h4k/ffn-up8k M=512 flipping LOSE→WIN — so the residual is mostly the big squares. The odd-N remainder
+of the 358 GFLOPS f64 peak). The large-M **wide-N** band had drifted back to a
+2–4% loss on a newer nightly (the `KU=2` fix flipped it to WIN, but `linalg` then
+got faster across nightlies and the half-L2 `KC=1024` k-panel's extra C re-traffic
+became the whole margin). It is now **back at parity/WIN** after switching that
+band to a single *C-stored-once* k-panel — `KC = min(K, 2048)` in `_l2_resident_kc`,
+the same TileK `linalg` uses (interleaved A/B, 8 epochs: up-proj M=256 0.96→1.00,
+M=512 0.97→1.00, odd-N 0.96→1.00, 512×4096×4096 0.99→**1.02 WIN**; bit-identical,
+2 MB Machine B unchanged — see DESIGN.md *`_l2_resident_kc`*). The residual loss is
+now just the heavy **squares** (sq512 ~0.96, sq1024 ~0.98) and the **tall-K
+down-proj** (dn-m512, K=11008, where K can't fit one panel, ~0.95). Closing those
+likely needs pack/compute overlap — substantial and unproven on this hardware.
+The odd-N remainder
 (N=11007 was ~0.85–0.88) is now **fixed** by the masked-N partial-panel
 microkernel (see *Masked N-remainder* above): the partial tile runs at full
 microkernel throughput and the shape holds parity (1.01). Closing the square gap

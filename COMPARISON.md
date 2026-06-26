@@ -55,30 +55,54 @@ Derived ratios on the headline shapes:
 ## Agentic vs `linalg` — full shape set (interleaved, 2σ verdict)
 
 `mojo bench_focus.mojo`, 10 epochs × peak-of-12. `WIN`/`LOSE` mean the 2σ band
-clears 1.0; `tie` means it straddles 1.0 (within run-to-run noise).
+clears 1.0; `tie` means it straddles 1.0 (within run-to-run noise). The numbers
+below are **after** the large-M wide-N KC fix described in the next section; the
+"was" column is the pre-fix baseline.
 
-| Shape | M×N×K | Agentic GFLOPS | linalg GFLOPS | Ratio (mean ± stdev) | Verdict |
-|---|---|---|---|---|---|
-| decode  | 1×11008×2048 | 12 | 5 | 2.196 ± 0.079 | **WIN** |
-| prefill | 96×11008×2048 | 209 | 188 | 1.109 ± 0.014 | **WIN** |
-| sq512   | 512×512×512 | 271 | 285 | 0.950 ± 0.013 | LOSE |
-| sq1024  | 1024×1024×1024 | 277 | 285 | 0.970 ± 0.006 | LOSE |
-| sq2048  | 2048×2048×2048 | 277 | 276 | 1.002 ± 0.010 | tie |
-| M512-g  | 512×4096×4096 | 260 | 268 | 0.972 ± 0.010 | LOSE |
-| up-m256 | 256×11008×2048 | 237 | 246 | 0.963 ± 0.009 | LOSE |
-| up-m512 | 512×11008×2048 | 265 | 271 | 0.979 ± 0.005 | LOSE |
-| dn-m512 | 512×2048×11008 | 257 | 272 | 0.947 ± 0.013 | LOSE |
-| sq128   | 128×128×128 | 159 | 155 | 1.055 ± 0.130 | tie |
-| sq256   | 256×256×256 | 232 | 236 | 0.969 ± 0.090 | tie |
-| sq384   | 384×384×384 | 189 | 184 | 1.033 ± 0.109 | tie |
-| box512  | 512×128×512 | 266 | 259 | 1.025 ± 0.030 | tie |
-| oddN    | 512×11007×2048 | 259 | 266 | 0.973 ± 0.006 | LOSE |
+| Shape | M×N×K | Agentic GFLOPS | linalg GFLOPS | Ratio (mean ± stdev) | Verdict | was |
+|---|---|---|---|---|---|---|
+| decode  | 1×11008×2048 | 13 | 6 | 2.250 ± 0.074 | **WIN** | 2.196 WIN |
+| prefill | 96×11008×2048 | 211 | 189 | 1.117 ± 0.015 | **WIN** | 1.109 WIN |
+| sq512   | 512×512×512 | 272 | 283 | 0.960 ± 0.012 | LOSE | 0.950 LOSE |
+| sq1024  | 1024×1024×1024 | 276 | 282 | 0.978 ± 0.007 | LOSE | 0.970 LOSE |
+| sq2048  | 2048×2048×2048 | 279 | 279 | 1.002 ± 0.015 | tie | 1.002 tie |
+| M512-g  | 512×4096×4096 | 263 | 266 | 0.986 ± 0.016 | tie | 0.972 **LOSE** |
+| up-m256 | 256×11008×2048 | 242 | 249 | 0.972 ± 0.090 | tie | 0.963 **LOSE** |
+| up-m512 | 512×11008×2048 | 267 | 272 | 0.979 ± 0.047 | tie | 0.979 **LOSE** |
+| dn-m512 | 512×2048×11008 | 258 | 272 | 0.947 ± 0.008 | LOSE | 0.947 LOSE |
+| sq128   | 128×128×128 | 166 | 168 | 0.985 ± 0.054 | tie | 1.055 tie |
+| sq256   | 256×256×256 | 246 | 247 | 0.997 ± 0.020 | tie | 0.969 tie |
+| sq384   | 384×384×384 | 186 | 182 | 1.022 ± 0.060 | tie | 1.033 tie |
+| box512  | 512×128×512 | 261 | 257 | 1.016 ± 0.039 | tie | 1.025 tie |
+| oddN    | 512×11007×2048 | 263 | 265 | 0.991 ± 0.013 | tie | 0.973 **LOSE** |
 
-**Tally:** 2 WIN (both headline shapes), 7 LOSE, 5 tie. The losses are 2–5%, all on
-the heavy compute-bound squares / wide-N large-M band — consistent with the
-"Still open" section of the README (micro-kernel parity with `linalg` on the
-heaviest GEMMs is the unclosed gap). Small cache-resident boxes (sq128/256/384,
-box512) are ties within noise.
+**Tally (after fix):** 2 WIN · **3 LOSE** · 9 tie — down from **7 LOSE** before. The
+KC fix flipped four wide-N large-M shapes (M512-g, up-m256, up-m512, oddN) from a
+confident 2–4% LOSE to parity (in isolation they measure 0.997–1.020; the full
+14-shape run adds thermal contention and wider variance, hence `tie`). The 3
+remaining losses are the heavy squares (sq512/sq1024) and the tall-K down-proj
+(dn-m512, K=11008) — the documented algorithmic gap that needs pack/compute
+overlap. Small cache-resident boxes (sq128/256/384, box512) are ties within noise.
+
+## Improvement made on this branch: large-M wide-N KC
+
+Investigating the gap, the large-M wide-N/tall-K band (`_wide_n`/`_tall_k`,
+`m > 192`) was sweeping K in a half-L2 `KC=1024` panel (and a hardcoded `KC=512`
+for `m <= 288`), storing each C micro-tile twice. Switching to a single
+*C-stored-once* panel — `KC = min(K, 2048)` in `_l2_resident_kc`, the same TileK
+`linalg` uses — lifts the band to parity/WIN. Measured in isolation (interleaved
+A/B vs linalg, 8 epochs, peak-of-12):
+
+| Shape | before | after |
+|---|---|---|
+| up-m256 (256×11008×2048) | 0.964 LOSE | 1.001 tie |
+| up-m512 (512×11008×2048) | 0.970 LOSE | 0.997 tie |
+| odd-N (512×11007×2048) | 0.964 LOSE | 0.996 tie |
+| 512×4096×4096 | 0.986 tie | **1.020 WIN** |
+
+Bit-identical (`verify_dispatch` max_err 0.0); the 2 MB-L2 machine is unchanged
+(its KC was already 2048); the headline prefill (M=96, KC=256 band) is untouched.
+See `DESIGN.md` → *`_l2_resident_kc`*.
 
 ### Wider corner/edge sweep (single run — noise-prone, directional only)
 

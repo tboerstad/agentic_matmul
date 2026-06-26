@@ -842,18 +842,28 @@ def _nopack_gemm[
 
 
 def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
-    """Cache-aware KC for the prefill GEMM's large-M band: size the L2-resident
-    packed-B tile (TILE_N x KC) at ~half the per-core L2 (the BLIS rule), leaving
-    the rest for the streaming packed-A panel and the C accumulators. A 1 MB/core
-    L2 yields KC=1024, a 2 MB/core L2 yields KC=2048; the caller snaps to its
-    KC ladder."""
+    """Cache-aware KC for the prefill GEMM's large-M band, capped at a single
+    2048-deep "C stored once" k-panel — the same TileK = min(K, 2048) depth the
+    square-ish branch and linalg's `calculate_tile_n_k` use. Sizing the packed-B
+    tile (TILE_N x KC) to the full per-core L2 then capping at 2048 yields KC=2048
+    on both a 1 MB/core and a 2 MB/core L2 for the benchmark K's (<= 2048 sweeps in
+    one panel, so each L2-resident C micro-tile is stored exactly once instead of
+    once per k-panel).
+
+    This raised the 1 MB/core (Machine A) KC from 1024 to 2048: re-measured on the
+    current nightly (interleaved A/B, 8 epochs, peak-of-12), the single-panel KC
+    lifts the large-M wide band off its 2-4% loss to parity/WIN (up-m256 0.96->1.00,
+    up-m512 0.97->1.00, odd-N 0.96->1.00, 512x4096x4096 0.99->1.02 WIN) — linalg got
+    faster across nightlies, so the extra C re-traffic of the old half-L2 KC=1024
+    now costs that margin. The 2048 cap keeps Machine B (2 MB, already KC=2048)
+    byte-for-byte unchanged. See DESIGN.md "_l2_resident_kc"."""
     comptime elem = size_of[Scalar[dtype]]()
     var l2 = l2_cache_size()
     if l2 == 0:
-        # L2 undetectable (e.g. non-x86 without sysctl): pick a KC for a 1 MB L2.
-        return min(512, k)
-    var budget = (l2 // 2) // (tile_n * elem)
-    return min(budget, k)
+        # L2 undetectable (e.g. non-x86 without sysctl): the single-panel cap.
+        return min(2048, k)
+    var budget = l2 // (tile_n * elem)
+    return min(min(budget, k), 2048)
 
 
 def _square_ish_kc(m: Int, n: Int, k: Int) -> Int:
@@ -1225,9 +1235,11 @@ def _wide_n[
             _prefill[dtype, 256, 8 * NELTS, True](c, a, b)  # EXPERIMENT
         else:
             _prefill[dtype, 256, 8 * NELTS](c, a, b)
-    elif m <= 288:
-        _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
     else:
+        # m > 192: SHARED_A + a single C-stored-once k-panel (KC = min(K, 2048) at
+        # the detected L2, see _l2_resident_kc). Was a hardcoded KC=512 for m<=288
+        # and a half-L2 KC=1024 above it; the current-nightly re-measure (DESIGN.md)
+        # shows the single-panel KC lifts the whole large-M wide band to parity/WIN.
         var kc = _l2_resident_kc[dtype](64, k)
         _prefill_kc[dtype, 8 * NELTS, True](c, a, b, kc)
 
