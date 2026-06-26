@@ -91,6 +91,10 @@ def main() raises:
     check(512, 128, 512)          # box512: pack-B-only, M tail (512%6=2)
     check(256, 128, 512)          # tall box: pack-B-only
     check(300, 256, 256)          # M tail (300%6) + square-ish
+    # Small-N square-ish: the narrow-TileN pack-B-only fallback (n // 32 tiles).
+    check(384, 384, 384)          # sq384: 12 balanced tiles, KC=512 single panel
+    check(300, 300, 300)          # M tail (300%6) + N tail (300%32) on the fallback
+    check(320, 320, 320)          # sq320: N tail (320%32==0, 10 tiles)
     check(257, 256, 1100)         # M tail + 3 k-panels (512+512+76)
     check(512, 200, 768)          # N=200, NOT a multiple of 32 (N remainder)
     check(513, 224, 600)          # M tail + N=224 + multi-k-panel

@@ -210,17 +210,18 @@ kernels see the same turbo/thermal state:
   **pack-B-only / TileK=K** GEMM matching stdlib linalg (found by reading linalg's
   open source + emit-asm: on a square A is as large as B, so linalg packs only B,
   reads A unpacked, and sweeps the whole K so C is stored once). We do the same
-  (PACK_A=False, KC at the rung >= min(K,2048), TileN shrunk to a 512 KB pack
-  budget): interleaved A/B vs the old pack-both square path is sq512 +19%, sq768
-  +14%, sq1024 +12%, sq1536 +12%, sq2048 +6.5% (all 2σ WIN), bit-identical to
-  naive. Small-N square-ish and sq384 (too few j-tiles for the N-parallel
-  pack-B-only path) keep the old pack-both fallback, which picks KC by detected L2
-  (KC=1024 from a 1 MB/core L2 up, KC=512 below) plus a load-balance-aware TILE_N
-  (wide 8·NELTS only at >= 4
-  wide j-tiles per worker, else the finer 4·NELTS — the fine tile's extra
-  j-tiles smooth the balance on the small squares: sq512, with 2 wide tiles per
-  worker, runs +2–4% on the fine tile, while sq1024/sq2048 keep the wide tile;
-  see DESIGN.md). The same pack-B-only path also takes the **big boxes** (B ~ 512 KB,
+  (PACK_A=False, KC >= min(K,2048), TileN = 4·NELTS): interleaved A/B vs the old
+  pack-both square path is sq512 +19%, sq768 +14%, sq1024 +12%, sq1536 +12%, sq2048
+  +6.5% (all 2σ WIN), bit-identical to naive. The branch used to step TileN by K
+  (128/64/32), tuned for the big squares, which quietly handed the small ones an
+  **unbalanced** tiling: sq384 (K=384) got TileN=64 → 6 j-tiles across 4 cores
+  ([2,2,1,1]), the worst loss in the whole suite (and sq300, sq320 the same way).
+  Collapsing the branch to the **finest TileN=4·NELTS** (12 j-tiles for sq384,
+  3/core, balanced) removes it. In the full bench_focus harness (10 epochs, 2σ
+  verdict) sq384 goes **0.828 LOSE → 1.007 tie**, sq1024 0.974 LOSE → 0.983 tie,
+  sq512 0.962 → 0.987, sq2048/sq256 unchanged — nothing in the band regresses,
+  bit-identical (see DESIGN.md "Small-N square"). The same pack-B-only path also
+  takes the **big boxes** (B ~ 512 KB,
   the top of the small-box window) off the no-pack route — sq256, 512×128×512 and
   256×128×512 lift ~+10–14% (bonly/no-pack) and move from LOSE to parity, while
   the genuinely small boxes (sq96/128/192) keep no-pack (B > 384 KB cut); (2) the

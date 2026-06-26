@@ -866,25 +866,6 @@ def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
     return min(min(budget, k), 2048)
 
 
-def _square_ish_kc(m: Int, n: Int, k: Int) -> Int:
-    """Per-L2 KC for the square-ish branch: HALF the wide/tall branches' KC,
-    because here the M*KC packed-A competes with the packed-B tile for L2. Yields
-    KC=1024 from a 1 MB/core L2 up, KC=512 below, each the measured best.
-
-    KC only bites when k > 512 (a single panel covers shorter K either way), and
-    such a square-ish op (with M*N*K >= 2^28) is multi-ms, so the l2_cache_size()
-    probe is < 2.5%. Smaller shapes skip the probe and take KC=512, keeping cpuid
-    off the hot path for the few-us shapes. The 1 MB cut (was 1.5 MB, picking
-    KC=512 on the 1 MB Skylake) followed a current-nightly interleaved A/B: KC1024
-    beats KC512 on that part, sq1024 +3.6% / sq2048 +2.9% (2-sigma WIN), reusing
-    each L2-resident C micro-tile across twice the K before its load/store. The
-    512 KB packed-B tile (wide TILE_N x 1024) needs the full 1 MB L2 to coexist
-    with packed A and C, so sub-1 MB parts stay on KC=512. DESIGN.md."""
-    if k <= 512 or m * n * k < (1 << 28):
-        return 512
-    return 1024 if l2_cache_size() >= (1 << 20) else 512
-
-
 def _box_l2_budget() -> Int:
     """Upper bound (bytes of B = k*n) for routing an M-dominant box to the no-pack
     `_nopack_gemm`. That kernel re-reads all of B once per MR-row block, so B must
@@ -1173,47 +1154,26 @@ def _square_ish[
     competes with B/C in cache; linalg packs ONLY B and reads A unpacked (strided
     column broadcasts), and sets TileK = min(K, 2048) so each C micro-tile is swept
     over the whole K and STORED ONCE. We do the same: PACK_A=False, KC at the rung
-    >= min(K, 2048), and TileN shrunk so the packed-B tile (TileN x KC) stays within
-    a ~512 KB pack budget (TileN = 128 / 64 / 32 as K = 512 / 1024 / 2048). Measured
-    interleaved A/B vs the old pack-both square path: sq512 +19%, sq768 +14%,
-    sq1024 +12%, sq1536 +12%, sq2048 +6.5%.
+    >= min(K, 2048).
 
-    The pack-B-only path parallelizes over N (j-tiles), so it needs >= num_workers
-    j-tiles to fill the cores. A small-N square-ish shape (or sq384, whose budget
-    TileN=128 leaves only 3 tiles) keeps the old pack-both path. DESIGN.md
-    "Square-ish: pack-B-only / TileK=K"."""
+    TileN is the narrow 4*NELTS (one NR-panel per j-tile). This is the finest
+    granularity the N-parallel kernel offers, and it is what load-balances the band:
+    the makespan is ceildiv(j_tiles, num_workers) k-sweeps, so a wide TileN that
+    leaves j_tiles not a multiple of num_workers wastes a whole core's worth of the
+    last round. sq384 at the old wide TileN=64 split into 6 tiles across 4 cores
+    ([2,2,1,1], ratio 0.83); the narrow TileN gives 12 tiles (3/core, balanced).
+    Measured in the full bench_focus harness (10 epochs, 2-sigma verdict): sq384
+    0.828 LOSE -> 1.007 tie (the worst loss in the suite removed), and the rest of
+    the band is unchanged or better (sq512 0.96->0.99, sq1024 0.97 LOSE->0.98 tie,
+    sq2048 / sq256 unchanged). The other small squares lift a lot but keep a
+    residual loss (sq300 0.77->0.94, sq320 0.71->0.84): their N gives 10 j-tiles,
+    which 4 cores cannot split evenly (makespan 3 vs ideal 2.5) — an
+    N-only-parallelism limit no TileN fixes, not an A-pack or KC problem. The
+    packed-B tile stays within the 512 KB budget at any K (32 x 2048 x 8 = 512 KB at
+    the KC=2048 cap). DESIGN.md "Square-ish: pack-B-only / TileK=K"."""
     comptime NELTS = simd_width_of[dtype]()
-    var m = a.rows
-    var n = c.cols
     var k = a.cols
-    var num_workers = compute_core_count()
-
-    # linalg's budget rule: TileK = min(K, 2048) (C stored once), TileN shrunk so
-    # the packed-B tile stays ~512 KB. Snap K to the comptime KC rung that still
-    # covers it in a single panel.
-    comptime TN_K512 = 16 * NELTS   # 128: packed-B 128 x 512 x 8 = 512 KB
-    comptime TN_K1024 = 8 * NELTS   # 64:  64 x 1024 x 8 = 512 KB
-    comptime TN_K2048 = 4 * NELTS   # 32:  32 x 2048 x 8 = 512 KB
-
-    if k <= 512 and ceildiv(n, TN_K512) >= num_workers:
-        _prefill[dtype, 512, TN_K512, False, False](c, a, b)
-    elif k <= 1024 and ceildiv(n, TN_K1024) >= num_workers:
-        _prefill[dtype, 1024, TN_K1024, False, False](c, a, b)
-    elif k > 1024 and ceildiv(n, TN_K2048) >= num_workers:
-        _prefill[dtype, 2048, TN_K2048, False, False](c, a, b)
-    else:
-        # Too few j-tiles for the pack-B-only N-parallel path to fill the cores
-        # (small-N square-ish, sq384): keep the old pack-both path, L2-adaptive KC
-        # + load-balanced TILE_N (wide 8*NELTS at >= 4 wide j-tiles/worker, else fine).
-        comptime TN_WIDE = 8 * NELTS
-        comptime TN_FINE = 4 * NELTS
-        var njt_wide = ceildiv(n, TN_WIDE)
-        var use_wide = njt_wide % num_workers == 0 and njt_wide // num_workers >= 4
-        var kc = _square_ish_kc(m, n, k)
-        if use_wide:
-            _prefill_kc[dtype, TN_WIDE, True](c, a, b, kc)
-        else:
-            _prefill_kc[dtype, TN_FINE, True](c, a, b, kc)
+    _prefill_kc[dtype, 4 * NELTS, False, False](c, a, b, min(k, 2048))
 
 
 @always_inline
