@@ -1145,6 +1145,99 @@ def _narrow_n[
 
 
 @always_inline
+def _pack_b_only_2d[
+    dtype: DType, MR: Int, NR: Int, KU: Int
+](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
+    """Pack-B-only GEMM parallelized over a 2D (column, MR-row-block) grid.
+
+    The N-parallel pack-B-only path (`_square_ish`) splits N into NR-wide columns
+    and hands each worker a contiguous run of whole columns. When the column count
+    is not a multiple of the worker count the last round leaves cores idle: sq300
+    and sq320 give ceildiv(N, NR) = 10 columns across 4 cores, a [3, 3, 3, 1] split
+    whose makespan is 3 k-sweeps where the balanced ideal is 2.5. No TILE_N choice
+    removes that, because the unit of work is a whole column (one core owns every
+    row of it).
+
+    This path makes the unit of work one MR x NR C tile instead, and distributes
+    the columns x row-blocks grid as ceildiv(columns * row_blocks, workers) tiles
+    per worker in column-major order. sq320 becomes 10 x 54 = 540 tiles over 4 cores
+    (135 each, balanced) instead of a 3-column makespan. Each worker packs into a
+    private [k][NR] buffer the columns its contiguous tile range touches, reusing it
+    across that column's row blocks, so B is packed once per worker-column with at
+    most one shared boundary column repacked per worker pair (no global pack barrier,
+    the buffer stays L2-hot). C is stored once.
+
+    Single K-panel only: the caller gates this to k <= 2048, the square-ish band's
+    KC, so each tile is one is_first_k sweep over the whole K and C is stored once
+    (the same C-stored-once property the column path has). A reads from source
+    unpacked (PACK_A=False), so there is no packed-A buffer to coordinate across the
+    row split. DESIGN.md "Small-N square"."""
+    comptime NELTS = simd_width_of[dtype]()
+    comptime NR_VECS = NR // NELTS
+    comptime PREFETCH_B_DIST = 8
+
+    var c_view = c.noalias_view()
+    var a_view = a.noalias_view()
+    var b_view = b.noalias_view()
+    var m = a_view.rows
+    var n = c_view.cols
+    var k = a_view.cols
+
+    var num_cols = ceildiv(n, NR)
+    var num_i_panels = ceildiv(m, MR)
+    var num_workers = compute_core_count()
+    var total_tiles = num_cols * num_i_panels
+
+    # One private [k][NR] column buffer per worker (B packed lazily as the worker
+    # crosses into each column it owns). An unused packed-A stand-in for the
+    # PACK_A=False micro-kernel (it reads A from source; the pointer is never read).
+    var bp_buf = alloc[Scalar[dtype]](num_workers * k * NR)
+    var ap_dummy = alloc[Scalar[dtype]](1)
+
+    def compute_worker(worker_id: Int) {read c_view, read a_view, read b_view, mut bp_buf, read ap_dummy, read m, read n, read k, read num_cols, read num_i_panels, read num_workers, read total_tiles}:
+        var per = ceildiv(total_tiles, num_workers)
+        var start = worker_id * per
+        var end = min(start + per, total_tiles)
+        if start >= total_tiles:
+            return
+        var bp_panel = bp_buf + worker_id * k * NR
+        var cur_col = -1
+        # Column-major flat index so the worker's contiguous slice walks whole
+        # columns: it packs a column once on entry and reuses it down the rows.
+        for u in range(start, end):
+            var col = u // num_i_panels
+            var ip = u % num_i_panels
+            var jr = col * NR
+            var cols = min(NR, n - jr)
+            if col != cur_col:
+                var full = cols == NR
+                _pack_b_slab[dtype, NR, NR_VECS, NELTS, PREFETCH_B_DIST](
+                    b_view, bp_panel, 0, jr, k,
+                    1 if full else 0, not full, 0 if full else cols,
+                )
+                cur_col = col
+            var i0 = ip * MR
+            var rows = min(MR, m - i0)
+            if rows == MR and cols == NR:
+                _full_microkernel[dtype, MR, NR_VECS, NELTS, NR, KU, False](
+                    c_view.sub(i0, jr), ap_dummy, a_view.addr(i0, 0), k,
+                    bp_panel, k, True,
+                )
+            else:
+                # M-remainder rows (rows < MR) and/or a partial trailing column
+                # (cols < NR): the masked kernel reads A unpacked and stores only the
+                # live rows and columns.
+                _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
+                    c_view.sub(i0, jr), a_view.sub(i0, 0), bp_panel, k,
+                    rows, cols, True,
+                )
+
+    parallelize(compute_worker, num_workers, num_workers)
+    bp_buf.free()
+    ap_dummy.free()
+
+
+@always_inline
 def _square_ish[
     dtype: DType
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -1165,15 +1258,39 @@ def _square_ish[
     Measured in the full bench_focus harness (10 epochs, 2-sigma verdict): sq384
     0.828 LOSE -> 1.007 tie (the worst loss in the suite removed), and the rest of
     the band is unchanged or better (sq512 0.96->0.99, sq1024 0.97 LOSE->0.98 tie,
-    sq2048 / sq256 unchanged). The other small squares lift a lot but keep a
-    residual loss (sq300 0.77->0.94, sq320 0.71->0.84): their N gives 10 j-tiles,
-    which 4 cores cannot split evenly (makespan 3 vs ideal 2.5) — an
-    N-only-parallelism limit no TileN fixes, not an A-pack or KC problem. The
-    packed-B tile stays within the 512 KB budget at any K (32 x 2048 x 8 = 512 KB at
-    the KC=2048 cap). DESIGN.md "Square-ish: pack-B-only / TileK=K"."""
+    sq2048 / sq256 unchanged).
+
+    The narrow TileN balances the band only when ceildiv(N, NR) is a multiple of the
+    worker count (sq384 -> 12 columns / 4 cores, sq512/1024/2048 -> 16/32/64, all
+    even). When it is not, the last round still idles cores: sq300 and sq320 give 10
+    columns across 4 cores, a [3, 3, 3, 1] makespan of 3 k-sweeps where the ideal is
+    2.5, which no TileN choice fixes (the work unit is a whole column). Those route
+    to `_pack_b_only_2d`, which splits each column into MR-row blocks so the 2D tile
+    grid balances (measured interleaved A/B vs this column path: sq320 +18%, sq300
+    +9%, both 2-sigma wins, and sq320 0.883 LOSE -> 1.07 WIN vs linalg).
+
+    The 2D path carries a real cost (boundary columns repacked, more masked tiles),
+    so it is gated to where it pays: k <= 2048 (a single C-stored-once K-panel, the
+    band's KC, which the 2D path assumes) and a makespan it cuts by at least 1/8. The
+    cut is the 2D tile-grid critical path (ceildiv(columns * row_blocks, workers))
+    against the column path's (ceildiv(columns, workers) * row_blocks). At 10 columns
+    that is a 1/6 cut (apply); at 11 columns only 1/12 (column path kept, where 2D
+    measured a wash-to-loss). The packed-B tile stays within the 512 KB budget at any
+    K (32 x 2048 x 8 = 512 KB at the KC=2048 cap). DESIGN.md "Square-ish: pack-B-only
+    / TileK=K" and "Small-N square"."""
     comptime NELTS = simd_width_of[dtype]()
+    var m = a.rows
+    var n = c.cols
     var k = a.cols
-    _prefill_kc[dtype, 4 * NELTS, False, False](c, a, b, min(k, 2048))
+    var num_workers = compute_core_count()
+    var num_cols = ceildiv(n, 4 * NELTS)
+    var num_i_panels = ceildiv(m, 6)
+    var col_makespan = ceildiv(num_cols, num_workers) * num_i_panels
+    var grid_makespan = ceildiv(num_cols * num_i_panels, num_workers)
+    if k <= 2048 and grid_makespan * 8 <= col_makespan * 7:
+        _pack_b_only_2d[dtype, 6, 4 * NELTS, 2](c, a, b)
+    else:
+        _prefill_kc[dtype, 4 * NELTS, False, False](c, a, b, min(k, 2048))
 
 
 @always_inline

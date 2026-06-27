@@ -220,7 +220,14 @@ kernels see the same turbo/thermal state:
   3/core, balanced) removes it. In the full bench_focus harness (10 epochs, 2σ
   verdict) sq384 goes **0.828 LOSE → 1.007 tie**, sq1024 0.974 LOSE → 0.983 tie,
   sq512 0.962 → 0.987, sq2048/sq256 unchanged — nothing in the band regresses,
-  bit-identical (see DESIGN.md "Small-N square"). The same pack-B-only path also
+  bit-identical (see DESIGN.md "Small-N square"). The squares whose column count is
+  not a multiple of the core count (sq300, sq320 → 10 columns / 4 cores, a [3,3,3,1]
+  makespan) kept a residual loss that no TileN choice fixes; `_pack_b_only_2d` now
+  splits each column into MR-row blocks so the **columns × row-blocks** grid balances
+  (sq320 540 tiles / 4 cores, 135 each), gated to where the grid makespan beats the
+  column makespan by ≥1/8. In bench_focus (10 epochs, 2σ) sq320 goes **0.883 LOSE →
+  1.021 tie** (221 → 261 GFLOPS) and sq300 1.021 tie → **1.080 WIN**, bit-identical
+  (see DESIGN.md "Small-N square residual"). The same pack-B-only path also
   takes the **big boxes** (B ~ 512 KB,
   the top of the small-box window) off the no-pack route — sq256, 512×128×512 and
   256×128×512 lift ~+10–14% (bonly/no-pack) and move from LOSE to parity, while
