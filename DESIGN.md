@@ -236,10 +236,48 @@ the trustworthy one per AGENTS.md), baseline -> fixed:
 The worst loss in the suite is gone and nothing in the band regresses (the headline
 decode/prefill/box512 wins and the wide/tall shapes are on other code paths and
 unmoved). Bit-identical (verify_dispatch max_err 0.0); the whole branch collapses
-from three K-rungs + a pack-both fallback to one line. Two small squares off the
-benchmark set lift a lot but keep a residual loss (sq300 0.77->0.94, sq320
-0.71->0.84): their N gives 10 j-tiles, which 4 cores cannot split evenly (makespan
-3 vs ideal 2.5) — a hard N-only-parallelism limit no TileN choice removes.
+from three K-rungs + a pack-both fallback to one line. Two squares (sq300, sq320)
+lift a lot but kept a residual loss: their N gives 10 columns, which 4 cores cannot
+split evenly (makespan 3 vs ideal 2.5), a limit no TileN choice removes because the
+work unit is a whole column. That residual is fixed next.
+
+### Small-N square residual: 2D parallelism for the uneven column count
+
+The narrow TileN balances the band only when the column count ceildiv(N, NR) is a
+multiple of the worker count. sq384 gives 12 columns / 4 cores, sq512/1024/2048 give
+16/32/64, all even. sq300 and sq320 give 10 columns: ceildiv(10, 4) = 3 columns on
+the busiest core where the balanced ideal is 2.5, a [3, 3, 3, 1] makespan. The
+column path parallelizes over N only, so a whole column (every M row of it) belongs
+to one core; no TileN choice splits that last round.
+
+`_pack_b_only_2d` breaks the column into MR-row blocks, so the unit of work is one
+MR x NR C tile and the parallel grid is columns x row_blocks. sq320 becomes 10 x 54
+= 540 tiles across 4 cores (135 each, balanced) instead of a 3-column makespan. Each
+worker takes a contiguous column-major slice of the grid and packs into a private
+[k][NR] buffer the columns its slice touches, reusing it down that column's rows, so
+B is still packed about once total (only the columns on a worker boundary get packed
+twice) with no global pack barrier and the buffer stays L2-hot. A reads from source
+unpacked (PACK_A=False), so there is no packed-A buffer to coordinate across the row
+split, and the path is gated to k <= 2048 so each tile is a single C-stored-once
+K-panel.
+
+The 2D path costs something real (boundary repacks, more masked tiles), so it is
+gated to where it pays: a grid makespan that beats the column makespan by at least
+1/8 (ceildiv(columns * row_blocks, workers) vs ceildiv(columns, workers) *
+row_blocks). At 10 columns that is a 1/6 cut and the 2D path runs; at 11 columns
+only 1/12, and the column path is kept (an interleaved A/B measured 2D a wash-to-
+loss there, sq336 0.93). Interleaved A/B vs the column path (12 epochs, peak-of-14):
+sq320 1.18, sq300 1.09 (both 2-sigma 2D wins). Full bench_focus (10 epochs, 2-sigma
+verdict), baseline -> fixed:
+
+| Shape | before | after |
+|---|---|---|
+| sq320 | 0.883 **LOSE** | 1.021 tie (221 -> 261 GFLOPS) |
+| sq300 | 1.021 tie | 1.080 **WIN** |
+
+The confident LOSE is gone and nothing else moves (the in-band squares keep the
+column path, their column counts being even). Bit-identical (verify_dispatch
+max_err 0.0).
 
 The same pack-B-only path also took the **big boxes** off the no-pack route. The
 small-box branch (`_small_box`, M-parallel no-pack: re-reads all of B per MR-row
