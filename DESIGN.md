@@ -117,26 +117,17 @@ have since flipped. On the 1 MB Skylake, L2/3 = 341 KB sits below the
 compile-time 512 KB tier-1 cut, so that part simply keeps no-pack for B ≤ 512 KB
 (sq288/sq320 there already preferred packed).
 
-## `_square_ish_kc`: KC=1024 from 1 MB L2 up
+## Removed: `_square_ish_kc` (the pack-both fallback's L2-adaptive KC)
 
-KC sets how many times each L2-resident C micro-tile is loaded and stored for
-k-panel accumulation: a deeper KC sweeps more of K per residency, so C is
-touched fewer times. The cut is where the KC-deep packed-B tile (wide TILE_N x
-KC = 512 KB at KC=1024) still coexists in L2 with the packed-A panel and the C
-accumulators. The probe (`l2_cache_size()`, ~6 cpuid → ~61 µs VM-exit on a KVM
-guest, < 2.5% of a multi-ms square-ish op) picks KC=1024 from a 1 MB/core L2 up,
-KC=512 below; smaller shapes skip it (k <= 512 is a single panel either way).
-
-The 1 MB cut replaced an earlier 1.5 MB one. On the 1 MB Skylake an older
-nightly measured KC512 > KC1024 (then sq2048 0.84 vs 0.72), so the cut kept that
-part on KC512. A current-nightly interleaved A/B (12 epochs, peak-of-15, KC the
-only lever at each shape's tile width) flipped it: KC1024/KC512 is sq1024 1.036
-+/- 0.007 and sq2048 1.029 +/- 0.007 (both 2-sigma WIN), sq1536 1.015 (tie). The
-linalg/codegen the ratio is judged against also moved across nightlies, so the
-crossover is a measured, nightly-specific number, not a fixed property of the
-part (AGENTS.md warns picks flip across nightlies). Machine B (2 MB) was already
-on KC1024 and is unchanged. (This KC pick now governs only the square-ish
-*fallback* path; the balanced squares take the pack-B-only path below.)
+The square-ish branch once had a *pack-both* fallback for small-N squares (too
+few wide j-tiles to fill the cores), and `_square_ish_kc` picked that path's KC
+from the detected L2 (KC=1024 from a 1 MB/core L2 up, KC=512 below — a deeper KC
+sweeps more of K per C residency, so each L2-resident C micro-tile is loaded and
+stored fewer times). That fallback turned out to be the worst code in the suite
+on a 2 MB/core part (sq384 0.82, sq300 0.77): its redundant A-pack was pure
+overhead. The fallback is now pack-B-only at TileK = min(K, 2048) (see "Small-N
+square" above), so the helper and its L2 probe are gone — KC is just the single
+C-stored-once panel, the same the wide rungs use.
 
 ## `_l2_resident_kc`: a single C-stored-once panel (KC = min(K, 2048))
 
@@ -202,14 +193,53 @@ the packed-A re-read (measured 0.43). Dropping the A-pack removes that, because
 the unpacked source-A re-read streams from L3 and the HW prefetcher hides it.
 
 Implemented as `PACK_A=False` on `_packed_gemm` (skip the A-pack; the micro-kernel
-reads A via `load_a_col[MR](a_view.addr(i, pc+step), k)` at row-stride k) plus the
-budget (KC, TileN) rungs. Interleaved A/B vs the old pack-both square path: sq512
-1.188, sq768 1.141, sq1024 1.118, sq1536 1.117, sq2048 1.065 (all 2-sigma WIN);
-bit-identical to naive (verify_dispatch max_err 0.0). The path parallelizes over
-N, so it is gated to shapes with >= num_workers j-tiles at the budget TileN; a
-small-N square-ish shape (or sq384, whose TileN=128 leaves 3 tiles) keeps the
-pack-both fallback. The headline wide/tall/decode shapes never enter square-ish,
-so they are untouched.
+reads A via `load_a_col[MR](a_view.addr(i, pc+step), k)` at row-stride k) at the
+narrow TileN = 4*NELTS, KC = min(K, 2048). Interleaved A/B vs the old pack-both
+square path: sq512 1.188, sq768 1.141, sq1024 1.118, sq1536 1.117, sq2048 1.065
+(all 2-sigma WIN); bit-identical to naive (verify_dispatch max_err 0.0). The branch
+once stepped TileN by K (128/64/32) to keep the packed-B tile near 512 KB, but the
+narrow TileN fits that budget at every K and load-balances better (see "Small-N
+square" below), so the rungs collapsed to this one call. The headline
+wide/tall/decode shapes never enter square-ish, so they are untouched.
+
+### Small-N square: narrow the TileN so the j-tiles balance the cores
+
+This is the indisputable-win change. The square-ish branch used to step TileN by K
+(128 / 64 / 32 as K <= 512 / 1024 / 2048) to keep the packed-B tile near 512 KB.
+That was tuned for the big squares (sq512/1024/2048) and quietly mis-served the
+small ones. sq384 (K=384) took the K<=1024 rung's TileN=64, which splits N=384
+into ceildiv(384,64) = **6 j-tiles across 4 cores** — a [2,2,1,1] distribution
+whose makespan is 2 k-sweeps where the ideal is 1.5, so two cores idle through the
+last round. Measured that was sq384 0.82, the worst loss in the whole suite (and
+sq300 0.77, sq320 0.71 the same way). It looked for a while like a pack-both
+fallback bug, but instrumenting the actual route showed sq384 never reached the
+fallback at all: rung 2 caught it and handed it the unbalanced TileN=64.
+
+The fix is to stop stepping TileN by K and always use the **narrow TileN = 4*NELTS**
+(one NR-panel per j-tile, the finest the N-parallel kernel offers). The makespan of
+an N-parallel GEMM is ceildiv(j_tiles, num_workers) k-sweeps, so the finest TileN
+maximizes j_tiles and minimizes the rounding waste. sq384 then splits into 12 tiles
+(3/core, perfectly balanced). The narrow TileN keeps the packed-B tile within
+budget at every K (32 x 2048 x 8 = 512 KB at the KC=2048 cap).
+
+Measured in the full bench_focus harness (10 epochs, peak-of-12, 2-sigma verdict —
+the trustworthy one per AGENTS.md), baseline -> fixed:
+
+| Shape | before | after |
+|---|---|---|
+| sq384 | 0.828 **LOSE** | 1.007 tie |
+| sq512 | 0.962 tie | 0.987 tie |
+| sq1024 | 0.974 **LOSE** | 0.983 tie |
+| sq2048 | 1.007 tie | 1.008 tie |
+| sq256 | 1.007 tie | 1.022 tie |
+
+The worst loss in the suite is gone and nothing in the band regresses (the headline
+decode/prefill/box512 wins and the wide/tall shapes are on other code paths and
+unmoved). Bit-identical (verify_dispatch max_err 0.0); the whole branch collapses
+from three K-rungs + a pack-both fallback to one line. Two small squares off the
+benchmark set lift a lot but keep a residual loss (sq300 0.77->0.94, sq320
+0.71->0.84): their N gives 10 j-tiles, which 4 cores cannot split evenly (makespan
+3 vs ideal 2.5) — a hard N-only-parallelism limit no TileN choice removes.
 
 The same pack-B-only path also took the **big boxes** off the no-pack route. The
 small-box branch (`_small_box`, M-parallel no-pack: re-reads all of B per MR-row
@@ -220,8 +250,8 @@ into >= num_workers NR-tiles. A pack-B-only/no-pack sweep: sq256 1.14,
 sq128 0.95, sq96 0.82 (no-pack wins below). The cut is B > 384 KB (with the
 >= num_workers NR-tile guard); `_small_box` routes those to the same
 `_prefill[..., PACK_A=False]` at TileN=4*NELTS, KC=512 (k <= 512 there, so a
-single whole-K panel). sq384 stays put (pack-B-only measured 0.97-0.98 vs its
-pack-both fallback: at K=384 the avoided A-pack is too small to pay).
+single whole-K panel). The small-N squares (sq384/sq300/sq320) take the
+square-ish branch's narrow pack-B-only rung (see "Small-N square" above).
 
 ## Dead end: x86 M-blocking (GotoBLAS loop 3) for the squares
 
