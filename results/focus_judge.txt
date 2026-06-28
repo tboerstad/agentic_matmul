@@ -1,0 +1,57 @@
+Included from /home/user/agentic_matmul/bench_focus.mojo:35:
+Included from /home/user/agentic_matmul/gemm.mojo:2:
+Included from /home/user/agentic_matmul/matrix.mojo:2:
+/home/user/agentic_matmul/tile.mojo:23:52: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+struct Tile[dtype: DType, origin: Origin](Copyable & Movable):
+                                                   ^
+Included from /home/user/agentic_matmul/bench_focus.mojo:35:
+/home/user/agentic_matmul/gemm.mojo:33:14: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+    Copyable & Movable
+             ^
+Included from /home/user/agentic_matmul/bench_focus.mojo:35:
+Included from /home/user/agentic_matmul/gemm.mojo:3:
+/home/user/agentic_matmul/sme_kernel.mojo:26:1: warning: 'alias' is deprecated; use 'comptime'
+alias MR = 16   # micro-tile rows  (2 ZA row-blocks of 8)
+^~~~~
+comptime
+Included from /home/user/agentic_matmul/bench_focus.mojo:35:
+Included from /home/user/agentic_matmul/gemm.mojo:3:
+/home/user/agentic_matmul/sme_kernel.mojo:27:1: warning: 'alias' is deprecated; use 'comptime'
+alias NR = 32   # micro-tile cols  (4 ZA col-blocks of 8)
+^~~~~
+comptime
+Included from /home/user/agentic_matmul/bench_focus.mojo:35:
+Included from /home/user/agentic_matmul/gemm.mojo:3:
+/home/user/agentic_matmul/sme_kernel.mojo:758:29: warning: assignment to 'i_last' was never used; assign to '_' instead?
+    var i_last = num_i_full * MR  # first row of the partial tile
+                            ^
+=== focused bench: 10 epochs x peak-of- 12 ; ratio mean +/- stdev, 2-sigma verdict | dtype float64 ===
+(epoch loop is outer so every shape is sampled across the full thermal envelope)
+  epoch 1 of 10 done
+  epoch 2 of 10 done
+  epoch 3 of 10 done
+  epoch 4 of 10 done
+  epoch 5 of 10 done
+  epoch 6 of 10 done
+  epoch 7 of 10 done
+  epoch 8 of 10 done
+  epoch 9 of 10 done
+  epoch 10 of 10 done
+
+--- summary (mean ratio +/- stdev over 10 epochs) ---
+   decode   | dispatch 21 | linalg 10 | ratio 2.04 +/- 0.031 [ 1.974 .. 2.083 ] WIN 
+   prefill  | dispatch 243 | linalg 225 | ratio 1.081 +/- 0.009 [ 1.062 .. 1.093 ] WIN 
+   sq512    | dispatch 282 | linalg 290 | ratio 0.972 +/- 0.017 [ 0.947 .. 1.005 ] tie 
+   sq1024   | dispatch 300 | linalg 305 | ratio 0.983 +/- 0.007 [ 0.969 .. 0.994 ] LOSE
+   sq2048   | dispatch 304 | linalg 305 | ratio 0.999 +/- 0.008 [ 0.985 .. 1.009 ] tie 
+   M512-g   | dispatch 276 | linalg 285 | ratio 0.967 +/- 0.004 [ 0.961 .. 0.974 ] LOSE
+   up-m256  | dispatch 262 | linalg 268 | ratio 0.979 +/- 0.003 [ 0.975 .. 0.983 ] LOSE
+   up-m512  | dispatch 282 | linalg 285 | ratio 0.989 +/- 0.012 [ 0.975 .. 1.012 ] tie 
+   dn-m512  | dispatch 267 | linalg 283 | ratio 0.941 +/- 0.012 [ 0.927 .. 0.968 ] LOSE
+   sq128    | dispatch 172 | linalg 171 | ratio 1.008 +/- 0.036 [ 0.957 .. 1.057 ] tie 
+   sq256    | dispatch 273 | linalg 269 | ratio 1.016 +/- 0.021 [ 0.982 .. 1.045 ] tie 
+   sq384    | dispatch 290 | linalg 287 | ratio 1.01 +/- 0.016 [ 0.986 .. 1.034 ] tie 
+   box512   | dispatch 272 | linalg 259 | ratio 1.049 +/- 0.031 [ 0.992 .. 1.092 ] tie 
+   oddN     | dispatch 280 | linalg 284 | ratio 0.983 +/- 0.007 [ 0.973 .. 0.993 ] LOSE
+   sq300    | dispatch 234 | linalg 232 | ratio 1.008 +/- 0.035 [ 0.949 .. 1.042 ] tie 
+   sq320    | dispatch 273 | linalg 271 | ratio 1.01 +/- 0.037 [ 0.959 .. 1.074 ] tie 

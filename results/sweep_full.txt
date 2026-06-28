@@ -1,0 +1,149 @@
+Included from /home/user/agentic_matmul/bench_sweep.mojo:27:
+Included from /home/user/agentic_matmul/gemm.mojo:2:
+Included from /home/user/agentic_matmul/matrix.mojo:2:
+/home/user/agentic_matmul/tile.mojo:23:52: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+struct Tile[dtype: DType, origin: Origin](Copyable & Movable):
+                                                   ^
+Included from /home/user/agentic_matmul/bench_sweep.mojo:27:
+/home/user/agentic_matmul/gemm.mojo:33:14: warning: redundant trait composition: 'Copyable' already implies 'Movable'
+    Copyable & Movable
+             ^
+Included from /home/user/agentic_matmul/bench_sweep.mojo:27:
+Included from /home/user/agentic_matmul/gemm.mojo:3:
+/home/user/agentic_matmul/sme_kernel.mojo:26:1: warning: 'alias' is deprecated; use 'comptime'
+alias MR = 16   # micro-tile rows  (2 ZA row-blocks of 8)
+^~~~~
+comptime
+Included from /home/user/agentic_matmul/bench_sweep.mojo:27:
+Included from /home/user/agentic_matmul/gemm.mojo:3:
+/home/user/agentic_matmul/sme_kernel.mojo:27:1: warning: 'alias' is deprecated; use 'comptime'
+alias NR = 32   # micro-tile cols  (4 ZA col-blocks of 8)
+^~~~~
+comptime
+/home/user/agentic_matmul/bench_sweep.mojo:195:9: warning: ref 'i' was never used, remove it?
+    for i in range(len(ms)): dn_l.append("down")
+        ^
+/home/user/agentic_matmul/bench_sweep.mojo:189:9: warning: ref 'i' was never used, remove it?
+    for i in range(len(ms)): up_l.append("up  ")
+        ^
+/home/user/agentic_matmul/bench_sweep.mojo:183:9: warning: ref 'i' was never used, remove it?
+    for i in range(len(ms)): t_l.append("tall")
+        ^
+/home/user/agentic_matmul/bench_sweep.mojo:177:9: warning: ref 'i' was never used, remove it?
+    for i in range(len(ms)): w_l.append("wide")
+        ^
+Included from /home/user/agentic_matmul/bench_sweep.mojo:27:
+Included from /home/user/agentic_matmul/gemm.mojo:3:
+/home/user/agentic_matmul/sme_kernel.mojo:758:29: warning: assignment to 'i_last' was never used; assign to '_' instead?
+    var i_last = num_i_full * MR  # first row of the partial tile
+                            ^
+mode: --full (complete sweep, slow)
+
+=== square sweep (M = N = K) ===
+
+   sq   M= 1 N= 1 K= 1 | dispatch 0.047619047619047616 | linalg 0.024691358024691357 | ratio 1.9285714285714286 WIN 
+   sq   M= 2 N= 2 K= 2 | dispatch 0.3404255319148936 | linalg 0.10126582278481013 | ratio 3.3617021276595747 WIN 
+   sq   M= 4 N= 4 K= 4 | dispatch 1.4883720930232558 | linalg 0.7619047619047619 | ratio 1.9534883720930234 WIN 
+   sq   M= 8 N= 8 K= 8 | dispatch 12.641975308641975 | linalg 5.446808510638298 | ratio 2.3209876543209877 WIN 
+   sq   M= 16 N= 16 K= 16 | dispatch 45.25966850828729 | linalg 28.444444444444443 | ratio 1.591160220994475 WIN 
+   sq   M= 32 N= 32 K= 32 | dispatch 52.01269841269841 | linalg 46.84488920657613 | ratio 1.1103174603174604 WIN 
+   sq   M= 64 N= 64 K= 64 | dispatch 72.4555002763958 | linalg 43.484117110392305 | ratio 1.6662520729684906 WIN 
+   sq   M= 96 N= 96 K= 96 | dispatch 102.06922011998154 | linalg 96.18263847366418 | ratio 1.061202122750346 WIN 
+   sq   M= 128 N= 128 K= 128 | dispatch 186.70393946138438 | linalg 166.0650116799303 | ratio 1.1242822167816604 WIN 
+   sq   M= 256 N= 256 K= 256 | dispatch 267.7884790346523 | linalg 268.6138155735408 | ratio 0.9969274233451981 LOSE
+   sq   M= 512 N= 512 K= 512 | dispatch 279.52447130098125 | linalg 291.46181366497393 | ratio 0.9590432029023388 LOSE
+
+=== wide-N sweep: N=8192 K=2048 ===
+
+   wide M= 1 N= 8192 K= 2048 | dispatch 19.296455039447554 | linalg 10.437785329180754 | ratio 1.8487116213724721 WIN 
+   wide M= 2 N= 8192 K= 2048 | dispatch 28.156163413402073 | linalg 22.312827749102617 | ratio 1.261882345438465 WIN 
+   wide M= 4 N= 8192 K= 2048 | dispatch 52.52085510815245 | linalg 37.61862610370999 | ratio 1.396139640064441 WIN 
+   wide M= 8 N= 8192 K= 2048 | dispatch 74.11409080593121 | linalg 62.996751073666424 | ratio 1.1764748108877 WIN 
+   wide M= 16 N= 8192 K= 2048 | dispatch 122.99572137726015 | linalg 107.55291383220636 | ratio 1.1435833488355895 WIN 
+   wide M= 32 N= 8192 K= 2048 | dispatch 170.5449273953545 | linalg 158.5641654809644 | ratio 1.0755578152103251 WIN 
+   wide M= 64 N= 8192 K= 2048 | dispatch 213.2089111777323 | linalg 203.08512513779868 | ratio 1.0498499633248095 WIN 
+   wide M= 96 N= 8192 K= 2048 | dispatch 245.07284544806961 | linalg 235.3836318036344 | ratio 1.041163497946698 WIN 
+   wide M= 128 N= 8192 K= 2048 | dispatch 233.9612128031523 | linalg 241.5353473504383 | ratio 0.9686417138097106 LOSE
+   wide M= 256 N= 8192 K= 2048 | dispatch 263.0186767647011 | linalg 268.06903913213625 | ratio 0.9811602175925072 LOSE
+   wide M= 512 N= 8192 K= 2048 | dispatch 277.2239310943216 | linalg 286.6533705654069 | ratio 0.9671050807723409 LOSE
+
+=== tall-K sweep: N=2048 K=8192 ===
+
+   tall M= 1 N= 2048 K= 8192 | dispatch 23.586711364200312 | linalg 11.392755029041746 | ratio 2.070325509859068 WIN 
+   tall M= 2 N= 2048 K= 8192 | dispatch 28.90454361619147 | linalg 21.32298950132401 | ratio 1.3555577473973197 WIN 
+   tall M= 4 N= 2048 K= 8192 | dispatch 53.701074959919566 | linalg 37.52553412303618 | ratio 1.4310542465257954 WIN 
+   tall M= 8 N= 2048 K= 8192 | dispatch 74.39023610237781 | linalg 64.96319464410001 | ratio 1.1451135756165274 WIN 
+   tall M= 16 N= 2048 K= 8192 | dispatch 125.97434479936402 | linalg 108.69475849890662 | ratio 1.1589735010141378 WIN 
+   tall M= 32 N= 2048 K= 8192 | dispatch 162.9804581337772 | linalg 154.73405124715515 | ratio 1.0532940669500739 WIN 
+   tall M= 64 N= 2048 K= 8192 | dispatch 218.51523976061333 | linalg 213.9250315311461 | ratio 1.0214570880116893 WIN 
+   tall M= 96 N= 2048 K= 8192 | dispatch 235.453140795216 | linalg 236.2053189626524 | ratio 0.9968155748111865 LOSE
+   tall M= 128 N= 2048 K= 8192 | dispatch 233.4989364980264 | linalg 243.60682047572038 | ratio 0.9585073851464623 LOSE
+   tall M= 256 N= 2048 K= 8192 | dispatch 253.87732117014278 | linalg 269.76504359832 | ratio 0.94110533293619 LOSE
+   tall M= 512 N= 2048 K= 8192 | dispatch 266.90973323738183 | linalg 287.5001863242985 | ratio 0.9283810791562731 LOSE
+
+=== Qwen up/gate proj (wide-N): N=11008 K=2048 ===
+
+   up   M= 1 N= 11008 K= 2048 | dispatch 20.70685746826607 | linalg 10.358999572211482 | ratio 1.9989244447710197 WIN 
+   up   M= 2 N= 11008 K= 2048 | dispatch 29.216856688341775 | linalg 20.41767859730474 | ratio 1.4309587913779083 WIN 
+   up   M= 4 N= 11008 K= 2048 | dispatch 51.906117468284485 | linalg 35.108781016913255 | ratio 1.4784369028158313 WIN 
+   up   M= 8 N= 11008 K= 2048 | dispatch 88.64800335019572 | linalg 59.616308527123586 | ratio 1.4869757209113947 WIN 
+   up   M= 16 N= 11008 K= 2048 | dispatch 137.28003044661378 | linalg 102.4781700930687 | ratio 1.3396026716903582 WIN 
+   up   M= 32 N= 11008 K= 2048 | dispatch 184.80882610244944 | linalg 146.04217167954707 | ratio 1.2654483563005765 WIN 
+   up   M= 64 N= 11008 K= 2048 | dispatch 217.93225983416588 | linalg 201.75742386451367 | ratio 1.080169718961688 WIN 
+   up   M= 96 N= 11008 K= 2048 | dispatch 243.44888870091242 | linalg 227.70084157619218 | ratio 1.0691611283283322 WIN 
+   up   M= 128 N= 11008 K= 2048 | dispatch 240.3623919233644 | linalg 238.86679138888573 | ratio 1.0062612325714368 WIN 
+   up   M= 256 N= 11008 K= 2048 | dispatch 263.17543588687766 | linalg 268.77239031860756 | ratio 0.9791758579625862 LOSE
+   up   M= 512 N= 11008 K= 2048 | dispatch 283.6661443837863 | linalg 289.3341671910864 | ratio 0.9804101158797579 LOSE
+
+=== Qwen down proj (tall-K): N=2048 K=11008 ===
+
+   down M= 1 N= 2048 K= 11008 | dispatch 24.288819134660915 | linalg 11.434493196430127 | ratio 2.1241710251088293 WIN 
+   down M= 2 N= 2048 K= 11008 | dispatch 28.03473442441109 | linalg 21.50591190252867 | ratio 1.303582687005928 WIN 
+   down M= 4 N= 2048 K= 11008 | dispatch 51.898858343553584 | linalg 37.263760292184294 | ratio 1.3927434573595316 WIN 
+   down M= 8 N= 2048 K= 11008 | dispatch 74.06926667738557 | linalg 64.40988030848733 | ratio 1.1499674634176493 WIN 
+   down M= 16 N= 2048 K= 11008 | dispatch 122.25825491163047 | linalg 109.1943785396548 | ratio 1.1196387263400325 WIN 
+   down M= 32 N= 2048 K= 11008 | dispatch 168.5216502416795 | linalg 157.4081167414338 | ratio 1.0706033064260678 WIN 
+   down M= 64 N= 2048 K= 11008 | dispatch 215.51417587974564 | linalg 210.18475518709675 | ratio 1.025355886005647 WIN 
+   down M= 96 N= 2048 K= 11008 | dispatch 233.20864323949397 | linalg 233.80056633629033 | ratio 0.9974682563602307 LOSE
+   down M= 128 N= 2048 K= 11008 | dispatch 233.13719438313188 | linalg 237.20803342882024 | ratio 0.9828385279079939 LOSE
+   down M= 256 N= 2048 K= 11008 | dispatch 253.28032747165082 | linalg 263.75043253200994 | ratio 0.9603029843028279 LOSE
+   down M= 512 N= 2048 K= 11008 | dispatch 265.83019643300474 | linalg 283.1209842504278 | ratio 0.9389279185250045 LOSE
+
+=== general (M,N,K) grid ===
+
+   h4k-m128 M= 128 N= 4096 K= 4096 | dispatch 221.91643199062105 | linalg 230.29239936534256 | ratio 0.9636289890686595 LOSE
+   h4k-m512 M= 512 N= 4096 K= 4096 | dispatch 276.1046642645378 | linalg 281.63036212186387 | ratio 0.9803796088756401 LOSE
+   ffn-up8k M= 512 N= 8192 K= 2048 | dispatch 281.28491574249216 | linalg 286.7541488909315 | ratio 0.9809271002020633 LOSE
+   ffn-dn8k M= 512 N= 2048 K= 8192 | dispatch 267.00904362476086 | linalg 285.0509323194336 | ratio 0.9367064385726875 LOSE
+   N4000    M= 512 N= 4000 K= 2048 | dispatch 271.4858185317455 | linalg 284.01787639028066 | ratio 0.9558758131079245 LOSE
+   N5504    M= 512 N= 5504 K= 2048 | dispatch 276.388046390337 | linalg 291.611835605015 | ratio 0.9477943370059285 LOSE
+   N-odd    M= 512 N= 11007 K= 2048 | dispatch 280.81099850430246 | linalg 285.4995356668179 | ratio 0.9835777765747856 LOSE
+   K-odd    M= 512 N= 2048 K= 2047 | dispatch 282.1453040347276 | linalg 295.96383189131916 | ratio 0.9533100792475687 LOSE
+   M-rem    M= 100 N= 11008 K= 2048 | dispatch 241.08331225333933 | linalg 228.31939723247453 | ratio 1.055903769787324 WIN 
+   M-prime  M= 333 N= 4096 K= 4096 | dispatch 267.4892093073562 | linalg 275.381595356202 | ratio 0.9713401832877134 LOSE
+   K128     M= 512 N= 2048 K= 128 | dispatch 267.1446132288781 | linalg 287.88897790390024 | ratio 0.9279431785611925 LOSE
+   K256w    M= 512 N= 11008 K= 256 | dispatch 271.5710021597268 | linalg 287.29267935002554 | ratio 0.9452764434309023 LOSE
+
+=== thin-N tall-M grid (M-parallel branch) ===
+
+   tn-N16   M= 512 N= 16 K= 512 | dispatch 214.81710627400767 | linalg 212.36444646970963 | ratio 1.0115492957746477 WIN 
+   tn-N32   M= 512 N= 32 K= 512 | dispatch 244.6728306839726 | linalg 250.05165809672852 | ratio 0.9784891351903166 LOSE
+   tn-N48   M= 512 N= 48 K= 512 | dispatch 253.82079315770363 | linalg 242.4640049329428 | ratio 1.0468390688667446 WIN 
+   tn-N64   M= 512 N= 64 K= 512 | dispatch 271.47159431077165 | linalg 253.5490822811114 | ratio 1.0706865584699277 WIN 
+   tn-tallK M= 2048 N= 16 K= 2048 | dispatch 230.5833538059267 | linalg 231.64031804053343 | ratio 0.9954370454869528 LOSE
+   tn-bigM  M= 8192 N= 16 K= 512 | dispatch 231.38274822951792 | linalg 230.226590574993 | ratio 1.0050218250274106 WIN 
+   tn-N8    M= 512 N= 8 K= 512 | dispatch 144.25809114359416 | linalg 143.35090057760004 | ratio 1.0063284608770422 WIN 
+   tn-mid   M= 128 N= 32 K= 2048 | dispatch 204.9951858458982 | linalg 183.76524967961709 | ratio 1.115527479778109 WIN 
+
+=== small-box grid (M-parallel no-pack branch + boundary guards) ===
+
+   sb-sq96  M= 96 N= 96 K= 96 | dispatch 107.66486157590508 | linalg 105.62120217274519 | ratio 1.0193489504107087 WIN 
+   sb-sq128 M= 128 N= 128 K= 128 | dispatch 172.39227291409782 | linalg 182.80613668061366 | ratio 0.9430332922318125 LOSE
+   sb-sq192 M= 192 N= 192 K= 192 | dispatch 256.4777417426123 | linalg 222.3827821852172 | ratio 1.1533165437646078 WIN 
+   sb-sq256 M= 256 N= 256 K= 256 | dispatch 240.94290658681774 | linalg 239.9144287144287 | ratio 1.0042868529329398 WIN 
+   sb-512x128 M= 512 N= 128 K= 512 | dispatch 254.88766673756496 | linalg 256.76300958429783 | ratio 0.9926962109932849 LOSE
+   sb-256x128 M= 256 N= 128 K= 512 | dispatch 265.998906020849 | linalg 218.69965521062133 | ratio 1.2162749217170716 WIN 
+   sb-512x256 M= 512 N= 256 K= 256 | dispatch 255.17260469820604 | linalg 229.89809768179592 | ratio 1.109937869305003 WIN 
+   sb~sq320 M= 320 N= 320 K= 320 | dispatch 249.77513529994664 | linalg 266.78716379875345 | ratio 0.9362337068374116 LOSE
+   sb~sq352 M= 352 N= 352 K= 352 | dispatch 262.0676046351627 | linalg 239.51019646068727 | ratio 1.0941814106781795 WIN 
+   sb!128x256 M= 128 N= 256 K= 256 | dispatch 185.0421432274146 | linalg 239.77042245469616 | ratio 0.7717471626942548 LOSE
