@@ -1099,6 +1099,8 @@ def _thin_n[
     var n = c.cols
     if n < 2 * NELTS:
         _nopack_gemm[dtype, 6, 1](c, a, b)
+    elif n % (4 * NELTS) == 0:
+        _nopack_gemm[dtype, 6, 4](c, a, b)
     else:
         _nopack_gemm[dtype, 6, 2](c, a, b)
 
@@ -1302,13 +1304,26 @@ def _wide_n[
     Small M packs A per worker; past the M~192/288 crossover SHARED_A; large M takes
     a cache-aware KC (half-L2-resident packed-B tile). DESIGN.md."""
     comptime NELTS = simd_width_of[dtype]()
+    comptime APPLE = CompilationTarget.is_apple_silicon()
     var m = a.rows
     var n = c.cols
     var k = a.cols
     if n >= 9 * 1024 and m <= 32:
         _packed_gemm[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
+    elif (not APPLE) and k <= 2048 and k * n <= (1 << 20):
+        # Small cache-resident wide box (B = k*n stays in L3, at any M): the
+        # prefill path packs B per j-tile per worker, and that packing + launch
+        # overhead dwarfs the compute when the whole problem is cache-hot
+        # (measured 0.73-0.90 vs linalg). The pack-B-only 2D grid packs B once
+        # per worker-column, reads A unpacked, stores C once (k <= 2048 is one
+        # K-panel), and balances the column x row-block tile grid across cores.
+        # Measured WIN: 128x256x256 0.73->1.01, 128x512x512 0.84->1.05,
+        # 128x1024x1024 0.95->1.02, 512x2048x128 0.88->0.99. The k*n cut keeps
+        # every wide headline shape (N >= 8192, k*n >= 16M) on the packed
+        # prefill path. Apple keeps its SHARED_A prefill experiment below.
+        _pack_b_only_2d[dtype, 6, 4 * NELTS, 2](c, a, b)
     elif m <= 192:
-        comptime if CompilationTarget.is_apple_silicon():
+        comptime if APPLE:
             _prefill[dtype, 256, 8 * NELTS, True](c, a, b)  # EXPERIMENT
         else:
             _prefill[dtype, 256, 8 * NELTS](c, a, b)
@@ -1363,11 +1378,11 @@ def matmul_dispatch[
         M in 2..5                       _small_batch  packed MR=M, reuse B across rows
         SME small  6<=M<16 (Apple f64)  _sme_small    8x32 FMOPA coprocessor tile
         SME  M>=16 (Apple f64)          _sme          16x32 FMOPA coprocessor tile
-        thin-N  N<=8*NELTS, M>=64       _thin_n       M-parallel, no packing
+        thin-N  N<=8*NELTS, M>=64       _thin_n       M-parallel no-pack (NR=32 if N%32==0)
         small box  M>=N, B fits L2      _small_box    no-pack (pack-B-only at B>384KB)
         narrow-N  N<=192                _narrow_n     packed NR=16 -> >= 4 j-tiles
         square-ish  N<=M                _square_ish   pack-B-only 6x32, TileK=K
-        wide-N  N>=K                    _wide_n       packed 6x32 (8x24 for N>=9k, M<=32)
+        wide-N  N>=K                    _wide_n       packed 6x32 (pack-B-only 2D for small L3-resident box)
         tall-K  N<K                     _tall_k       packed 6x32, cache-aware KC
 
     The N<=M and M>=N gates keep square-ish and the no-pack routes off every wide
