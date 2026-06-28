@@ -160,9 +160,55 @@ Implemented by sizing the budget at the *full* per-core L2 and **capping at 2048
 (unchanged, so Machine B is byte-for-byte identical). The `m <= 288` wide rung
 folds into the `m > 192` cache-aware branch instead of its hardcoded KC=512.
 Bit-identical (`verify_dispatch` max_err 0.0). The headline prefill (M=96) is in
-the `m <= 192` band (KC=256) and is untouched. The residual band losses are now
-just the heavy squares (sq512/sq1024) and the tall-K down-proj (dn-m512,
-K=11008, where K can't fit one panel) — the algorithmic pack/compute-overlap gap.
+the `m <= 192` band (KC=256) and is untouched.
+
+## Tall-K large-M: cap KC at 1024, finer TILE_N
+
+The `KC = min(K, 2048)` single-panel pick above is right for **wide-N** (K=2048
+*does* fit one panel, so C really is stored once). On **tall K** (down-proj,
+K=11008) it backfires, and the down-proj large-M band was the worst residual in the
+sweep — `dn-m512` swung as low as 0.708 in a single `bench_sweep` run and sat at a
+noisy 0.90 ± 0.073 mean in `bench_focus`.
+
+Two things go wrong when KC=2048 meets K=11008:
+
+1. **The "C stored once" benefit is unreachable.** K=11008 needs ⌈11008/2048⌉ = 6
+   k-panels no matter what, so C is re-read and re-stored across panels regardless;
+   the property that justified KC=2048 on wide-N simply does not hold here.
+2. **The M·KC packed-A panel overflows L2.** With M=512, KC=2048 the per-worker
+   packed-A panel is 512×2048×8 = 8 MB, far past the 1 MB/core L2. The kernel
+   sweeps j-tiles in the inner loop and re-reads that A panel once per j-tile, so an
+   8 MB panel re-streams from L3 on every j-tile instead of staying L2-resident.
+
+A smaller KC keeps the A panel closer to L2 and was measured uniformly faster on
+tall K, even though it adds k-panels (more C re-traffic) — the A-reuse effect
+dominates. The `_tall_k` `m > 256` branch now passes `_l2_resident_kc(32, k, cap=1024)`
+(a new `cap` argument, default 2048 so `_wide_n` is unchanged), and the whole heavy
+band (`m >= 192`) drops to the finer `TILE_N = 4·NELTS` (one NR-panel per j-tile),
+which splits N into 2× more j-tiles for a tighter worker makespan and a smaller
+packed-B panel. The `192 <= m <= 256` rung keeps KC=512 (it already used a single
+L1-resident panel) and only narrows its TILE_N, which retains the K=8192 M≤256 win
+while lifting the K=11008 M=256 loss.
+
+Measured interleaved A/B vs linalg, Machine A (1 MB/core L2), down-proj N=2048:
+
+| Shape | M×N×K | old (KC2048, tn8) | new (KC≤1024, tn4) |
+|---|---|---|---|
+| dn-m256 | 256×2048×11008 | ~0.95 | ~0.97 |
+| dn-m384 | 384×2048×11008 | 0.94 | 0.98 |
+| dn-m512 | 512×2048×11008 | 0.90 (0.71 tail) | 0.95 |
+| ffn-dn8k | 512×2048×8192 | 1.04 | 1.08 |
+| dn-k4096 | 512×2048×4096 | 0.97 | 1.01 |
+
+In `bench_focus` (10 epochs, 2σ) `dn-m512` goes from 0.90 ± 0.073 (a 0.71..0.95
+spread that read as a noisy "tie") to **0.956 ± 0.011** (a stable 0.94..0.97 band):
+the mean lifts ~5.6% and the catastrophic low-end collapse is gone. Bit-identical
+(`verify_dispatch` max_err 0.0; KC/TILE_N are codegen-only levers). The band is now
+0.95-1.0 across every down-proj M; closing the last few percent to full parity is
+the same pack/compute-overlap gap as the heavy squares.
+
+The residual band losses are now just the heavy squares (sq512/sq1024) and the
+last few percent of the tall-K down-proj — the algorithmic pack/compute-overlap gap.
 
 ## Square-ish: pack-B-only / TileK=K (matching stdlib linalg)
 

@@ -841,14 +841,14 @@ def _nopack_gemm[
 # ===========================================================================
 
 
-def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
+def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int, cap: Int = 2048) -> Int:
     """Cache-aware KC for the prefill GEMM's large-M band, capped at a single
-    2048-deep "C stored once" k-panel — the same TileK = min(K, 2048) depth the
-    square-ish branch and linalg's `calculate_tile_n_k` use. Sizing the packed-B
-    tile (TILE_N x KC) to the full per-core L2 then capping at 2048 yields KC=2048
-    on both a 1 MB/core and a 2 MB/core L2 for the benchmark K's (<= 2048 sweeps in
-    one panel, so each L2-resident C micro-tile is stored exactly once instead of
-    once per k-panel).
+    `cap`-deep k-panel. The wide-N band uses the default `cap=2048` — the same
+    TileK = min(K, 2048) depth the square-ish branch and linalg's
+    `calculate_tile_n_k` use. Sizing the packed-B tile (TILE_N x KC) to the full
+    per-core L2 then capping yields KC=2048 on both a 1 MB/core and a 2 MB/core L2
+    for the benchmark K's (<= 2048 sweeps in one panel, so each L2-resident C
+    micro-tile is stored exactly once instead of once per k-panel).
 
     This raised the 1 MB/core (Machine A) KC from 1024 to 2048: re-measured on the
     current nightly (interleaved A/B, 8 epochs, peak-of-12), the single-panel KC
@@ -856,14 +856,17 @@ def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
     up-m512 0.97->1.00, odd-N 0.96->1.00, 512x4096x4096 0.99->1.02 WIN) — linalg got
     faster across nightlies, so the extra C re-traffic of the old half-L2 KC=1024
     now costs that margin. The 2048 cap keeps Machine B (2 MB, already KC=2048)
-    byte-for-byte unchanged. See DESIGN.md "_l2_resident_kc"."""
+    byte-for-byte unchanged. The tall-K large-M band passes a lower `cap=1024`: on
+    tall K (K >> 2048) the "C stored once" benefit of a 2048 panel is unreachable
+    (K never fits one panel), while the M*KC packed-A panel of KC=2048 overflows L2
+    and re-streams per j-tile. See DESIGN.md "_l2_resident_kc"."""
     comptime elem = size_of[Scalar[dtype]]()
     var l2 = l2_cache_size()
     if l2 == 0:
         # L2 undetectable (e.g. non-x86 without sysctl): the single-panel cap.
-        return min(2048, k)
+        return min(cap, k)
     var budget = l2 // (tile_n * elem)
-    return min(min(budget, k), 2048)
+    return min(min(budget, k), cap)
 
 
 def _box_l2_budget() -> Int:
@@ -1340,25 +1343,39 @@ def _wide_n[
 def _tall_k[
     dtype: DType
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """Tall-K (N < K, down-proj-like): the uniform 6x32 tile (TILE_N=8*NELTS), whose
-    masked M-remainder tail lets it beat 8x24 at every M. Small M packs A per worker;
-    past the M~192 crossover SHARED_A; large M takes a cache-aware KC. DESIGN.md."""
+    """Tall-K (N < K, down-proj-like): the 6x(4*NELTS) register tile whose masked
+    M-remainder tail beats 8x24 at every M. Small M (< 192) packs A per worker on the
+    wider TILE_N=8*NELTS; past the M~192 SHARED_A crossover the heavy band switches to
+    the finer TILE_N=4*NELTS (one NR-panel per j-tile) and a KC capped at 1024.
+
+    The finer TILE_N and the lower KC both target the tall-K large-M loss (down-proj
+    M >= 192 ran 0.90-0.96 vs linalg). TILE_N=4*NELTS splits N into 2x more j-tiles,
+    load-balancing the worker makespan and shrinking each worker's packed-B panel.
+    The KC=1024 cap (vs the wide-N 2048) is the bigger lever: on tall K the
+    C-stored-once benefit of a 2048-deep panel is unreachable (K=11008 never fits one
+    panel, so C is re-streamed regardless), while a 2048-deep panel makes the M*KC
+    packed-A panel overflow L2 and re-stream from L3 once per j-tile. Measured
+    interleaved A/B vs linalg on Machine A (1 MB/core L2, down-proj N=2048):
+      M=256 K=11008  ~0.95 -> ~0.97,  M=384  0.94 -> 0.97,  M=512  0.90 -> 0.95;
+      ffn-dn8k (K=8192) M=512 1.04 -> 1.08 and K=4096 M=512 0.97 -> 1.01 also lift,
+      and the K=8192 M<=256 win is retained. DESIGN.md "Tall-K large-M"."""
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var k = a.cols
     if m <= 64:
         _prefill[dtype, 256, 8 * NELTS](c, a, b)
-    elif m <= 256:
-        if m >= 192:
-            _prefill[dtype, 512, 8 * NELTS, True](c, a, b)
+    elif m < 192:
+        comptime if CompilationTarget.is_apple_silicon():
+            _prefill[dtype, 512, 8 * NELTS, True](c, a, b)  # EXPERIMENT
         else:
-            comptime if CompilationTarget.is_apple_silicon():
-                _prefill[dtype, 512, 8 * NELTS, True](c, a, b)  # EXPERIMENT
-            else:
-                _prefill[dtype, 512, 8 * NELTS](c, a, b)
+            _prefill[dtype, 512, 8 * NELTS](c, a, b)
+    elif m <= 256:
+        # 192 <= M <= 256: KC=512 single L1-resident k-panel, finer TILE_N. Keeps the
+        # K=8192 M=256 win while lifting the K=11008 M=256 loss.
+        _prefill[dtype, 512, 4 * NELTS, True](c, a, b)
     else:
-        var kc = _l2_resident_kc[dtype](64, k)
-        _prefill_kc[dtype, 8 * NELTS, True](c, a, b, kc)
+        var kc = _l2_resident_kc[dtype](32, k, 1024)
+        _prefill_kc[dtype, 4 * NELTS, True](c, a, b, kc)
 
 
 # ===========================================================================
