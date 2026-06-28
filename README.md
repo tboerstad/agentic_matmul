@@ -345,7 +345,16 @@ the same TileK `linalg` uses (interleaved A/B, 8 epochs: up-proj M=256 0.96→1.
 M=512 0.97→1.00, odd-N 0.96→1.00, 512×4096×4096 0.99→**1.02 WIN**; bit-identical,
 2 MB Machine B unchanged — see DESIGN.md *`_l2_resident_kc`*). The residual loss is
 now just the heavy **squares** (sq512 ~0.96, sq1024 ~0.98) and the **tall-K
-down-proj** (dn-m512, K=11008, where K can't fit one panel, ~0.95). Closing those
+down-proj** (dn-m512, K=11008, ~0.95). The down-proj large-M band used to inherit
+the wide-N `KC=2048` single-panel pick, which backfires on tall K: K=11008 can never
+fit one panel (so the "C stored once" benefit is unreachable) while the M·KC packed-A
+panel overflows L2 and re-streams from L3 once per j-tile. The tall-K large-M branch
+now caps `KC` at 1024 and uses the finer `TILE_N=4·NELTS` (`_l2_resident_kc(…, cap=1024)`),
+which lifts the band off a 0.90–0.96 loss to a stable 0.95–0.99 and removes the M=512
+collapse (interleaved A/B, 8 epochs: M=384 0.94→0.97, **M=512 0.90→0.95**, and
+bench_focus dn-m512 0.90±0.073 with a 0.71 tail → 0.956±0.011; ffn-dn8k K=8192 M=512
+1.04→1.08 also lifts, K=8192 M≤256 win retained; bit-identical, `verify_dispatch`
+max_err 0.0 — see DESIGN.md *Tall-K large-M*). Closing the rest to full parity
 likely needs pack/compute overlap — substantial and unproven on this hardware.
 The odd-N remainder
 (N=11007 was ~0.85–0.88) is now **fixed** by the masked-N partial-panel
