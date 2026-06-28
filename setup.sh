@@ -18,6 +18,10 @@ uv venv
 source .venv/bin/activate
 uv pip install modular --index https://whl.modular.com/nightly/simple/ --prerelease allow
 
+# Intel MKL, so bench_sota.py can benchmark MKL dgemm alongside NumPy/SciPy OpenBLAS.
+# The wheel ships libmkl_rt.so under .venv/lib (load_mkl in bench_sota.py finds it there).
+uv pip install mkl
+
 echo ""
 echo "Setup complete! To get started:"
 echo "  source .venv/bin/activate"

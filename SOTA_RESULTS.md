@@ -17,7 +17,7 @@ from the single-run `bench_sweep` ratios.
 | SIMD | AVX-512 (avx512f/dq/bw/vl, plus vnni/bf16/fp16, amx) |
 | L1d / L2 / L3 | 192 KiB (4×48K) / 8 MiB (4×2 MB) / 260 MiB shared |
 | Virtualization | KVM guest (hypervisor flag) |
-| BLAS | scipy-openblas 0.3.33 |
+| BLAS | scipy-openblas 0.3.33; Intel MKL 2026.0.0 |
 | Mojo | 1.0.0b3.dev2026062706 |
 | NumPy / SciPy | 2.5.0 / 1.18.0 |
 | Theoretical f64 peak | 2.1 GHz × 8 × 2 (FMA) × 2 (dual FMA) × 4 = 268.8 GFLOPS |
@@ -33,36 +33,40 @@ Date: 2026-06-28. float64 throughout.
 ## Headline shapes vs all frameworks (Qwen 2.5 VL 3B MLP)
 
 Peak GFLOPS (higher is better). Mojo numbers are `matmul_dispatch`; OpenBLAS via
-NumPy/SciPy. Intel MKL is not installed in this environment, so the MKL column is
-absent. The agentic kernel wins both headline shapes against every framework here.
+NumPy/SciPy; Intel MKL dgemm via ctypes (multi-thread, 4 threads). The agentic
+kernel wins prefill against every framework, including MKL, and trails only MKL
+and OpenBLAS on the bandwidth-bound decode shape.
 
 ### Decode (1 × 11008 × 2048, bandwidth-bound)
 
 | Kernel | Peak GFLOPS |
 |---|---|
+| Intel MKL dgemm (multi-thread) | 24.8 |
+| NumPy (OpenBLAS, multi-thread) | 24.5 |
+| NumPy (OpenBLAS, 1 thread) | 24.4 |
 | **Mojo (agentic matmul)** | **~21** |
-| NumPy (OpenBLAS, multi-thread) | 24.8 |
-| NumPy (OpenBLAS, 1 thread) | 23.5 |
 | Mojo linalg (stdlib) | 10.4 |
-| SciPy dgemm (OpenBLAS) | 7.0 |
+| SciPy dgemm (OpenBLAS) | 7.2 |
 
 Decode is memory-bandwidth bound; the agentic GEMV is ~2.0× the Mojo stdlib
-`linalg` (2.04× ±0.031, 2σ WIN) and ~3× SciPy dgemm. OpenBLAS edges it here
-(~24.8 vs ~21) — both are bandwidth-limited, OpenBLAS's mature GEMV path squeezes
-a bit more.
+`linalg` (2.04× ±0.031, 2σ WIN) and ~3× SciPy dgemm. MKL and OpenBLAS edge it
+(~24.8 vs ~21) — all three are bandwidth-limited, the mature BLAS GEMV paths
+squeeze a bit more.
 
 ### Prefill (96 × 11008 × 2048, compute-bound)
 
 | Kernel | Peak GFLOPS |
 |---|---|
 | **Mojo (agentic matmul)** | **243** |
-| NumPy (OpenBLAS, multi-thread) | 223 |
-| NumPy (OpenBLAS, 1 thread) | 221 |
+| Intel MKL dgemm (multi-thread) | 240 |
+| NumPy (OpenBLAS, multi-thread) | 226 |
+| NumPy (OpenBLAS, 1 thread) | 225 |
 | Mojo linalg (stdlib) | 225–228 |
 | SciPy dgemm (OpenBLAS) | 172 |
 
-Prefill wins everything: 1.081× ±0.009 vs Mojo `linalg` (2σ WIN), ~1.09× vs NumPy
-OpenBLAS, ~1.4× vs SciPy dgemm. 243 GFLOPS is ~90% of the 268.8 GFLOPS f64 peak.
+Prefill wins everything: 1.081× ±0.009 vs Mojo `linalg` (2σ WIN), ~1.01× vs Intel
+MKL dgemm, ~1.08× vs NumPy OpenBLAS, ~1.4× vs SciPy dgemm. 243 GFLOPS is ~90% of
+the 268.8 GFLOPS f64 peak; MKL is the strongest framework here at 240.
 
 ## Authoritative judge — `bench_focus.mojo` (10 epochs, 2σ verdict)
 

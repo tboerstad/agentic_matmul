@@ -15,6 +15,7 @@ All benchmarks use float64 to match the Mojo kernels.
 import time
 import statistics
 import os
+import sys
 import ctypes
 import numpy as np
 
@@ -93,13 +94,29 @@ def bench_scipy_dgemm(m, n, k):
 # Intel MKL dgemm via ctypes
 # ---------------------------------------------------------------------------
 def load_mkl():
-    """Try to load MKL runtime library."""
+    """Try to load MKL runtime library.
+
+    Checks the loader's default search path first, then the lib directory of the
+    active venv/prefix where `uv pip install mkl` drops libmkl_rt (the pip wheel
+    ships an unversioned-suffix .so.N, e.g. .so.3 for MKL 2026, so we glob rather
+    than hardcode a version).
+    """
+    import glob
+
     search_paths = [
         "libmkl_rt.so.2",
         "libmkl_rt.so",
         "/usr/local/lib/libmkl_rt.so.2",
         "/usr/local/lib/libmkl_rt.so",
     ]
+    # pip-installed MKL lives under <prefix>/lib (and sometimes site-packages).
+    glob_roots = [
+        os.path.join(sys.prefix, "lib"),
+        os.path.join(sys.prefix, "lib", "x86_64-linux-gnu"),
+    ]
+    for root in glob_roots:
+        search_paths.extend(sorted(glob.glob(os.path.join(root, "libmkl_rt.so*"))))
+
     for p in search_paths:
         try:
             return ctypes.CDLL(p)
