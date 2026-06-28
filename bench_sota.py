@@ -15,6 +15,7 @@ All benchmarks use float64 to match the Mojo kernels.
 import time
 import statistics
 import os
+import sys
 import ctypes
 import numpy as np
 
@@ -93,14 +94,32 @@ def bench_scipy_dgemm(m, n, k):
 # Intel MKL dgemm via ctypes
 # ---------------------------------------------------------------------------
 def load_mkl():
-    """Try to load MKL runtime library."""
-    search_paths = [
-        "libmkl_rt.so.2",
-        "libmkl_rt.so",
-        "/usr/local/lib/libmkl_rt.so.2",
-        "/usr/local/lib/libmkl_rt.so",
-    ]
-    for p in search_paths:
+    """Try to load the MKL runtime library.
+
+    The ``mkl`` PyPI package (a declared dependency) ships ``libmkl_rt`` inside
+    the active Python environment, but the SONAME version suffix changes across
+    releases (e.g. ``.so.2``, ``.so.3``) and the file lives in ``<prefix>/lib``
+    rather than a system path. So we glob for any version in the environment's
+    lib dirs first, then fall back to bare/system names that the dynamic loader
+    can resolve via ``LD_LIBRARY_PATH``.
+    """
+    import glob
+
+    # Candidate directories that may contain a pip-installed libmkl_rt.
+    lib_dirs = []
+    for prefix in {sys.prefix, sys.base_prefix}:
+        lib_dirs.append(os.path.join(prefix, "lib"))
+    lib_dirs += ["/usr/local/lib", "/usr/lib", "/usr/lib/x86_64-linux-gnu"]
+
+    candidates = []
+    for d in lib_dirs:
+        # Prefer the highest version suffix found (sorted descending).
+        candidates += sorted(glob.glob(os.path.join(d, "libmkl_rt.so*")), reverse=True)
+
+    # Bare names let the system loader search LD_LIBRARY_PATH / ldconfig cache.
+    candidates += ["libmkl_rt.so.3", "libmkl_rt.so.2", "libmkl_rt.so"]
+
+    for p in candidates:
         try:
             return ctypes.CDLL(p)
         except OSError:
