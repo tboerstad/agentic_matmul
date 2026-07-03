@@ -20,7 +20,7 @@ from std.sys import simd_width_of
 
 
 @fieldwise_init
-struct Tile[dtype: DType, origin: Origin](Copyable & Movable):
+struct Tile[dtype: DType, origin: Origin](Copyable):
     """A rows x cols window into a row-major buffer; `stride` is the parent row
     width. Generic over `origin` so the same type names a read-only operand (A, B)
     and a writable target (C); a store through an immutable-origin Tile is a type
