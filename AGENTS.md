@@ -8,23 +8,9 @@ different CPUs, core counts, cache sizes, SIMD widths, and virtualization enviro
 
 Run this immediately:
 ```bash
-# Linux
 lscpu | grep -E "Model name|CPU\(s\)|MHz|cache|Flags"
 python -c "import numpy; numpy.show_config()"
 ```
-```bash
-# macOS / Apple Silicon (no lscpu)
-sysctl -n machdep.cpu.brand_string; uname -m
-sysctl -n hw.perflevel0.physicalcpu hw.perflevel1.physicalcpu  # P-cores, E-cores
-sysctl -n hw.perflevel0.l2cachesize                            # cluster-SHARED L2, not per-core
-python -c "import numpy; numpy.show_config()"
-```
-
-On Apple Silicon note two things the kernels depend on: the part is big.LITTLE
-(`num_physical_cores()` counts the slow E-cores, e.g. 14 = 10 P + 4 E on an
-M4 Max — the compute kernels parallelize over P-cores only), and
-`hw.perflevel0.l2cachesize` is the **cluster-shared** L2, not a per-core figure.
-See the "Apple Silicon" sections of README.md / DESIGN.md.
 
 Check for:
 - **CPU model and clock speed** (e.g. Intel Xeon @ 2.80 GHz)
