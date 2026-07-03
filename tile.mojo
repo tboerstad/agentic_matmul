@@ -44,15 +44,6 @@ struct Tile[dtype: DType, origin: Origin](Copyable):
         )
 
     @always_inline
-    def tile[R: Int, C: Int](self, bi: Int, bj: Int) -> Self:
-        """The (bi, bj)-th R x C block. Sugar for `sub(bi*R, bj*C)` that also
-        carries the R x C extent. For loops that step in whole tiles (no-pack,
-        serial), `c.tile[MR, NR](i // MR, j // NR)` reads as the block it is."""
-        return Self(
-            self.ptr + bi * R * self.stride + bj * C, R, C, self.stride
-        )
-
-    @always_inline
     def row(self, r: Int) -> UnsafePointer[Scalar[Self.dtype], Self.origin]:
         """Pointer to the start of row r."""
         return self.ptr + r * self.stride
