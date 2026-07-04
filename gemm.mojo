@@ -3,7 +3,7 @@ from matrix import Matrix
 from tile import Tile
 from std.algorithm.functional import parallelize, vectorize
 from std.collections import InlineArray
-from std.math import ceildiv, fma
+from std.math import ceildiv
 from std.memory import memset_zero
 from std.memory.unsafe_pointer import alloc
 from std.sys import num_physical_cores, simd_width_of, size_of
@@ -75,6 +75,46 @@ struct RegisterTile[dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int](
                     offset=nr * Self.NELTS, val=self.acc[mr * Self.NR_VECS + nr]
                 )
 
+    @always_inline
+    def load_masked[
+        org: MutOrigin
+    ](mut self, c: Tile[Self.dtype, org], rows: Int, cols: Int):
+        """`load`, restricted to the first `rows` x `cols` of the block; the
+        masked-out lanes keep their zero from `__init__`."""
+        comptime for mr in range(Self.MR):
+            if mr < rows:
+                var row = c.row(mr)
+                comptime for nr in range(Self.NR_VECS):
+                    var col0 = nr * Self.NELTS
+                    if col0 + Self.NELTS <= cols:
+                        self.acc[mr * Self.NR_VECS + nr] = row.load[
+                            width = Self.NELTS
+                        ](offset=col0)
+                    elif col0 < cols:
+                        var v = SIMD[Self.dtype, Self.NELTS](0)
+                        for e in range(cols - col0):
+                            v[e] = row[col0 + e]
+                        self.acc[mr * Self.NR_VECS + nr] = v
+
+    @always_inline
+    def store_masked[
+        org: MutOrigin
+    ](self, c: Tile[Self.dtype, org], rows: Int, cols: Int):
+        """`store`, restricted to the first `rows` x `cols` of the block."""
+        comptime for mr in range(Self.MR):
+            if mr < rows:
+                var row = c.row(mr)
+                comptime for nr in range(Self.NR_VECS):
+                    var col0 = nr * Self.NELTS
+                    if col0 + Self.NELTS <= cols:
+                        row.store(
+                            offset=col0, val=self.acc[mr * Self.NR_VECS + nr]
+                        )
+                    elif col0 < cols:
+                        var v = self.acc[mr * Self.NR_VECS + nr]
+                        for e in range(cols - col0):
+                            row[col0 + e] = v[e]
+
 
 # --- The two operands of one K-step ----------------------------------------
 #
@@ -122,66 +162,43 @@ def _masked_microkernel[
     a_block: Tile[dtype, a_org],
     bp_panel: UnsafePointer[Scalar[dtype], b_org],
     kc: Int,
-    r: Int,
-    jj_limit: Int,
+    rows: Int,
+    cols: Int,
     is_first_k: Bool,
 ):
     """Cold-path register tile: the leftover blocks the hot loop can't take.
 
-    Handles an M-remainder (only `r` of MR rows active) and/or a partial
-    NR-panel (only `jj_limit` of NR columns valid) by masking the C load and
-    store; reads A unpacked (so it covers the un-packed remainder rows too) and
-    B from the zero-padded packed panel. With r == MR and jj_limit == NR it is
-    the unmasked full kernel.
+    Handles an M-remainder (only `rows` of MR rows active) and/or a partial
+    NR-panel (only `cols` of NR columns valid) by masking the C load and store;
+    reads A unpacked (so it covers the un-packed remainder rows too) and B from
+    the zero-padded packed panel. With rows == MR and cols == NR it is the
+    unmasked full kernel.
 
     `c_block`/`a_block` are `sub`-views onto the block's corner, (i, j0+jr) in C
     and (i, pc) in A."""
     var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
     if not is_first_k:
-        comptime for mr in range(MR):
-            if mr < r:
-                var cr = c_block.row(mr)
-                comptime for nr in range(NR_VECS):
-                    var col0 = nr * NELTS
-                    if col0 + NELTS <= jj_limit:
-                        tile.acc[mr * NR_VECS + nr] = cr.load[width=NELTS](offset=col0)
-                    elif col0 < jj_limit:
-                        var tmp = SIMD[dtype, NELTS](0)
-                        for e in range(jj_limit - col0):
-                            tmp[e] = cr[col0 + e]
-                        tile.acc[mr * NR_VECS + nr] = tmp
+        tile.load_masked(c_block, rows, cols)
     for pk in range(kc):
-        var b_row = load_b_row[NR_VECS, NELTS](bp_panel + pk * NR)
         # A is gathered here (not via load_a_col) because the gather is guarded
-        # by mr < r: rows past the M-remainder are out of bounds, so leave them
-        # zero (their acc lanes are never stored).
+        # by mr < rows: rows past the M-remainder are out of bounds, so leave
+        # them zero (their acc lanes are never stored).
         var a_col = InlineArray[Scalar[dtype], MR](fill=Scalar[dtype](0))
         comptime for mr in range(MR):
-            if mr < r:
+            if mr < rows:
                 a_col[mr] = a_block.row(mr)[pk]
-        tile.rank1_update(a_col, b_row)
-    comptime for mr in range(MR):
-        if mr < r:
-            var cr = c_block.row(mr)
-            comptime for nr in range(NR_VECS):
-                var col0 = nr * NELTS
-                if col0 + NELTS <= jj_limit:
-                    cr.store(offset=col0, val=tile.acc[mr * NR_VECS + nr])
-                elif col0 < jj_limit:
-                    var v = tile.acc[mr * NR_VECS + nr]
-                    for e in range(jj_limit - col0):
-                        cr[col0 + e] = v[e]
+        tile.rank1_update(a_col, load_b_row[NR_VECS, NELTS](bp_panel + pk * NR))
+    tile.store_masked(c_block, rows, cols)
 
 
 @always_inline
 def _full_microkernel[
     dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int, NR: Int, KU: Int,
-    PACK_A: Bool,
-    c_org: MutOrigin, a_org: ImmutOrigin, b_org: MutOrigin, ap_org: MutOrigin,
+    c_org: MutOrigin, a_org: ImmutOrigin, b_org: MutOrigin,
 ](
     c_block: Tile[dtype, c_org],
-    ap_panel: UnsafePointer[Scalar[dtype], ap_org],
-    a_col_base: UnsafePointer[Scalar[dtype], a_org],
+    a_base: UnsafePointer[Scalar[dtype], a_org],
+    a_k_step: Int,
     a_stride: Int,
     bp_panel: UnsafePointer[Scalar[dtype], b_org],
     kc: Int,
@@ -191,9 +208,9 @@ def _full_microkernel[
 
     The full-NR-panel counterpart of `_masked_microkernel`: no masking, every
     row and column live. Reads the packed B panel and, per K-step, the MR A
-    scalars either from the packed-A panel at unit stride (PACK_A) or straight
-    from a row-major A at column stride `a_stride` (the no-A-pack gather). The
-    unused A source is ignored by the comptime branch.
+    scalars from `a_base + pk * a_k_step` at element stride `a_stride`: a
+    packed-A panel is (panel, MR, 1), a row-major A is (addr(i, pc), 1, k).
+    Both are compile-time-known at every call site, so they fold away.
 
     The K-sweep is unrolled by KU so KU*NR_VECS B-vectors stay live per step
     (KU=2 keeps the 6x32 tile's 24 + 8 = 32 accumulator+B vectors inside the
@@ -209,33 +226,18 @@ def _full_microkernel[
         tile.load(c_block)
 
     var pk = 0
-    var pk_end = kc - (kc % KU)
-    while pk < pk_end:
+    while pk + KU <= kc:
         comptime for ku in range(KU):
-            var step = pk + ku
-            comptime if PACK_A:
-                tile.rank1_update(
-                    load_a_col[MR](ap_panel + step * MR, 1),
-                    load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
-                )
-            else:
-                tile.rank1_update(
-                    load_a_col[MR](a_col_base + step, a_stride),
-                    load_b_row[NR_VECS, NELTS](bp_panel + step * NR),
-                )
+            tile.rank1_update(
+                load_a_col[MR](a_base + (pk + ku) * a_k_step, a_stride),
+                load_b_row[NR_VECS, NELTS](bp_panel + (pk + ku) * NR),
+            )
         pk += KU
-
     while pk < kc:
-        comptime if PACK_A:
-            tile.rank1_update(
-                load_a_col[MR](ap_panel + pk * MR, 1),
-                load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
-            )
-        else:
-            tile.rank1_update(
-                load_a_col[MR](a_col_base + pk, a_stride),
-                load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
-            )
+        tile.rank1_update(
+            load_a_col[MR](a_base + pk * a_k_step, a_stride),
+            load_b_row[NR_VECS, NELTS](bp_panel + pk * NR),
+        )
         pk += 1
 
     tile.store(c_block)
@@ -247,49 +249,66 @@ def _full_microkernel[
 
 
 @always_inline
+def _pack_a_panel[
+    dtype: DType, MR: Int, a_org: ImmutOrigin, ap_org: MutOrigin
+](
+    a: Tile[dtype, a_org],
+    dst: UnsafePointer[Scalar[dtype], ap_org],
+    i0: Int,
+    pc: Int,
+    kc: Int,
+):
+    """Pack MR rows of A (top-left (i0, pc), kc deep) as [k][MR], so each
+    K-step's MR A scalars are contiguous."""
+    for pk in range(kc):
+        comptime for mr in range(MR):
+            dst[pk * MR + mr] = a.row(i0 + mr)[pc + pk]
+
+
+@always_inline
 def _pack_b_slab[
-    dtype: DType, NR: Int, NR_VECS: Int, NELTS: Int, PREFETCH_B_DIST: Int,
+    dtype: DType, NR: Int, NR_VECS: Int, NELTS: Int,
     b_org: ImmutOrigin, bp_org: MutOrigin,
 ](
     b: Tile[dtype, b_org],
-    bp_worker: UnsafePointer[Scalar[dtype], bp_org],
+    bp: UnsafePointer[Scalar[dtype], bp_org],
     pc: Int,
     j0: Int,
     kc: Int,
-    last_full_panel: Int,
-    has_remainder: Bool,
-    nr_actual: Int,
+    tile_n: Int,
 ):
-    """Pack one j-tile's slab of B into the worker buffer as [panel][k][NR],
+    """Pack a kc x tile_n slab of B (top-left (pc, j0)) into [panel][k][NR],
     software-prefetching the next k-row. A partial trailing panel is padded out
     to full NR with zeros, so the micro-kernel can run it as a full panel (the
     zero columns contribute nothing and the masked store keeps only the valid
     ones)."""
+    var full_panels = tile_n // NR
+    var rem = tile_n % NR
     for pk in range(kc):
-        var row_base = b.addr(pc + pk, j0)
+        var row = b.addr(pc + pk, j0)
         prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
-            b.addr(pc + pk + PREFETCH_B_DIST, j0)
+            b.addr(pc + pk + 8, j0)
         )
-        for jp in range(last_full_panel):
-            var src = row_base + jp * NR
-            var dst = bp_worker + jp * kc * NR + pk * NR
+        for jp in range(full_panels):
+            var src = row + jp * NR
+            var dst = bp + jp * kc * NR + pk * NR
             comptime for nv in range(NR_VECS):
                 dst.store[width=NELTS](
                     offset=nv * NELTS,
                     val=src.load[width=NELTS](offset=nv * NELTS),
                 )
-        if has_remainder:
-            var src = row_base + last_full_panel * NR
-            var dst = bp_worker + last_full_panel * kc * NR + pk * NR
-            for nr in range(nr_actual):
-                dst[nr] = src[nr]
-            for nr in range(nr_actual, NR):
-                dst[nr] = Scalar[dtype](0)
+        if rem > 0:
+            var src = row + full_panels * NR
+            var dst = bp + full_panels * kc * NR + pk * NR
+            for j in range(rem):
+                dst[j] = src[j]
+            for j in range(rem, NR):
+                dst[j] = Scalar[dtype](0)
 
 
 def _packed_gemm[
     dtype: DType, MR: Int, NR: Int, KC: Int, KU: Int, TILE_N: Int,
-    NC_TILES: Int, SHARED_A: Bool = False, PACK_A: Bool = True,
+    SHARED_A: Bool = False, PACK_A: Bool = True,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     """Packed C = A * B: pack A and B into cache-friendly panels, then run the
     `RegisterTile` micro-kernel over them, parallelized across N (j-tiles).
@@ -301,10 +320,11 @@ def _packed_gemm[
     SHARED_A packs the full A once up front instead of having every worker
     re-pack it per K-panel. Worth it when A is large next to the N-sweep (big
     squares, large M); off the wide/tall shapes A is tiny and the redundant
-    per-worker pack is cheap (see DESIGN.md)."""
+    per-worker pack is cheap. PACK_A=False skips A packing entirely and the
+    micro-kernel gathers A columns straight from the row-major source (see
+    DESIGN.md)."""
     comptime NELTS = simd_width_of[dtype]()
     comptime NR_VECS = NR // NELTS
-    comptime PREFETCH_B_DIST = 8
 
     var c_view = c.noalias_view()
     var a_view = a.noalias_view()
@@ -314,162 +334,108 @@ def _packed_gemm[
     var k = a_view.cols
 
     var num_j_tiles = ceildiv(n, TILE_N)
-    var num_i_panels = ceildiv(m, MR)
+    var num_full_panels = m // MR
     var num_workers = num_physical_cores()
 
-    var num_nr_panels = ceildiv(TILE_N, NR)
-    var bp_per_worker = num_nr_panels * KC * NR + KU * NR
-    var bp_total = num_workers * bp_per_worker
-    var bp_buf = alloc[Scalar[dtype]](bp_total)
+    var bp_per_worker = ceildiv(TILE_N, NR) * KC * NR + KU * NR
+    var bp_buf = alloc[Scalar[dtype]](num_workers * bp_per_worker)
 
-    var num_full_panels = m // MR
     var ap_per_worker: Int = 0
     var ap_total: Int = 1  # min size-1 alloc when PACK_A is off (A read unpacked)
     comptime if PACK_A:
         if SHARED_A:
             # One shared copy of packed A, laid out [i-panel][k][MR].
             # ap_per_worker = 0 so every worker indexes the same buffer.
-            ap_per_worker = 0
-            ap_total = num_i_panels * MR * k
+            ap_total = ceildiv(m, MR) * MR * k
         else:
-            ap_per_worker = num_i_panels * MR * KC
+            ap_per_worker = ceildiv(m, MR) * MR * KC
             ap_total = num_workers * ap_per_worker
     var ap_buf = alloc[Scalar[dtype]](ap_total)
 
     comptime if PACK_A:
         if SHARED_A:
-            # Pre-pack the full A once, in parallel over full MR-row i-panels.
-            # Each panel block is MR*k contiguous, organized [k][MR] so the
-            # micro-kernel's ap_panel + pk*MR + mr indexing matches the
-            # per-worker layout (full-k stride + pc offset instead of a
-            # per-panel kc stride).
-            def pack_a_panel(ip: Int) {mut ap_buf, read a_view, read k}:
-                var i0 = ip * MR
-                var ap_panel = ap_buf + ip * MR * k
-                for pk in range(k):
-                    var dst = ap_panel + pk * MR
-                    comptime for mr in range(MR):
-                        dst[mr] = a_view.row(i0 + mr)[pk]
-            parallelize(pack_a_panel, num_full_panels, num_workers)
+            # Pre-pack the full A once, in parallel over full MR-row i-panels
+            # (the m % MR remainder rows are read unpacked by the masked tail).
+            def pack_shared(ip: Int) {mut ap_buf, read a_view, read k}:
+                _pack_a_panel[dtype, MR](a_view, ap_buf + ip * MR * k, ip * MR, 0, k)
+            parallelize(pack_shared, num_full_panels, num_workers)
 
-    def process_worker(worker_id: Int) {read c_view, read a_view, read b_view, mut bp_buf, mut ap_buf, read m, read n, read k, read num_j_tiles, read num_workers, read bp_per_worker, read ap_per_worker}:
-        var tiles_per_worker = ceildiv(num_j_tiles, num_workers)
-        var j_tile_start = worker_id * tiles_per_worker
-        var j_tile_end = min(j_tile_start + tiles_per_worker, num_j_tiles)
-        if j_tile_start >= num_j_tiles:
+    def worker(worker_id: Int) {read c_view, read a_view, read b_view, mut bp_buf, mut ap_buf, read m, read n, read k, read num_j_tiles, read num_full_panels, read num_workers, read bp_per_worker, read ap_per_worker}:
+        var per = ceildiv(num_j_tiles, num_workers)
+        var jt0 = worker_id * per
+        var jt1 = min(jt0 + per, num_j_tiles)
+        if jt0 >= num_j_tiles:
             return
 
         var bp_worker = bp_buf + worker_id * bp_per_worker
         var ap_worker = ap_buf + worker_id * ap_per_worker
 
-        # Hoisted captures for inner closures (declare type-only, see AGENTS.md).
-        var bp_panel: type_of(bp_worker)
-        var is_first_k: Bool
+        for pc in range(0, k, KC):
+            var kc = min(KC, k - pc)
+            var is_first_k = pc == 0
 
-        var jt = j_tile_start
-        while jt < j_tile_end:
-            var jt_batch_end = min(jt + NC_TILES, j_tile_end)
+            # Pack this K-panel of A, [i-panel][kc][MR]. Skipped under SHARED_A
+            # (packed once up front) and under not-PACK_A (read unpacked).
+            comptime if PACK_A:
+                if not SHARED_A:
+                    for ip in range(num_full_panels):
+                        _pack_a_panel[dtype, MR](
+                            a_view, ap_worker + ip * MR * kc, ip * MR, pc, kc
+                        )
 
-            for pc in range(0, k, KC):
-                var kc = min(KC, k - pc)
-                is_first_k = (pc == 0)
+            for jt in range(jt0, jt1):
+                var j0 = jt * TILE_N
+                var tile_n = min(TILE_N, n - j0)
 
-                # Pack A: KC outer, MR inner so each pk gives MR contiguous
-                # elements. Skipped under SHARED_A (packed once up front) and
-                # under not-PACK_A (the micro-kernel reads A unpacked).
-                var i = 0
-                var ip = 0
-                comptime if PACK_A:
-                    if not SHARED_A:
-                        while i + MR <= m:
-                            var ap_panel = ap_worker + ip * MR * kc
-                            for pk in range(kc):
-                                var dst = ap_panel + pk * MR
-                                comptime for mr in range(MR):
-                                    dst[mr] = a_view.row(i + mr)[pc + pk]
-                            i += MR
-                            ip += 1
+                _pack_b_slab[dtype, NR, NR_VECS, NELTS](
+                    b_view, bp_worker, pc, j0, kc, tile_n
+                )
 
-                for j_tile_idx in range(jt, jt_batch_end):
-                    var j0 = j_tile_idx * TILE_N
-                    var tile_n = min(TILE_N, n - j0)
-                    var num_panels = ceildiv(tile_n, NR)
+                for jp in range(ceildiv(tile_n, NR)):
+                    var jr = jp * NR
+                    var cols = min(NR, tile_n - jr)
+                    var bp_panel = bp_worker + jp * kc * NR
 
-                    var last_full_panel = num_panels
-                    var has_remainder = False
-                    var nr_actual = 0
-                    if num_panels > 0:
-                        var last_jr = (num_panels - 1) * NR
-                        if last_jr + NR > tile_n:
-                            last_full_panel = num_panels - 1
-                            has_remainder = True
-                            nr_actual = tile_n - last_jr
-
-                    # Pack this j-tile's slab of B into [panel][k][NR] (a
-                    # partial trailing panel is zero-padded to full NR).
-                    _pack_b_slab[dtype, NR, NR_VECS, NELTS, PREFETCH_B_DIST](
-                        b_view, bp_worker, pc, j0, kc,
-                        last_full_panel, has_remainder, nr_actual,
-                    )
-
-                    for jp in range(num_panels):
-                        var jr = jp * NR
-                        bp_panel = bp_worker + jp * kc * NR
-
-                        if jr + NR > tile_n:
-                            # Partial NR-panel (tile_n not a multiple of NR).
-                            # The packed panel is zero-padded to full NR, so run
-                            # the SAME register-tiled micro-kernel (the zero
-                            # columns contribute nothing) and store back only
-                            # the jj_limit valid columns: full MR-row i-panels
-                            # first (r = MR), then the m % MR remainder rows.
-                            var jj_limit = tile_n - jr
-                            i = 0
-                            while i + MR <= m:
-                                _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
-                                    c_view.sub(i, j0 + jr), a_view.sub(i, pc),
-                                    bp_panel, kc, MR, jj_limit, is_first_k,
+                    # Full MR-row i-panels. A partial NR-panel (cols < NR) runs
+                    # the SAME register-tiled sweep through the zero-padded pack
+                    # and masks the store to the valid columns.
+                    for ip in range(num_full_panels):
+                        var i = ip * MR
+                        if cols == NR:
+                            comptime if PACK_A:
+                                var ap = (
+                                    ap_buf + i * k + pc * MR
+                                ) if SHARED_A else (ap_worker + i * kc)
+                                _full_microkernel[
+                                    dtype, MR, NR_VECS, NELTS, NR, KU
+                                ](
+                                    c_view.sub(i, j0 + jr), ap, MR, 1,
+                                    bp_panel, kc, is_first_k,
                                 )
-                                i += MR
-                            if i < m:
-                                _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
-                                    c_view.sub(i, j0 + jr), a_view.sub(i, pc),
-                                    bp_panel, kc, m - i, jj_limit, is_first_k,
+                            else:
+                                _full_microkernel[
+                                    dtype, MR, NR_VECS, NELTS, NR, KU
+                                ](
+                                    c_view.sub(i, j0 + jr),
+                                    a_view.addr(i, pc), 1, k,
+                                    bp_panel, kc, is_first_k,
                                 )
-                            continue
-
-                        # ---- Full NR-panel: the register-tile micro-kernel ----
-                        # PACK_A reads the packed panel at unit stride (SHARED_A:
-                        # full-k stride per i-panel + pc offset; else per-worker
-                        # per-kc layout); not-PACK_A reads A straight from source
-                        # at stride k (a column gather).
-                        i = 0
-                        ip = 0
-                        while i + MR <= m:
-                            var ap_panel = (
-                                ap_worker + ip * MR * k + pc * MR
-                            ) if SHARED_A else (ap_worker + ip * MR * kc)
-                            _full_microkernel[
-                                dtype, MR, NR_VECS, NELTS, NR, KU, PACK_A
-                            ](
-                                c_view.sub(i, j0 + jr), ap_panel,
-                                a_view.addr(i, pc), k, bp_panel, kc, is_first_k,
-                            )
-                            i += MR
-                            ip += 1
-
-                        # M-remainder (m % MR rows): one register-tiled block
-                        # reusing the packed B panel at full NR width (jj_limit
-                        # = NR, since the partial-tile case `continue`d above).
-                        if i < m:
+                        else:
                             _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
                                 c_view.sub(i, j0 + jr), a_view.sub(i, pc),
-                                bp_panel, kc, m - i, NR, is_first_k,
+                                bp_panel, kc, MR, cols, is_first_k,
                             )
 
-            jt += NC_TILES
+                    # M-remainder (m % MR rows): one masked block reusing the
+                    # same packed B panel.
+                    var i = num_full_panels * MR
+                    if i < m:
+                        _masked_microkernel[dtype, MR, NR_VECS, NELTS, NR](
+                            c_view.sub(i, j0 + jr), a_view.sub(i, pc),
+                            bp_panel, kc, m - i, cols, is_first_k,
+                        )
 
-    parallelize(process_worker, num_workers, num_workers)
+    parallelize(worker, num_workers, num_workers)
     bp_buf.free()
     ap_buf.free()
 
@@ -479,14 +445,11 @@ def _prefill[
     dtype: DType, KC: Int, TILE_N: Int, SHARED_A: Bool = False,
     PACK_A: Bool = True,
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """The packed GEMM at its standard 6 x (4*NELTS) register tile (KU=2,
-    NC_TILES=64). KC, TILE_N, SHARED_A and PACK_A are the only levers that vary
-    across shapes, so naming the rest here keeps each dispatch branch a
-    one-liner."""
+    """The packed GEMM at its standard 6 x (4*NELTS) register tile (KU=2).
+    KC, TILE_N, SHARED_A and PACK_A are the only levers that vary across
+    shapes, so naming the rest here keeps each dispatch branch a one-liner."""
     comptime NELTS = simd_width_of[dtype]()
-    _packed_gemm[dtype, 6, 4 * NELTS, KC, 2, TILE_N, 64, SHARED_A, PACK_A](
-        c, a, b
-    )
+    _packed_gemm[dtype, 6, 4 * NELTS, KC, 2, TILE_N, SHARED_A, PACK_A](c, a, b)
 
 
 @always_inline
@@ -510,7 +473,7 @@ def _prefill_kc[
 
 
 @always_inline
-def _decode_fma_chunk_unrolled[
+def _decode_fma_chunk[
     dtype: DType, KU: Int, NELTS: Int,
     c_origin: MutOrigin, a_origin: ImmutOrigin, b_origin: ImmutOrigin,
 ](
@@ -521,7 +484,8 @@ def _decode_fma_chunk_unrolled[
     n: Int,
     chunk: Int,
 ):
-    """KU-unrolled FMA chunk for the GEMV main loop.
+    """KU consecutive K-steps of the GEMV, vectorized across the worker's
+    column chunk; the tail loop reuses it at KU=1.
 
     A top-level def so the inner closure can capture `p` and the pointers as
     function-scope bindings (a closure nested inside another closure cannot
@@ -541,26 +505,6 @@ def _decode_fma_chunk_unrolled[
             acc = a_broadcast.fma(b_vec, acc)
         ci.store(offset=j, val=acc)
     vectorize[NELTS, unroll_factor=4](chunk, do_fma)
-
-
-@always_inline
-def _decode_fma_chunk_tail[
-    dtype: DType, NELTS: Int,
-    c_origin: MutOrigin, a_origin: ImmutOrigin, b_origin: ImmutOrigin,
-](
-    ci: UnsafePointer[Scalar[dtype], c_origin],
-    ai: UnsafePointer[Scalar[dtype], a_origin],
-    b_col: UnsafePointer[Scalar[dtype], b_origin],
-    p: Int,
-    n: Int,
-    chunk: Int,
-):
-    """Single-step FMA chunk for the GEMV tail loop."""
-    def do_fma_tail[width: Int](j: Int) {read ci, read ai, read b_col, read p, read n}:
-        var a_broadcast = SIMD[dtype, width](ai[p])
-        var b_vec = (b_col + p * n).load[width=width, invariant=True](offset=j)
-        ci.store(offset=j, val=a_broadcast.fma(b_vec, ci.load[width=width](offset=j)))
-    vectorize[NELTS, unroll_factor=4](chunk, do_fma_tail)
 
 
 def _decode_gemv[
@@ -602,11 +546,10 @@ def _decode_gemv[
             var p = 0
 
             while p < k_main:
-                _decode_fma_chunk_unrolled[dtype=dtype, KU=KU, NELTS=NELTS](ci, ai, b_col, p, n, chunk)
+                _decode_fma_chunk[dtype=dtype, KU=KU, NELTS=NELTS](ci, ai, b_col, p, n, chunk)
                 p += KU
-
             while p < k:
-                _decode_fma_chunk_tail[dtype=dtype, NELTS=NELTS](ci, ai, b_col, p, n, chunk)
+                _decode_fma_chunk[dtype=dtype, KU=1, NELTS=NELTS](ci, ai, b_col, p, n, chunk)
                 p += 1
 
     parallelize(worker, nw, nw)
@@ -617,9 +560,83 @@ def _decode_gemv[
 #
 # Both read A and B straight from source. For a tiny or cache-resident shape
 # the data already fits L1/L2, so explicit packing buys nothing and the prefill
-# kernel's packing + thread-launch overhead would dominate. Both reuse
-# `RegisterTile` for the full MR-row panels and a 1-row tile for the M-tail.
+# kernel's packing + thread-launch overhead would dominate. Both are the same
+# per-block routine, `_nopack_rows`; only the driver differs (a plain loop vs
+# `parallelize`), so they are bit-identical to each other and to the packed
+# paths.
 # ===========================================================================
+
+
+@always_inline
+def _nopack_tail_row[
+    dtype: DType, NELTS: Int,
+    c_org: MutOrigin, a_org: ImmutOrigin, b_org: ImmutOrigin,
+](
+    c_row: UnsafePointer[Scalar[dtype], c_org],
+    a_row: UnsafePointer[Scalar[dtype], a_org],
+    b: Tile[dtype, b_org],
+    jr: Int,
+):
+    """N-remainder columns (n % NR) of one C row: NELTS-wide chunks with an
+    automatic scalar tail. A top-level def for the same closure-capture reason
+    as `_decode_fma_chunk`."""
+    def tail[width: Int](jj: Int) {read c_row, read a_row, read b, read jr}:
+        var acc = SIMD[dtype, width](0)
+        for p in range(b.rows):
+            acc = SIMD[dtype, width](a_row[p]).fma(
+                b.addr(p, jr).load[width=width](offset=jj), acc
+            )
+        c_row.store(offset=jr + jj, val=acc)
+    vectorize[NELTS](b.cols - jr, tail)
+
+
+@always_inline
+def _nopack_rows[
+    dtype: DType, MR: Int, NR_VECS: Int, NELTS: Int,
+    c_org: MutOrigin, a_org: ImmutOrigin, b_org: ImmutOrigin,
+](
+    c: Tile[dtype, c_org],
+    a: Tile[dtype, a_org],
+    b: Tile[dtype, b_org],
+    i: Int,
+    r: Int,
+):
+    """Rows [i, i+r) of C across the full N, reading A and B straight from
+    source. A full MR-row block (r == MR) uses the comptime-unrolled MR tile
+    (each B-load reused across MR rows); a tail block (m % MR) computes one row
+    at a time with the same NR-wide SIMD."""
+    comptime NR = NR_VECS * NELTS
+    var n = c.cols
+    var k = a.cols
+
+    if r == MR:
+        var j = 0
+        while j + NR <= n:
+            var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
+            for p in range(k):
+                tile.rank1_update(
+                    load_a_col[MR](a.addr(i, p), a.stride),
+                    load_b_row[NR_VECS, NELTS](b.addr(p, j)),
+                )
+            tile.store(c.sub(i, j))
+            j += NR
+    else:
+        for ii in range(i, i + r):
+            var j = 0
+            while j + NR <= n:
+                var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
+                for p in range(k):
+                    tile.rank1_update(
+                        load_a_col[1](a.addr(ii, p), a.stride),
+                        load_b_row[NR_VECS, NELTS](b.addr(p, j)),
+                    )
+                tile.store(c.sub(ii, j))
+                j += NR
+
+    var jr = (n // NR) * NR
+    if jr < n:
+        for ii in range(i, i + r):
+            _nopack_tail_row[dtype, NELTS](c.row(ii), a.row(ii), b, jr)
 
 
 def _serial_gemm[
@@ -629,60 +646,17 @@ def _serial_gemm[
 
     Below the dispatch's tiny cutoff the parallel kernels' fixed cost (thread
     launch + per-worker buffers + packing) dwarfs the compute, running
-    10-100x slower than this plain serial loop. Bit-identical to the parallel
-    kernels. MR=6, NR_VECS=2 measured best."""
+    10-100x slower than this plain serial loop. MR=6, NR_VECS=2 measured
+    best."""
     comptime NELTS = simd_width_of[dtype]()
-    comptime NR = NR_VECS * NELTS
-    var c_view = c.view()
-    var a_view = a.view()
-    var b_view = b.view()
+    var c_view = c.noalias_view()
+    var a_view = a.noalias_view()
+    var b_view = b.noalias_view()
     var m = a_view.rows
-    var n = c_view.cols
-    var k = a_view.cols
-
-    var j = 0
-    while j + NR <= n:
-        # Full MR-row register-tiled panels.
-        var i = 0
-        while i + MR <= m:
-            var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
-            for p in range(k):
-                tile.rank1_update(
-                    load_a_col[MR](a_view.addr(i, p), k),
-                    load_b_row[NR_VECS, NELTS](b_view.addr(p, j)),
-                )
-            tile.store(c_view.sub(i, j))
-            i += MR
-        # M-remainder rows (m % MR): one row at a time, same NR-wide SIMD.
-        while i < m:
-            var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
-            for p in range(k):
-                tile.rank1_update(
-                    load_a_col[1](a_view.addr(i, p), k),
-                    load_b_row[NR_VECS, NELTS](b_view.addr(p, j)),
-                )
-            tile.store(c_view.sub(i, j))
-            i += 1
-        j += NR
-    # N-remainder columns (n % NR): vectorized tail over the full M extent,
-    # with NELTS-wide chunks + an automatic scalar tail.
-    if j < n:
-        var jr = j
-        for i in range(m):
-            var c_row = c_view.row(i)
-            var a_row = a_view.row(i)
-
-            def tail[width: Int](jj: Int) {mut c_row, read a_row, read b_view, read k, read jr}:
-                var acc = SIMD[dtype, width](0)
-                for p in range(k):
-                    acc = fma(
-                        SIMD[dtype, width](a_row[p]),
-                        b_view.addr(p, jr).load[width=width](offset=jj),
-                        acc,
-                    )
-                c_row.store(offset=jr + jj, val=acc)
-
-            vectorize[NELTS](n - jr, tail)
+    for i in range(0, m, MR):
+        _nopack_rows[dtype, MR, NR_VECS, NELTS](
+            c_view, a_view, b_view, i, min(MR, m - i)
+        )
 
 
 def _nopack_gemm[
@@ -698,59 +672,20 @@ def _nopack_gemm[
         problem is cache-resident.
 
     Every core owns a band of C's rows and sweeps the full N, reading A/B
-    straight from source. Bit-identical to the other paths."""
+    straight from source."""
     comptime NELTS = simd_width_of[dtype]()
-    comptime NR = NR_VECS * NELTS
     var c_view = c.noalias_view()
     var a_view = a.noalias_view()
     var b_view = b.noalias_view()
     var m = a_view.rows
-    var n = c_view.cols
-    var k = a_view.cols
-    var nw = num_physical_cores()
-    var num_blocks = ceildiv(m, MR)
 
-    def worker(blk: Int) {read c_view, read a_view, read b_view, read m, read n, read k}:
+    def worker(blk: Int) {read c_view, read a_view, read b_view, read m}:
         var i = blk * MR
-        var r = min(MR, m - i)
-        # A full MR-row block uses the comptime-unrolled MR tile (each B-load
-        # reused across MR rows); a tail block (m % MR) falls back to 1 row.
-        if r == MR:
-            var j = 0
-            while j + NR <= n:
-                var tile = RegisterTile[dtype, MR, NR_VECS, NELTS]()
-                for p in range(k):
-                    tile.rank1_update(
-                        load_a_col[MR](a_view.addr(i, p), k),
-                        load_b_row[NR_VECS, NELTS](b_view.addr(p, j)),
-                    )
-                tile.store(c_view.sub(i, j))
-                j += NR
-        else:
-            for ii in range(i, i + r):
-                var j2 = 0
-                while j2 + NR <= n:
-                    var tile = RegisterTile[dtype, 1, NR_VECS, NELTS]()
-                    for p in range(k):
-                        tile.rank1_update(
-                            load_a_col[1](a_view.addr(ii, p), k),
-                            load_b_row[NR_VECS, NELTS](b_view.addr(p, j2)),
-                        )
-                    tile.store(c_view.sub(ii, j2))
-                    j2 += NR
+        _nopack_rows[dtype, MR, NR_VECS, NELTS](
+            c_view, a_view, b_view, i, min(MR, m - i)
+        )
 
-        # N-remainder columns (n % NR < NR): scalar dot per (row, col). A tiny
-        # strip, so a scalar tail costs nothing.
-        var jr = (n // NR) * NR
-        for ii in range(i, i + r):
-            var a_row = a_view.row(ii)
-            for jj in range(jr, n):
-                var acc = Scalar[dtype](0)
-                for p in range(k):
-                    acc = fma(a_row[p], b_view.addr(p, jj)[0], acc)
-                c_view.addr(ii, jj)[0] = acc
-
-    parallelize(worker, num_blocks, nw)
+    parallelize(worker, ceildiv(m, MR), num_physical_cores())
 
 
 # ===========================================================================
@@ -774,8 +709,7 @@ def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int, cap: Int = 2048) -> Int:
     var l2 = l2_cache_size()
     if l2 == 0:
         return min(cap, k)
-    var budget = l2 // (tile_n * elem)
-    return min(min(budget, k), cap)
+    return min(min(l2 // (tile_n * elem), k), cap)
 
 
 def _box_l2_budget() -> Int:
@@ -786,44 +720,8 @@ def _box_l2_budget() -> Int:
     Falls back to 512 KB when L2 is undetectable."""
     var l2 = l2_cache_size()
     if l2 == 0:
-        return (1 << 19)
+        return 1 << 19
     return l2 // 3
-
-
-# ===========================================================================
-# Dispatch predicates
-#
-# One named gate per regime, tested top to bottom in matmul_dispatch below.
-# Each returns only its own condition; the regime it selects is that condition
-# with every gate above it having already failed (so _is_square_ish is just
-# `n <= m`, because the narrow-N gate above it has ruled out n <= 192). The
-# measured rationale is in README.md / DESIGN.md.
-# ===========================================================================
-
-
-def _is_tiny(m: Int, n: Int, k: Int) -> Bool:
-    """Tiny shape: total work below the serial/parallel crossover, where the
-    parallel kernels' launch + packing overhead dwarfs the compute."""
-    return m * n * k < (1 << 19)
-
-
-def _is_decode(m: Int) -> Bool:
-    """Decode GEMV: a single output row (M == 1)."""
-    return m == 1
-
-
-def _is_small_batch(m: Int) -> Bool:
-    """Small-batch decode: 2..5 rows (M == 1 is already the GEMV), few enough
-    to reuse one packed B panel across all rows with MR = M."""
-    return m <= 5
-
-
-def _is_thin_n[dtype: DType](m: Int, n: Int) -> Bool:
-    """Thin-N tall-M: N at most 8*NELTS with at least 64 rows. The work is
-    along M, so it wants the no-pack kernel's M-parallelism instead of the
-    prefill kernel's N-parallelism (which a thin N starves)."""
-    comptime NELTS = simd_width_of[dtype]()
-    return n <= NELTS * 8 and m >= 64
 
 
 def _box_fits_l2[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
@@ -838,25 +736,6 @@ def _box_fits_l2[dtype: DType](m: Int, n: Int, k: Int) -> Bool:
         and m >= n
         and (b_bytes <= (1 << 19) or b_bytes <= _box_l2_budget())
     )
-
-
-def _is_narrow_n(n: Int) -> Bool:
-    """Narrow N: N at most 192, too few TILE_N=64 j-tiles to fill the cores
-    without dropping to the narrow NR=16 tile."""
-    return n <= 3 * 64
-
-
-def _is_square_ish(m: Int, n: Int) -> Bool:
-    """Square-ish: N at most M (with N > 192 already, from the narrow-N gate
-    above)."""
-    return n <= m
-
-
-def _is_wide_n(n: Int, k: Int) -> Bool:
-    """Wide-N (up-proj-like): N at least K (with N > M already, from the
-    square-ish gate above). The remaining shapes (N < K) are tall-K, the
-    cascade's else."""
-    return n >= k
 
 
 # ===========================================================================
@@ -876,15 +755,10 @@ def _small_batch[
     so the packed B panel is streamed once and reused across all M rows (a
     per-row GEMV would re-stream B, ~2x slower at M=4)."""
     comptime NELTS = simd_width_of[dtype]()
-    var m = a.rows
-    if m == 2:
-        _packed_gemm[dtype, 2, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
-    elif m == 3:
-        _packed_gemm[dtype, 3, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
-    elif m == 4:
-        _packed_gemm[dtype, 4, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
-    else:
-        _packed_gemm[dtype, 5, 4 * NELTS, 256, 2, 8 * NELTS, 64](c, a, b)
+    comptime for MR in range(2, 6):
+        if a.rows == MR:
+            _packed_gemm[dtype, MR, 4 * NELTS, 256, 2, 8 * NELTS](c, a, b)
+            return
 
 
 @always_inline
@@ -932,16 +806,6 @@ def _small_box[
 
 
 @always_inline
-def _narrow_n[
-    dtype: DType
-](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
-    """Narrow N (N <= 192): a narrow NR=16 / TILE_N=16 tile so a small N still
-    splits into enough j-tiles instead of idling most cores. KU=4."""
-    comptime NELTS = simd_width_of[dtype]()
-    _packed_gemm[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS, 64](c, a, b)
-
-
-@always_inline
 def _pack_b_only_2d[
     dtype: DType, MR: Int, NR: Int, KU: Int
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
@@ -962,7 +826,6 @@ def _pack_b_only_2d[
     A reads from source unpacked. DESIGN.md "Small-N square"."""
     comptime NELTS = simd_width_of[dtype]()
     comptime NR_VECS = NR // NELTS
-    comptime PREFETCH_B_DIST = 8
 
     var c_view = c.noalias_view()
     var a_view = a.noalias_view()
@@ -977,12 +840,10 @@ def _pack_b_only_2d[
     var total_tiles = num_cols * num_i_panels
 
     # One private [k][NR] column buffer per worker (B packed lazily as the
-    # worker crosses into each column it owns). An unused packed-A stand-in for
-    # the PACK_A=False micro-kernel (the pointer is never read).
+    # worker crosses into each column it owns).
     var bp_buf = alloc[Scalar[dtype]](num_workers * k * NR)
-    var ap_dummy = alloc[Scalar[dtype]](1)
 
-    def compute_worker(worker_id: Int) {read c_view, read a_view, read b_view, mut bp_buf, read ap_dummy, read m, read n, read k, read num_cols, read num_i_panels, read num_workers, read total_tiles}:
+    def worker(worker_id: Int) {read c_view, read a_view, read b_view, mut bp_buf, read m, read n, read k, read num_cols, read num_i_panels, read num_workers, read total_tiles}:
         var per = ceildiv(total_tiles, num_workers)
         var start = worker_id * per
         var end = min(start + per, total_tiles)
@@ -998,17 +859,15 @@ def _pack_b_only_2d[
             var jr = col * NR
             var cols = min(NR, n - jr)
             if col != cur_col:
-                var full = cols == NR
-                _pack_b_slab[dtype, NR, NR_VECS, NELTS, PREFETCH_B_DIST](
-                    b_view, bp_panel, 0, jr, k,
-                    1 if full else 0, not full, 0 if full else cols,
+                _pack_b_slab[dtype, NR, NR_VECS, NELTS](
+                    b_view, bp_panel, 0, jr, k, cols
                 )
                 cur_col = col
             var i0 = ip * MR
             var rows = min(MR, m - i0)
             if rows == MR and cols == NR:
-                _full_microkernel[dtype, MR, NR_VECS, NELTS, NR, KU, False](
-                    c_view.sub(i0, jr), ap_dummy, a_view.addr(i0, 0), k,
+                _full_microkernel[dtype, MR, NR_VECS, NELTS, NR, KU](
+                    c_view.sub(i0, jr), a_view.addr(i0, 0), 1, k,
                     bp_panel, k, True,
                 )
             else:
@@ -1019,9 +878,8 @@ def _pack_b_only_2d[
                     rows, cols, True,
                 )
 
-    parallelize(compute_worker, num_workers, num_workers)
+    parallelize(worker, num_workers, num_workers)
     bp_buf.free()
-    ap_dummy.free()
 
 
 @always_inline
@@ -1071,7 +929,7 @@ def _wide_n[
     var n = c.cols
     var k = a.cols
     if n >= 9 * 1024 and m <= 32:
-        _packed_gemm[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS, 64](c, a, b)
+        _packed_gemm[dtype, 8, 3 * NELTS, 256, 2, 9 * NELTS](c, a, b)
     elif k <= 2048 and k * n <= (1 << 20):
         # Small cache-resident wide box (B = k*n stays in L3, at any M): the
         # prefill path packs B per j-tile per worker, and that packing + launch
@@ -1086,8 +944,7 @@ def _wide_n[
     else:
         # m > 192: SHARED_A + a single C-stored-once k-panel (KC = min(K, 2048)
         # at the detected L2, see _l2_resident_kc).
-        var kc = _l2_resident_kc[dtype](64, k)
-        _prefill_kc[dtype, 8 * NELTS, True](c, a, b, kc)
+        _prefill_kc[dtype, 8 * NELTS, True](c, a, b, _l2_resident_kc[dtype](64, k))
 
 
 @always_inline
@@ -1126,16 +983,16 @@ def matmul_dispatch[
     dtype: DType = DType.float64
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     """Compute C = A * B, routed to the kernel + tile that measured fastest
-    for the shape on a 4-core AVX-512 Xeon (f64). This table is the
-    authoritative dispatch map; each row's helper holds the tile picks and the
-    per-branch rationale.
+    for the shape on a 4-core AVX-512 Xeon (f64). This cascade is the
+    authoritative dispatch map; each regime's helper holds the tile picks and
+    the per-branch rationale.
 
         tiny  M*N*K < 2^19       _serial_gemm  serial, no threads/packing
         M == 1                   _decode_gemv  j-parallel GEMV, streams B once
         M in 2..5                _small_batch  packed MR=M, reuse B across rows
         thin-N  N<=8*NELTS, M>=64  _thin_n     M-parallel no-pack
         small box  M>=N, B fits L2 _small_box  no-pack (pack-B-only at B>384KB)
-        narrow-N  N<=192         _narrow_n     packed NR=16
+        narrow-N  N<=192         packed NR=16  too few TILE_N=64 j-tiles
         square-ish  N<=M         _square_ish   pack-B-only 6x32, TileK=K
         wide-N  N>=K             _wide_n       packed 6x32 (pack-B-only 2D for
                                                small L3-resident box)
@@ -1145,24 +1002,27 @@ def matmul_dispatch[
     wide headline shape (the LLM up/down projections are N >> M), where those
     kernels are catastrophic. The full rationale + measurements are in
     README.md and DESIGN.md."""
+    comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
     var k = a.cols
-    if _is_tiny(m, n, k):
+    if m * n * k < (1 << 19):
         _serial_gemm[dtype, 6, 2](c, a, b)
-    elif _is_decode(m):
+    elif m == 1:
         _decode_gemv(c, a, b)
-    elif _is_small_batch(m):
+    elif m <= 5:
         _small_batch(c, a, b)
-    elif _is_thin_n[dtype](m, n):
+    elif n <= 8 * NELTS and m >= 64:
         _thin_n(c, a, b)
     elif _box_fits_l2[dtype](m, n, k):
         _small_box(c, a, b)
-    elif _is_narrow_n(n):
-        _narrow_n(c, a, b)
-    elif _is_square_ish(m, n):
+    elif n <= 192:
+        # Narrow N: the NR=16 / TILE_N=16 tile (KU=4) so a small N still splits
+        # into enough j-tiles to fill the cores.
+        _packed_gemm[dtype, 6, 2 * NELTS, 256, 4, 2 * NELTS](c, a, b)
+    elif n <= m:
         _square_ish(c, a, b)
-    elif _is_wide_n(n, k):
+    elif n >= k:
         _wide_n(c, a, b)
     else:
         _tall_k(c, a, b)
