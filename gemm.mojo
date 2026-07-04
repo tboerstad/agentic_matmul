@@ -785,20 +785,35 @@ def _small_box[
     """Small M-dominant box whose B is L2-resident (see _box_fits_l2).
 
     The bigger boxes (B above 384 KB, the top of the admission window) take
-    the same pack-B-only / TileK=K path as the squares: packing B once and
+    the same pack-B-only path as the squares, via `_square_ish` so its
+    makespan gate can also pick the balanced 2D grid when the column count
+    splits the cores unevenly (f32 sq320: 5 columns on 4 cores ran 0.72 vs
+    linalg on the 1D column path, 1.10 on the 2D grid). Packing B once and
     reading A unpacked beats re-reading all of B per MR-row block, as long as
-    N splits into enough NR-tiles to fill the cores. The genuinely small boxes
-    keep the no-pack M-parallel kernel: MR=6 (24 accumulators, deepest ILP)
-    when it divides M with no tail, else MR=4. DESIGN.md "_nopack_gemm MR"."""
+    N splits into enough NR-tiles to fill the cores.
+
+    The no-pack M-parallel kernel handles its N-remainder (n % NR) one row at
+    a time with a single accumulator chain, so a wide remainder runs latency-
+    bound at ~1/8 of the tile throughput and dominates the whole GEMM once it
+    is a big enough slice of N (f32 sq300: a 44-wide remainder of N=300 sank
+    the route to 0.25 vs linalg; the packed 2D grid runs it at 0.95). Shapes
+    whose remainder is at least N/8 go to `_square_ish` too; its masked
+    partial-panel microkernel keeps the remainder at full register-tile
+    throughput.
+
+    The genuinely small clean-N boxes keep the no-pack M-parallel kernel:
+    MR=6 (24 accumulators, deepest ILP) when it divides M with no tail, else
+    MR=4. DESIGN.md "_nopack_gemm MR" and "Small-box f32 routing"."""
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
     var k = a.cols
     var b_bytes = k * n * size_of[Scalar[dtype]]()
+    var n_rem = n % (4 * NELTS)
     if b_bytes > (3 << 17) and ceildiv(n, 4 * NELTS) >= num_physical_cores():
-        # k <= 512 here (B <= 512 KB with N >= 4*NELTS), so KC=512 is a single
-        # whole-K panel: C is swept over all of K and stored once.
-        _prefill[dtype, 512, 4 * NELTS, False, False](c, a, b)
+        _square_ish(c, a, b)
+    elif n_rem * 8 >= n:
+        _square_ish(c, a, b)
     elif m % 6 == 0:
         _nopack_gemm[dtype, 6, 4](c, a, b)
     else:
@@ -991,7 +1006,8 @@ def matmul_dispatch[
         M == 1                   _decode_gemv  j-parallel GEMV, streams B once
         M in 2..5                _small_batch  packed MR=M, reuse B across rows
         thin-N  N<=8*NELTS, M>=64  _thin_n     M-parallel no-pack
-        small box  M>=N, B fits L2 _small_box  no-pack (pack-B-only at B>384KB)
+        small box  M>=N, B fits L2 _small_box  no-pack (square-ish machinery
+                                               at B>384KB or a >=N/8 remainder)
         narrow-N  N<=192         packed NR=16  too few TILE_N=64 j-tiles
         square-ish  N<=M         _square_ish   pack-B-only 6x32, TileK=K
         wide-N  N>=K             _wide_n       packed 6x32 (pack-B-only 2D for
