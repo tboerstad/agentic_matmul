@@ -296,18 +296,26 @@ band to a single *C-stored-once* k-panel — `KC = min(K, 2048)` in `_l2_residen
 the same TileK `linalg` uses (interleaved A/B, 8 epochs: up-proj M=256 0.96→1.00,
 M=512 0.97→1.00, odd-N 0.96→1.00, 512×4096×4096 0.99→**1.02 WIN**; bit-identical,
 2 MB Machine B unchanged — see DESIGN.md *`_l2_resident_kc`*). The residual loss is
-now just the heavy **squares** (sq512 ~0.96, sq1024 ~0.98) and the **tall-K
-down-proj** (dn-m512, K=11008, ~0.95). The down-proj large-M band used to inherit
-the wide-N `KC=2048` single-panel pick, which backfires on tall K: K=11008 can never
-fit one panel (so the "C stored once" benefit is unreachable) while the M·KC packed-A
-panel overflows L2 and re-streams from L3 once per j-tile. The tall-K large-M branch
-now caps `KC` at 1024 and uses the finer `TILE_N=4·NELTS` (`_l2_resident_kc(…, cap=1024)`),
-which lifts the band off a 0.90–0.96 loss to a stable 0.95–0.99 and removes the M=512
-collapse (interleaved A/B, 8 epochs: M=384 0.94→0.97, **M=512 0.90→0.95**, and
-bench_focus dn-m512 0.90±0.073 with a 0.71 tail → 0.956±0.011; ffn-dn8k K=8192 M=512
-1.04→1.08 also lifts, K=8192 M≤256 win retained; bit-identical, `verify_dispatch`
-max_err 0.0 — see DESIGN.md *Tall-K large-M*). Closing the rest to full parity
-likely needs pack/compute overlap — substantial and unproven on this hardware.
+now just the heavy **squares** (sq512 ~0.96, sq1024 ~0.98). The **tall-K
+down-proj** (dn-m512, K=11008), long the other stable loss, reached parity in two
+passes. First the band stopped inheriting the wide-N `KC=2048` single-panel pick,
+which backfires on tall K (K=11008 can never fit one panel, so "C stored once" is
+unreachable, while the M·KC packed-A panel overflows L2): capping `KC` at 1024 on
+the finer `TILE_N=4·NELTS` lifted a noisy 0.90±0.073 (0.71 tail) to a stable
+0.956±0.011. Then the rung dropped the A-pack entirely (pack-B-only, the square-ish
+treatment): on a tall K the A matrix is the dominant operand (dn-m512's A is 45 MB,
+past L3), so the shared pre-pack was a full extra DRAM sweep, and without a packed-A
+panel to keep resident the KC cap returns to the deeper C-stored-once 2048.
+Interleaved A/B old→new: dn-m384 0.974→1.005, **dn-m512 0.968→0.995**, dn-k4096
+0.955→0.998 (ffn-dn8k gives back 2% and stays a 1.05 WIN); in full bench_focus
+**dn-m512 0.956±0.011 LOSE → 1.002±0.006 tie**, dead parity (bit-identical,
+`verify_dispatch` max_err 0.0 — see DESIGN.md *Tall-K large-M, second pass*). The
+same pass exposed that a packed-B tile sized to the *whole* per-core L2 is a cliff
+(f32 512×4096×4096 ran 0.844 at the whole-L2 KC=4096 tile vs 0.991 at half-L2
+KC=2048, a 17% gap); `_l2_resident_kc` now sizes the tile at **half** the L2, which
+also lifts the f32 tall-K band +3.6–6.5% to ≥1.0 (see DESIGN.md *Half-L2 packed-B
+tile*). Closing the heavy squares to full parity likely needs pack/compute
+overlap — substantial and unproven on this hardware.
 The odd-N remainder
 (N=11007 was ~0.85–0.88) is now **fixed** by the masked-N partial-panel
 microkernel (see *Masked N-remainder* above): the partial tile runs at full

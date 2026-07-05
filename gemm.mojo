@@ -521,7 +521,8 @@ def _prefill_kc[
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype], kc: Int):
     """Run `_prefill` at the comptime KC rung nearest the runtime cache-aware
     `kc`. KC must be a compile-time constant for the micro-kernel, so the
-    measured rungs {512, 1024, 2048} are spelled out here, snapping down."""
+    measured rungs {512, 1024, 2048, 4096} are spelled out here, snapping
+    down."""
     if kc >= 4096:
         _prefill[dtype, 4096, TILE_N, SHARED_A, PACK_A](c, a, b)
     elif kc >= 2048:
@@ -764,18 +765,20 @@ def _nopack_gemm[
 
 def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
     """Cache-aware KC for the prefill GEMM's large-M band: size the packed-B
-    tile (TILE_N x KC) to the per-core L2, then cap the panel depth at 16 KB
-    per packed column. The cap is byte-based so every dtype gets the same
-    cache footprint: KC=2048 in f64 (the depth the band was tuned at) and
-    KC=4096 in f32, which keeps K <= 4096 f32 sweeps in a single panel so
-    each L2-resident C micro-tile is stored exactly once instead of once per
-    k-panel. See DESIGN.md "_l2_resident_kc"."""
+    tile (TILE_N x KC) to HALF the per-core L2, then cap the panel depth at
+    16 KB per packed column (KC=2048 in f64, the depth the band was tuned
+    at). The B tile shares L2 with the A panel sweeping through it and the
+    C tiles, so a tile sized to the whole L2 evicts its own operands: on the
+    1 MB/core machine an f32 K=4096 shape ran 0.84 vs linalg with the
+    whole-L2 KC=4096 tile and 0.99 with the half-L2 KC=2048 (the 2 MB/core
+    machine's picks all land on the cap and are unchanged). See DESIGN.md
+    "_l2_resident_kc"."""
     comptime elem = size_of[Scalar[dtype]]()
     var cap = 16384 // elem
     var l2 = l2_cache_size()
     if l2 == 0:
         return min(cap, k)
-    return min(min(l2 // (tile_n * elem), k), cap)
+    return min(min(l2 // (2 * tile_n * elem), k), cap)
 
 
 def _box_l2_budget() -> Int:
