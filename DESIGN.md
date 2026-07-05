@@ -337,6 +337,67 @@ sq128 0.95, sq96 0.82 (no-pack wins below). The cut is B > 384 KB (with the
 single whole-K panel). The small-N squares (sq384/sq300/sq320) take the
 square-ish branch's narrow pack-B-only rung (see "Small-N square" above).
 
+## Small-box f32 routing: byte gates vs NR granularity
+
+The small-box admission and route picks are byte-based (`b_bytes = k*n*elem`),
+which is right for the L2-residency physics but silently re-routes shapes when
+the element type shrinks: an f32 square carries half the bytes of its f64
+twin, so squares that in f64 go to `_square_ish` (and its balanced 2D grid)
+were landing in `_small_box`'s no-pack / 1D-column routes in f32. Meanwhile
+the *granularity* hazards those routes carry scale with `NR = 4*NELTS`, which
+**doubles** in f32 (64 lanes). So f32 hit both hazards at once, on shapes the
+f64 sweeps never see:
+
+- **sq300 f32** (B = 360 KB, admitted by the 512 KB tier): the no-pack route's
+  N-remainder (300 % 64 = 44 columns) runs one row at a time on a single
+  accumulator chain, latency-bound at ~1/8 of the register-tile throughput,
+  and at 15% of N it dominated the whole GEMM: **0.25 vs linalg** (91 GFLOPS),
+  the worst shape in the suite in any dtype.
+- **sq320 f32** (B = 400 KB, the pack-B-only branch): ceildiv(320, 64) = 5
+  columns across 4 cores on the 1D column path, a [2,1,1,1] makespan:
+  **0.73 vs linalg**.
+
+A route A/B (interleaved, peak-of-12, 4 epochs, f32) across the band:
+
+| Shape | B | no-pack | pack-B 1D | pack-B 2D | route |
+|---|---|---|---|---|---|
+| sq256 | 256 KB | **0.99** | 0.96 | 0.98 | no-pack (keep) |
+| sq288 | 324 KB | **0.88** | 0.78 | 0.90 | no-pack (keep) |
+| sq300 | 360 KB | 0.25 | 0.85 | **0.95** | 2D |
+| sq320 | 400 KB | 1.02 | 0.72 | **1.10** | 2D |
+| sq352 | 484 KB | 0.75 | 0.70 | **0.73** | 2D (all ~tie) |
+| 512×128×512 | 256 KB | **1.15** | 0.59 | 0.83 | no-pack (keep) |
+| 256×128×512 | 256 KB | **1.16** | 0.59 | 1.01 | no-pack (keep) |
+
+Two dispatch changes, both dtype-generic (they fire wherever the arithmetic
+says so, it just takes f32's NR=64 to reach them on square-ish shapes):
+
+1. The `_small_box` pack-B-only branch (B > 384 KB) now calls `_square_ish`
+   instead of the 1D `_prefill` directly, so its measured makespan gate can
+   pick the balanced 2D grid when the column count splits the cores unevenly
+   (sq320's 5 columns). For every f64 bench shape the gate resolves to the
+   same 1D path and KC rung as before, so f64 routing is unchanged.
+2. Shapes whose no-pack N-remainder is at least N/8 (`(n % NR) * 8 >= n`, the
+   point where the ~8x-slower row-by-row tail costs more than everything it
+   saves) are evicted from no-pack to `_square_ish` too; its masked
+   partial-panel microkernel runs the remainder at full register-tile
+   throughput. sq288 (remainder 32/288 = 11%) stays no-pack, matching the
+   measured wash.
+
+Full `bench_focus --dtype f32` (10 epochs, 2σ verdict), before → after:
+
+| Shape | before | after |
+|---|---|---|
+| sq300 | 0.253 ± 0.026 **LOSE** (91 GFLOPS) | 0.934 ± 0.032 (349 GFLOPS, 3.8×) |
+| sq320 | 0.728 ± 0.016 **LOSE** (337 GFLOPS) | **1.035 ± 0.014 WIN** (509 GFLOPS) |
+
+Nothing else in the f32 set moves outside its noise band (box512 keeps its
+1.07 WIN, sq256 1.05 WIN, the wide-N band's small losses are the separate
+f32-tiling item), and the f64 set is unchanged (verified with a full 10-epoch
+f64 run; `verify_dispatch` max_err 0.0). sq300's residual ~0.93 is the 2D
+grid's masked 44-wide column plus the M-tail, the same masked-tile overhead
+the f64 squares pay at their remainders.
+
 ## Dead end: x86 M-blocking (GotoBLAS loop 3) for the squares
 
 MC blocking (block M so an MC-tall packed-A block stays L2-resident across a

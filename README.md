@@ -8,8 +8,13 @@ An experiment in writing optimized matmul kernels in Mojo using only [Claude Cod
 Beyond those, the dispatch kernel and the `bench_focus.mojo` harness now run a
 wider shape set and other element types (`--dtype f32/f16/bf16`). The kernel
 tiles and cache-blocking constants are tuned for float64, so float32 currently
-trails `linalg` by a few percent on the compute-bound square band (an open
-tuning item).
+trails `linalg` by a few percent on the compute-bound wide-N band (an open
+tuning item). The float32 small-box band is routed granularity-aware: the
+byte-based small-box gates admit twice the N×K area in f32 while the no-pack /
+1D-column hazards scale with the doubled NR=64, which had sunk sq300-f32 to
+0.25× linalg and sq320-f32 to 0.73×; routing those through `_square_ish`'s
+balanced 2D grid lifts them 3.8× and 1.5× to ~parity (see DESIGN.md
+"Small-box f32 routing").
 
 ## Results
 
@@ -328,4 +333,5 @@ mojo bench_focus.mojo --quick    # fast single-epoch sanity check (NOT for judgi
 python bench_sota.py             # NumPy/SciPy/MKL benchmarks
 mojo test_gemm.mojo              # Correctness tests
 mojo verify_dispatch.mojo        # dispatch correctness vs naive (all branches + edge cases)
+mojo verify_f32_routes.mojo      # f32/bf16 small-box routing correctness (byte gates differ from f64)
 ```
