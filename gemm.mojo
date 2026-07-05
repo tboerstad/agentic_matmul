@@ -521,7 +521,8 @@ def _prefill_kc[
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype], kc: Int):
     """Run `_prefill` at the comptime KC rung nearest the runtime cache-aware
     `kc`. KC must be a compile-time constant for the micro-kernel, so the
-    measured rungs {512, 1024, 2048} are spelled out here, snapping down."""
+    measured rungs {512, 1024, 2048, 4096} are spelled out here, snapping
+    down."""
     if kc >= 4096:
         _prefill[dtype, 4096, TILE_N, SHARED_A, PACK_A](c, a, b)
     elif kc >= 2048:
@@ -762,25 +763,22 @@ def _nopack_gemm[
 # ===========================================================================
 
 
-def _l2_resident_kc[
-    dtype: DType
-](tile_n: Int, k: Int, cap_bytes: Int = 16384) -> Int:
+def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int) -> Int:
     """Cache-aware KC for the prefill GEMM's large-M band: size the packed-B
-    tile (TILE_N x KC) to the per-core L2, then cap the panel depth at
-    `cap_bytes` per packed column. The cap is byte-based so every dtype gets
-    the same cache footprint: the default 16 KB is KC=2048 in f64 (the depth
-    the band was tuned at) and KC=4096 in f32, which keeps K <= 4096 f32
-    sweeps in a single panel so each L2-resident C micro-tile is stored
-    exactly once instead of once per k-panel. The tall-K band passes 8 KB
-    (KC=1024 in f64): with K far above the cap the stored-once benefit is
-    unreachable, while a deeper packed-A panel overflows L2. See DESIGN.md
+    tile (TILE_N x KC) to HALF the per-core L2, then cap the panel depth at
+    16 KB per packed column (KC=2048 in f64, the depth the band was tuned
+    at). The B tile shares L2 with the A panel sweeping through it and the
+    C tiles, so a tile sized to the whole L2 evicts its own operands: on the
+    1 MB/core machine an f32 K=4096 shape ran 0.84 vs linalg with the
+    whole-L2 KC=4096 tile and 0.99 with the half-L2 KC=2048 (the 2 MB/core
+    machine's picks all land on the cap and are unchanged). See DESIGN.md
     "_l2_resident_kc"."""
     comptime elem = size_of[Scalar[dtype]]()
-    var cap = cap_bytes // elem
+    var cap = 16384 // elem
     var l2 = l2_cache_size()
     if l2 == 0:
         return min(cap, k)
-    return min(min(l2 // (tile_n * elem), k), cap)
+    return min(min(l2 // (2 * tile_n * elem), k), cap)
 
 
 def _box_l2_budget() -> Int:
@@ -1053,12 +1051,13 @@ def _tall_k[
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     """Tall-K (N < K, down-proj-like): the 6x(4*NELTS) register tile whose
     masked M-remainder tail beats 8x24 at every M. Small M (< 192) packs A per
-    worker on the wider TILE_N=8*NELTS; past the M~192 SHARED_A crossover the
-    heavy band switches to the finer TILE_N=4*NELTS (2x more j-tiles, better
-    load balance, smaller packed-B panels) and a KC capped at 1024 (with K far
-    above 2048 the C-stored-once benefit of a deeper panel is unreachable,
-    while the M*KC packed-A panel would overflow L2). DESIGN.md "Tall-K
-    large-M"."""
+    worker on the wider TILE_N=8*NELTS; past the M~192 crossover the heavy
+    band switches to the finer TILE_N=4*NELTS (2x more j-tiles, better load
+    balance, smaller packed-B panels). The m > 256 rung is pack-B-only: on a
+    tall K the A matrix is the dominant operand (dn-m512's A is 45 MB, past
+    L3), so packing it is a full extra DRAM sweep, and reading it unpacked
+    (strided column broadcasts, the square-ish treatment) frees the KC cap to
+    return to the deeper C-stored-once panel. DESIGN.md "Tall-K large-M"."""
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var k = a.cols
@@ -1070,8 +1069,9 @@ def _tall_k[
         # KC=512 single L1-resident k-panel, finer TILE_N.
         _prefill[dtype, 512, 4 * NELTS, True](c, a, b)
     else:
-        var kc = _l2_resident_kc[dtype](4 * NELTS, k, 8192)
-        _prefill_kc[dtype, 4 * NELTS, True](c, a, b, kc)
+        _prefill_kc[dtype, 4 * NELTS, False, False](
+            c, a, b, _l2_resident_kc[dtype](4 * NELTS, k)
+        )
 
 
 # ===========================================================================

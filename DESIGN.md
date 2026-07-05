@@ -155,19 +155,22 @@ faster across nightlies, that re-traffic was the whole margin. (The README alrea
 noted KC=2048 wins large-M on the 2 MB part for "fewer k-panels, less C re-traffic"
 — the same mechanism now reaches the 1 MB part.)
 
-Implemented by sizing the budget at the *full* per-core L2 and **capping at 2048**
+Implemented by sizing the budget from the per-core L2 and **capping at 2048**
 (the single-panel depth): 1 MB/core → KC=2048 (was 1024), 2 MB/core → KC=2048
 (unchanged, so Machine B is byte-for-byte identical). The `m <= 288` wide rung
 folds into the `m > 192` cache-aware branch instead of its hardcoded KC=512.
 Bit-identical (`verify_dispatch` max_err 0.0). The headline prefill (M=96) is in
 the `m <= 192` band (KC=256) and is untouched.
 
-The cap is now **byte-based** (`cap_bytes`, default 16 KB per packed column;
-the tall-K band passes 8 KB), so narrower dtypes get the same cache footprint
-the band was tuned at in f64: KC=2048 in f64 (identical values to the old
-element cap on every branch, by construction) and KC=4096 in f32.
-`_prefill_kc` gained the matching 4096 rung. See "Wide-N heavy band" below for
-the f32 measurements that motivated it.
+The cap is now **byte-based** (16 KB per packed column), so narrower dtypes
+get the same cache footprint the band was tuned at in f64: KC=2048 in f64
+(identical values to the old element cap on every branch, by construction)
+and KC=4096 in f32. `_prefill_kc` gained the matching 4096 rung. See "Wide-N
+heavy band" below for the f32 measurements that motivated it. The L2 term is
+sized at **half** the per-core L2 (see "Half-L2 packed-B tile" below): every
+f64 pick and every 2 MB/core pick lands on the cap either way, and on the
+1 MB/core part the whole-L2 f32 tile it used to allow was a measured 15-17%
+cliff.
 
 ## Wide-N heavy band: finer TILE_N + byte-based KC cap (the f32 tuning item)
 
@@ -190,7 +193,8 @@ The fix is the same treatment the tall-K heavy band already got: the
 `_wide_n m > 192` branch drops to the finer **TILE_N = 4*NELTS** (2x more
 j-tiles, tighter makespan, packed-B tile at half the L2 instead of all of it),
 and `_l2_resident_kc`'s cap becomes **byte-based** (16 KB per column: KC=2048
-f64, KC=4096 f32; the tall-K band passes 8 KB, keeping its f64 KC=1024).
+f64, KC=4096 f32; the tall-K band passed 8 KB until its second pass retired
+the extra cap, see "Tall-K large-M, second pass").
 Neither lever alone closes M512-g: KC=4096 at the wide tile is a 2 MB packed-B
 tile (the whole L2) and measured *worse* (0.936); at the finer tile it is 1 MB
 and wins.
@@ -258,12 +262,72 @@ Measured interleaved A/B vs linalg, Machine A (1 MB/core L2), down-proj N=2048:
 In `bench_focus` (10 epochs, 2σ) `dn-m512` goes from 0.90 ± 0.073 (a 0.71..0.95
 spread that read as a noisy "tie") to **0.956 ± 0.011** (a stable 0.94..0.97 band):
 the mean lifts ~5.6% and the catastrophic low-end collapse is gone. Bit-identical
-(`verify_dispatch` max_err 0.0; KC/TILE_N are codegen-only levers). The band is now
-0.95-1.0 across every down-proj M; closing the last few percent to full parity is
-the same pack/compute-overlap gap as the heavy squares.
+(`verify_dispatch` max_err 0.0; KC/TILE_N are codegen-only levers).
 
-The residual band losses are now just the heavy squares (sq512/sq1024) and the
-last few percent of the tall-K down-proj — the algorithmic pack/compute-overlap gap.
+A second pass (next section) closed the remaining few percent by dropping the
+A-pack from this rung entirely, which also retired the 8 KB KC cap this
+section introduced.
+
+## Tall-K large-M, second pass: pack-B-only, KC back to 2048
+
+After the KC-cap fix above, the tall-K `m > 256` band was the last stable
+documented f64 loss (`dn-m512` 0.956 ± 0.011). The remaining gap was the
+A-pack itself, the same overhead the square-ish branch had already shed: on a
+tall K the A matrix is the *dominant* operand (dn-m512's A is 512×11008×8 =
+45 MB, past the 33 MB L3), so the SHARED_A pre-pack is a full extra DRAM
+sweep (read A, write packed A) before any FLOP runs, and at ~80 ms per call
+that sweep is a few percent of the whole GEMM.
+
+The fix routes the rung to the square-ish treatment: **PACK_A=False** (the
+micro-kernel reads A from source as strided column broadcasts; the HW
+prefetcher handles the MR=6 concurrent row streams) on the same finer
+TILE_N=4·NELTS. That also retires the rung's special 8 KB KC cap: the cap
+existed to keep the *packed-A* panel near L2, and with no packed panel the
+default 16 KB cap (KC=2048 in f64) applies, halving the per-panel C
+reload/store traffic. Note the "A panel overflows L2" argument from the first
+pass does not return: the unpacked source-A re-read streams from L3 the same
+way at either KC, and the deeper panel simply means fewer C round trips.
+
+Interleaved A/B vs linalg (6 epochs × peak-of-8, f64, Machine A), old
+(SHARED_A, KC≤1024) → new (pack-B-only, KC≤2048):
+
+| Shape | M×N×K | old | new | new/old |
+|---|---|---|---|---|
+| dn-m384 | 384×2048×11008 | 0.974 | 1.005 | +3.3% |
+| dn-m512 | 512×2048×11008 | 0.968 | 0.995 | +2.8% |
+| dn-k4096 | 512×2048×4096 | 0.955 | 0.998 | +4.5% |
+| ffn-dn8k | 512×2048×8192 | 1.075 | 1.053 | −2.0% (stays a WIN) |
+
+The same A/B in f32 (old KC=2048 in elements there) is a uniform win with no
+give-back: dn-m384 0.974 → 1.016, dn-m512 0.976 → 1.011, ffn-dn8k 0.962 →
+1.006, dn-k4096 0.952 → 1.013 (+3.6-6.5%), provided the packed-B tile obeys
+the half-L2 rule below.
+
+In full `bench_focus` (10 epochs, 2σ) `dn-m512` goes **0.956 ± 0.011 LOSE →
+1.002 ± 0.006 tie** (dead parity with linalg), and no other f64 shape moves
+outside its band. The wide-N band measured a wash under the same treatment
+(up-m512 0.998×, oddN 0.996×) and keeps SHARED_A. Bit-identical
+(`verify_dispatch` max_err 0.0, including tall-K M=257 N=575 K=1100).
+
+## Half-L2 packed-B tile (the f32 KC=4096 cliff)
+
+The first tall-K pack-B-only attempt in f32 regressed 8-14% because
+`_l2_resident_kc` sized the packed-B tile (TILE_N × KC) to the *whole*
+per-core L2: in f32 the finer tile is 64 columns and the 16 KB cap allows
+KC=4096, a 64×4096×4 = 1 MB tile that fills the entire 1 MB L2 and evicts
+the A stream and C tiles sweeping through it. The same overflow was latent
+in the wide-N SHARED_A band wherever K reaches 4096: an interleaved A/B on
+f32 512×4096×4096 measured **0.844 (KC=4096) vs 0.991 (KC=2048)** against
+linalg, a 17% cliff, with the K=2048 control shape a dead 0.999 either way.
+(The earlier f32 wide-N tuning that picked KC=4096 was measured on Machine
+B, where the same 1 MB tile is only *half* the 2 MB L2 and wins; the
+byte-based cap carried the byte footprint across machines, but the right
+invariant is the *fraction* of L2.)
+
+`_l2_resident_kc` now sizes the L2 term at **half** the per-core L2. Every
+f64 pick and every Machine B pick already landed on the 16 KB cap, so those
+are unchanged by construction; the only picks that move are the 1 MB/core
+f32 K≥4096 ones, off the measured cliff.
 
 ## Square-ish: pack-B-only / TileK=K (matching stdlib linalg)
 
