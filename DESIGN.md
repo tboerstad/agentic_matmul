@@ -162,6 +162,60 @@ folds into the `m > 192` cache-aware branch instead of its hardcoded KC=512.
 Bit-identical (`verify_dispatch` max_err 0.0). The headline prefill (M=96) is in
 the `m <= 192` band (KC=256) and is untouched.
 
+The cap is now **byte-based** (`cap_bytes`, default 16 KB per packed column;
+the tall-K band passes 8 KB), so narrower dtypes get the same cache footprint
+the band was tuned at in f64: KC=2048 in f64 (identical values to the old
+element cap on every branch, by construction) and KC=4096 in f32.
+`_prefill_kc` gained the matching 4096 rung. See "Wide-N heavy band" below for
+the f32 measurements that motivated it.
+
+## Wide-N heavy band: finer TILE_N + byte-based KC cap (the f32 tuning item)
+
+The compute-bound f32 wide-N band (up-proj M >= 256, 512x4096x4096, odd-N) was
+the open tuning item: a stable 3-7% loss (up-m512 0.970, M512-g 0.964, oddN
+0.961, up-m256 0.945, all interleaved A/B on Machine B, 2 MB/core L2). The
+tiles and KC caps were element counts tuned in f64, and f32 paid twice:
+
+1. **Load balance.** The wide TILE_N = 8*NELTS doubles to 128 columns in f32,
+   so N=11008 splits into 86 j-tiles, 21.5 per core: a ceildiv(86,4)=22
+   makespan where the ideal is 21.5, a ~2-3% straggler tax on every call. The
+   f64 sweeps never saw it because 8*NELTS=64 splits the same N into 172
+   tiles, 43 per core exactly.
+2. **Panel depth.** The KC cap of 2048 *elements* is 16 KB deep per packed
+   column in f64 and only 8 KB in f32, so an f32 K=4096 swept in two k-panels
+   (and paid the C reload/store per panel) where the byte budget f64 was tuned
+   at allows a single C-stored-once panel.
+
+The fix is the same treatment the tall-K heavy band already got: the
+`_wide_n m > 192` branch drops to the finer **TILE_N = 4*NELTS** (2x more
+j-tiles, tighter makespan, packed-B tile at half the L2 instead of all of it),
+and `_l2_resident_kc`'s cap becomes **byte-based** (16 KB per column: KC=2048
+f64, KC=4096 f32; the tall-K band passes 8 KB, keeping its f64 KC=1024).
+Neither lever alone closes M512-g: KC=4096 at the wide tile is a 2 MB packed-B
+tile (the whole L2) and measured *worse* (0.936); at the finer tile it is 1 MB
+and wins.
+
+Interleaved A/B vs linalg (6 epochs x peak-of-8, f32, Machine B):
+
+| Shape | M×N×K | old (tn8, cap 2048) | new (tn4, byte cap) |
+|---|---|---|---|
+| up-m512 | 512×11008×2048 | 0.970 LOSE | 0.999 |
+| M512-g | 512×4096×4096 | 0.964 LOSE | 1.001 |
+| oddN | 512×11007×2048 | 0.961 | 1.004 |
+| up-m256 | 256×11008×2048 | 0.945 LOSE | 0.984 |
+| dn-m512 | 512×2048×11008 | 0.958 | 0.977 |
+
+The finer tile was also measured in f64 on the same branch (Machine B): a
+tie-or-slight-win (up-m512 1.005 vs 0.996, M512-g 0.997 vs 0.991, up-m256
+0.982 vs 0.976), and the f64 KC values are unchanged by construction. Machine
+A has not re-measured the finer wide-N tile; the change follows the tall-K
+precedent (the same tile narrowing lifted that band on Machine A), and on a
+1 MB/core L2 it shrinks the packed-B tile from the whole L2 to half of it. Full bench_focus (10 epochs, 2-sigma): every f32 wide-N
+shape moves to tie (up-m256 1.001, up-m512 1.002, M512-g 0.978, oddN 0.985)
+and the f64 set holds (up-m512 1.003, oddN 0.979, M512-g 0.979, all tie).
+Bit-identical (`verify_dispatch` max_err 0.0). The headline prefill (M=96) is
+in the `m <= 192` band and untouched.
+
 ## Tall-K large-M: cap KC at 1024, finer TILE_N
 
 The `KC = min(K, 2048)` single-panel pick above is right for **wide-N** (K=2048
@@ -182,8 +236,9 @@ Two things go wrong when KC=2048 meets K=11008:
 
 A smaller KC keeps the A panel closer to L2 and was measured uniformly faster on
 tall K, even though it adds k-panels (more C re-traffic) — the A-reuse effect
-dominates. The `_tall_k` `m > 256` branch now passes `_l2_resident_kc(32, k, cap=1024)`
-(a new `cap` argument, default 2048 so `_wide_n` is unchanged), and the whole heavy
+dominates. The `_tall_k` `m > 256` branch now passes `_l2_resident_kc` an
+8 KB per-column cap (KC=1024 in f64, half the default `_wide_n` gets; the cap
+argument has since become byte-based, see above), and the whole heavy
 band (`m >= 192`) drops to the finer `TILE_N = 4·NELTS` (one NR-panel per j-tile),
 which splits N into 2× more j-tiles for a tighter worker makespan and a smaller
 packed-B panel. The `192 <= m <= 256` rung keeps KC=512 (it already used a single
@@ -392,11 +447,54 @@ Full `bench_focus --dtype f32` (10 epochs, 2σ verdict), before → after:
 | sq320 | 0.728 ± 0.016 **LOSE** (337 GFLOPS) | **1.035 ± 0.014 WIN** (509 GFLOPS) |
 
 Nothing else in the f32 set moves outside its noise band (box512 keeps its
-1.07 WIN, sq256 1.05 WIN, the wide-N band's small losses are the separate
-f32-tiling item), and the f64 set is unchanged (verified with a full 10-epoch
-f64 run; `verify_dispatch` max_err 0.0). sq300's residual ~0.93 is the 2D
-grid's masked 44-wide column plus the M-tail, the same masked-tile overhead
-the f64 squares pay at their remainders.
+1.07 WIN, sq256 1.05 WIN, the wide-N band's small losses were the separate
+f32-tiling item, fixed in "Wide-N heavy band" above), and the f64 set is
+unchanged (verified with a full 10-epoch f64 run; `verify_dispatch` max_err
+0.0). sq300's residual (the 2D grid's masked 44-wide column) is fixed by the
+partial-N hot kernel, next section.
+
+## Partial-N panels at full throughput (`_partial_n_microkernel`)
+
+`_masked_microkernel` handles two leftovers with one loop: M-remainder rows
+and partial NR-columns. It is deliberately a cold path (no K-unroll, and the
+A gather runs a per-row `mr < rows` guard on every K-step), which is the
+right trade for the M-tail: at most MR-1 rows of the whole GEMM. It is the
+wrong trade for a partial *column*, because every row block of that column is
+masked: an N-not-multiple-of-NR shape runs `ceildiv(m, MR)` masked tiles per
+K-panel, and once the remainder column is a real fraction of N the whole GEMM
+drops with it.
+
+f32 made this visible. NR doubles to 64 lanes, so sq300 (300 = 4*64 + 44) has
+1 of 5 columns masked, 20% of all tiles, and sat at **0.831 +/- 0.006 LOSE**
+(interleaved, Machine B) while the remainder-free sq320 ran 1.07 WIN at 44%
+more GFLOPS. Tile-shape experiments confirmed the masked column (and nothing
+else) was the cliff: a narrower NR=32 grid (12-wide remainder) lifted sq300 to
+0.878 while an MR=12/NR=32 tile (same padded-FLOP waste, different shape) sank
+to 0.63, so the waste arithmetic could not explain the loss; the per-K-step
+masking overhead did.
+
+The fix uses what the pack already guarantees: the packed B panel is
+zero-padded to full NR, so when all MR rows are live the K-sweep needs no
+masking at all. `_partial_n_microkernel` is the same KU-unrolled loop as
+`_full_microkernel` (same packed/unpacked A addressing), masking only the C
+load and store, once per tile instead of once per K-step. `_packed_gemm` and
+`_pack_b_only_2d` route full-rows partial-N tiles there; M-remainder tails
+keep the masked kernel (their masked work really is a thin slice).
+
+Full bench_focus (10 epochs, 2-sigma verdict), before -> after:
+
+| Shape | dtype | before | after |
+|---|---|---|---|
+| sq300 | f32 | 0.812 +/- 0.043 **LOSE** (395 GFLOPS) | 0.985 +/- 0.049 tie (492 GFLOPS) |
+| sq300 | f64 | 0.998 tie (251 GFLOPS) | **1.084 +/- 0.038 WIN** (271 GFLOPS) |
+| sq320 | f32 | 1.056 WIN | 1.053 WIN (unchanged, no remainder) |
+
+oddN (remainder 63 of N=11007 in f32, 0.6% of its columns) stays at parity as
+before; the kernel matters exactly where the remainder fraction is large.
+Bit-identical: same FMA order per element, the zero columns contribute
+nothing (`verify_dispatch` max_err 0.0 across remainder widths, including the
+N=519..575 sweep that exercises every masked-column width on the square-ish
+branch).
 
 ## Dead end: x86 M-blocking (GotoBLAS loop 3) for the squares
 
