@@ -459,7 +459,9 @@ def _prefill_kc[
     """Run `_prefill` at the comptime KC rung nearest the runtime cache-aware
     `kc`. KC must be a compile-time constant for the micro-kernel, so the
     measured rungs {512, 1024, 2048} are spelled out here, snapping down."""
-    if kc >= 2048:
+    if kc >= 4096:
+        _prefill[dtype, 4096, TILE_N, SHARED_A, PACK_A](c, a, b)
+    elif kc >= 2048:
         _prefill[dtype, 2048, TILE_N, SHARED_A, PACK_A](c, a, b)
     elif kc >= 1024:
         _prefill[dtype, 1024, TILE_N, SHARED_A, PACK_A](c, a, b)
@@ -697,15 +699,21 @@ def _nopack_gemm[
 # ===========================================================================
 
 
-def _l2_resident_kc[dtype: DType](tile_n: Int, k: Int, cap: Int = 2048) -> Int:
+def _l2_resident_kc[
+    dtype: DType
+](tile_n: Int, k: Int, cap_bytes: Int = 16384) -> Int:
     """Cache-aware KC for the prefill GEMM's large-M band: size the packed-B
-    tile (TILE_N x KC) to the per-core L2, then cap at a single `cap`-deep
-    k-panel. The default cap=2048 means K <= 2048 sweeps in one panel, so each
-    L2-resident C micro-tile is stored exactly once instead of once per
-    k-panel. The tall-K band passes cap=1024: with K far above 2048 the
-    stored-once benefit is unreachable, while a 2048-deep packed-A panel
-    overflows L2. See DESIGN.md "_l2_resident_kc"."""
+    tile (TILE_N x KC) to the per-core L2, then cap the panel depth at
+    `cap_bytes` per packed column. The cap is byte-based so every dtype gets
+    the same cache footprint: the default 16 KB is KC=2048 in f64 (the depth
+    the band was tuned at) and KC=4096 in f32, which keeps K <= 4096 f32
+    sweeps in a single panel so each L2-resident C micro-tile is stored
+    exactly once instead of once per k-panel. The tall-K band passes 8 KB
+    (KC=1024 in f64): with K far above the cap the stored-once benefit is
+    unreachable, while a deeper packed-A panel overflows L2. See DESIGN.md
+    "_l2_resident_kc"."""
     comptime elem = size_of[Scalar[dtype]]()
+    var cap = cap_bytes // elem
     var l2 = l2_cache_size()
     if l2 == 0:
         return min(cap, k)
@@ -938,7 +946,11 @@ def _wide_n[
     """Wide-N (N >= K, up-proj-like): the N-balanced 6x32 tile (TILE_N=8*NELTS).
     The older 8x24 tile only for very wide N with tiny M. Small M packs A per
     worker; past the M~192 crossover SHARED_A with a cache-aware KC
-    (L2-resident packed-B tile). DESIGN.md."""
+    (L2-resident packed-B tile) on the finer TILE_N=4*NELTS, the same
+    heavy-band tile the tall-K branch uses: 2x more j-tiles for a tighter
+    worker makespan (f32's doubled NR left N=11008 at 86 wide tiles, 21.5 per
+    core, a ~2-3% straggler tax the f64 sweeps never saw) and a packed-B tile
+    at half the L2 instead of all of it. DESIGN.md "Wide-N heavy band"."""
     comptime NELTS = simd_width_of[dtype]()
     var m = a.rows
     var n = c.cols
@@ -957,9 +969,11 @@ def _wide_n[
     elif m <= 192:
         _prefill[dtype, 256, 8 * NELTS](c, a, b)
     else:
-        # m > 192: SHARED_A + a single C-stored-once k-panel (KC = min(K, 2048)
-        # at the detected L2, see _l2_resident_kc).
-        _prefill_kc[dtype, 8 * NELTS, True](c, a, b, _l2_resident_kc[dtype](64, k))
+        # m > 192: SHARED_A + a single C-stored-once k-panel (KC = min(K, cap)
+        # at the detected L2, see _l2_resident_kc) on the finer heavy-band tile.
+        _prefill_kc[dtype, 4 * NELTS, True](
+            c, a, b, _l2_resident_kc[dtype](4 * NELTS, k)
+        )
 
 
 @always_inline
@@ -985,7 +999,7 @@ def _tall_k[
         # KC=512 single L1-resident k-panel, finer TILE_N.
         _prefill[dtype, 512, 4 * NELTS, True](c, a, b)
     else:
-        var kc = _l2_resident_kc[dtype](32, k, 1024)
+        var kc = _l2_resident_kc[dtype](4 * NELTS, k, 8192)
         _prefill_kc[dtype, 4 * NELTS, True](c, a, b, kc)
 
 
