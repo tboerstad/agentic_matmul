@@ -6,10 +6,18 @@ An experiment in writing optimized matmul kernels in Mojo using only [Claude Cod
 - **Prefill:** 96 × 11008 × 2048 (compute-bound)
 
 Beyond those, the dispatch kernel and the `bench_focus.mojo` harness now run a
-wider shape set and other element types (`--dtype f32/f16/bf16`). The kernel
-tiles and cache-blocking constants are tuned for float64, so float32 currently
-trails `linalg` by a few percent on the compute-bound wide-N band (an open
-tuning item). The float32 small-box band is routed granularity-aware: the
+wider shape set and other element types (`--dtype f32/f16/bf16`). The
+cache-blocking constants are byte-based, so every dtype gets the cache
+footprint the kernels were tuned at in f64. Before that, float32 trailed
+`linalg` by 3-7% across the whole compute-bound wide-N band: the KC cap gave
+f32 half the panel depth in bytes, and the wide TILE_N left N=11008 at 21.5
+j-tiles per core (a ~2-3% straggler tax f64 never saw because its narrower NR
+split the same N evenly). The heavy wide-N band now uses the finer
+TILE_N=4*NELTS (as the tall-K band already did) with a 16 KB-per-column KC
+cap, which lifts the f32 band to parity (interleaved A/B: up-m512 0.970 to
+0.999, M512-g 0.964 to 1.001, oddN 0.961 to 1.004, up-m256 0.945 to 0.984)
+with f64 tie-or-better on the same shapes (see DESIGN.md "Wide-N heavy
+band"). The float32 small-box band is routed granularity-aware: the
 byte-based small-box gates admit twice the N×K area in f32 while the no-pack /
 1D-column hazards scale with the doubled NR=64, which had sunk sq300-f32 to
 0.25× linalg and sq320-f32 to 0.73×; routing those through `_square_ish`'s
@@ -206,7 +214,18 @@ it:
   `512×11007×2048` ran **0.85→1.01** vs `linalg`, with the multiple-of-NR
   `512×11008×2048` already at parity. Every N now holds ~parity regardless of its
   remainder. Bit-identical (`verify_dispatch` max_err 0.0 across remainder widths
-  7/8/24/31 on both the wide-N and square-ish branches).
+  7/8/24/31 on both the wide-N and square-ish branches). A later pass finished
+  the job: that shared masked tile was still a cold-path loop (no K-unroll, a
+  per-row guard on every K-step), which is fine for the thin M-remainder slice
+  it was built for and far too slow when the whole trailing column of an
+  N-not-multiple-of-NR shape is made of it. f32 made that visible (NR doubles
+  to 64, so sq300's 44-wide remainder column is 1 of 5 columns, 20% of all
+  tiles, and the shape sat at **0.81 LOSE** while the remainder-free sq320 ran
+  1.05). Full-rows partial-N tiles now run `_partial_n_microkernel`, the same
+  KU-unrolled sweep as the full kernel masking only the C load/store: sq300-f32
+  **0.812 LOSE → 0.985 tie** (395 → 492 GFLOPS) and sq300-f64 lifts to a
+  **1.084 WIN** (251 → 271 GFLOPS), bit-identical (see DESIGN.md "Partial-N
+  panels at full throughput").
 - **K-unroll must not exceed the register file.** The 6×32 micro-kernel holds
   `MR·NR_VECS = 24` SIMD accumulators, and the comptime k-unroll `KU` keeps
   `KU·NR_VECS` B-vectors live per unrolled step. `KU=2` needs `24 + 8 = 32` zmm
