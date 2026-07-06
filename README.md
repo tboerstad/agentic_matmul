@@ -24,6 +24,10 @@ byte-based small-box gates admit twice the N×K area in f32 while the no-pack /
 balanced 2D grid lifts them 3.8× and 1.5× to ~parity (see DESIGN.md
 "Small-box f32 routing").
 
+See SOL.md for the speed-of-light analysis (measured FMA peak and memory
+bandwidth ceilings, per-shape rooflines, % of SOL standings, and five
+prioritized ideas for the next agents).
+
 ## Results
 
 Peak GFLOPS by hardware (higher is better):
@@ -358,6 +362,7 @@ mojo bench_sweep.mojo --full     # SLOW: full per-M sweep over many aspect ratio
 mojo bench_focus.mojo            # JUDGE A CHANGE: mean ± stdev + 2σ verdict over 10 epochs
 mojo bench_focus.mojo --quick    # fast single-epoch sanity check (NOT for judging)
 python bench_sota.py             # NumPy/SciPy/MKL benchmarks
+bash sol/run.sh                  # measure this machine's SOL (FMA peak + memory BW)
 mojo test_gemm.mojo              # Correctness tests
 mojo verify_dispatch.mojo        # dispatch correctness vs naive (all branches + edge cases)
 mojo verify_f32_routes.mojo      # f32/bf16 small-box routing correctness (byte gates differ from f64)

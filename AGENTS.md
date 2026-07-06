@@ -25,9 +25,16 @@ peak = clock_GHz × doubles_per_SIMD × 2(FMA) × FMA_units × cores
 ```
 For example: 2.8 GHz × 8 (AVX-512) × 2 × 2 (dual FMA) × 4 cores = 358.4 GFLOPS.
 
-**All benchmark numbers in SOTA_RESULTS.md were measured on specific machines — see the Hardware
-Configurations table there for details (Machine A: Intel Xeon @ 2.80 GHz Skylake; Machine B:
-Intel Xeon @ 2.10 GHz Granite Rapids; both 4 cores, AVX-512, KVM). Your results WILL differ.**
+That formula uses the base clock and can undershoot badly: under full AVX-512 FMA
+load these VMs turbo above base (Machine B's paper peak is 268.8 GFLOPS f64, the
+measured peak is ~310). Measure the real ceiling in the same boot with
+`bash sol/run.sh` (FMA peak + DRAM/L3/L2 bandwidth) and use it as the
+denominator for any efficiency claim. See SOL.md for the full speed-of-light
+analysis, per-shape rooflines, and the current % of SOL standings.
+
+**All benchmark numbers in README.md and SOL.md were measured on specific machines
+(Machine A: Intel Xeon @ 2.80 GHz Skylake; Machine B: Intel Xeon @ 2.10 GHz
+Granite Rapids; both 4 cores, AVX-512, KVM). Your results WILL differ.**
 
 ## First-time setup after cloning
 

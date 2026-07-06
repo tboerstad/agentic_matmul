@@ -11,3 +11,5 @@ bench_linalg
 sme
 main
 test_gemm
+sol/sol_fma
+sol/sol_bw
