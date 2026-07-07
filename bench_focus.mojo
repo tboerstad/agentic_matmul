@@ -34,11 +34,12 @@
 #                    numerically; the ratio still measures throughput, not accuracy.
 from gemm import matmul_dispatch
 from matrix import Matrix
+from sol import MachineSol, measure_sol
 from linalg.matmul import matmul as linalg_matmul
 from layout import Coord, TileTensor, row_major
 from std.collections import List
 from std.math import sqrt
-from std.sys import argv
+from std.sys import argv, size_of
 from std.time import perf_counter_ns
 
 
@@ -55,6 +56,39 @@ def fill(mut m: Matrix, seed: Int):
 def round3(x: Float64) -> Float64:
     # Round to 3 decimals for readable output (display only).
     return Float64(Int(x * 1000.0 + 0.5)) / 1000.0
+
+
+# The % of the machine's roofline SOL that `gflops` reaches for one shape.
+# See sol.MachineSol.roofline: the SOL is min(FMA peak, bandwidth * arithmetic
+# intensity), all self-measured this process. This is the number to judge a
+# kernel by; the linalg ratio moves with the nightly and points at the wrong
+# work (SOL.md), while a shape's % of SOL says how much of the machine is left.
+def pct_of_sol[
+    dtype: DType
+](sol: MachineSol, m: Int, n: Int, k: Int, gflops: Float64) -> Float64:
+    var roof = sol.roofline(m, n, k, size_of[Scalar[dtype]]())
+    if roof <= 0.0:
+        return 0.0
+    return 100.0 * gflops / roof
+
+
+def print_sol_banner[dtype: DType](sol: MachineSol):
+    print(
+        "SOL (measured this process, dtype", dtype, "):",
+        "FMA peak", Int(sol.fma_peak), "GFLOPS |",
+        "L3 read", Int(sol.l3_bw), "GB/s |",
+        "DRAM read", Int(sol.dram_bw), "GB/s |",
+        "L3", sol.l3_bytes // (1 << 20), "MB |",
+        sol.cores, "cores",
+    )
+    print(
+        "  (%SOL = dispatch GFLOPS / roofline; roofline = min(FMA peak,"
+        " BW x arithmetic-intensity). Judge by %SOL, not the linalg ratio.)"
+    )
+    print(
+        "  (a bw-bound shape reading > 100% means the harness held its operand"
+        " cache-hot across reps vs the cold-DRAM roofline: SOL.md idea 5.)"
+    )
 
 
 # One epoch for one shape: peak (min-time) GFLOPS over n_runs interleaved reps,
@@ -137,8 +171,9 @@ def shapes() -> Tuple[List[String], List[Int], List[Int], List[Int]]:
 
 # Old single-epoch behavior: one peak ratio per shape, no stdev. Fast, but a
 # single ratio is noise-prone, so this is a sanity check, not a judgment.
-def run_quick[dtype: DType](runs: Int) raises:
+def run_quick[dtype: DType](sol: MachineSol, runs: Int) raises:
     print("=== focused bench --quick (single epoch, peak over", runs, "runs; NOT for judging) | dtype", dtype, "===")
+    print_sol_banner[dtype](sol)
     var sh = shapes()
     var labels = sh[0].copy(); var ms = sh[1].copy(); var ns = sh[2].copy(); var ks = sh[3].copy()
     for s in range(len(ms)):
@@ -147,16 +182,19 @@ def run_quick[dtype: DType](runs: Int) raises:
             "  ", labels[s], "M=", ms[s], "N=", ns[s], "K=", ks[s],
             "| dispatch", Int(r[0]), "| linalg", Int(r[1]),
             "| ratio", round3(r[0] / r[1]),
+            "| %SOL", Int(pct_of_sol[dtype](sol, ms[s], ns[s], ks[s], r[0])),
+            sol.bound(ms[s], ns[s], ks[s], size_of[Scalar[dtype]]()),
         )
 
 
 # The default: EPOCHS independent epochs, report mean +/- stdev + 2-sigma verdict.
-def run_stats[dtype: DType](epochs: Int, runs: Int) raises:
+def run_stats[dtype: DType](sol: MachineSol, epochs: Int, runs: Int) raises:
     print(
         "=== focused bench:", epochs, "epochs x peak-of-", runs,
         "; ratio mean +/- stdev, 2-sigma verdict | dtype", dtype, "===",
     )
     print("(epoch loop is outer so every shape is sampled across the full thermal envelope)")
+    print_sol_banner[dtype](sol)
     var sh = shapes()
     var labels = sh[0].copy(); var ms = sh[1].copy(); var ns = sh[2].copy(); var ks = sh[3].copy()
     var num = len(ms)
@@ -205,22 +243,28 @@ def run_stats[dtype: DType](epochs: Int, runs: Int) raises:
             if v < rmin: rmin = v
             if v > rmax: rmax = v
 
+        var d_mean = dgf_sum[s] / Float64(epochs)
         print(
             "  ", labels[s],
-            "| dispatch", Int(dgf_sum[s] / Float64(epochs)),
+            "| dispatch", Int(d_mean),
             "| linalg", Int(lgf_sum[s] / Float64(epochs)),
             "| ratio", round3(mean), "+/-", round3(sd),
             "[", round3(rmin), "..", round3(rmax), "]",
             tag,
+            "| %SOL", Int(pct_of_sol[dtype](sol, ms[s], ns[s], ks[s], d_mean)),
+            sol.bound(ms[s], ns[s], ks[s], size_of[Scalar[dtype]]()),
         )
 
 
-# Run the chosen mode (quick vs stats) for one compile-time dtype.
+# Run the chosen mode (quick vs stats) for one compile-time dtype. The machine
+# SOL is measured once up front (in the dtype under test) so every shape can be
+# reported as a % of its roofline.
 def run[dtype: DType](quick: Bool, epochs: Int, runs: Int) raises:
+    var sol = measure_sol[dtype]()
     if quick:
-        run_quick[dtype](runs)
+        run_quick[dtype](sol, runs)
     else:
-        run_stats[dtype](epochs, runs)
+        run_stats[dtype](sol, epochs, runs)
 
 
 def main() raises:
