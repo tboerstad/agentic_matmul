@@ -52,10 +52,10 @@ def _is_amd() -> Bool:
     return r.ebx == 0x68747541 and r.edx == 0x69746E65 and r.ecx == 0x444D4163
 
 
-def _detect_l2_size() -> Int:
-    """Walk the `cpuid` cache-parameter leaf and return the L2 data/unified
-    cache size in bytes, or 0 when it can't be determined (non-x86 hosts, or an
-    unsupported leaf)."""
+def _detect_cache_size(want_level: Int) -> Int:
+    """Walk the `cpuid` cache-parameter leaf and return the data/unified cache
+    size in bytes at `want_level` (2 for L2, 3 for L3), or 0 when it can't be
+    determined (non-x86 hosts, or an unsupported leaf)."""
     comptime if not CompilationTarget.is_x86():
         return 0
 
@@ -71,7 +71,7 @@ def _detect_l2_size() -> Int:
 
         var level = Int((r.eax >> 5) & 0x7)
         # Cache type 1 is data, 3 is unified; skip instruction caches.
-        if level == 2 and (ctype == 1 or ctype == 3):
+        if level == want_level and (ctype == 1 or ctype == 3):
             var line_size = Int((r.ebx & 0xFFF) + 1)
             var partitions = Int(((r.ebx >> 12) & 0x3FF) + 1)
             var ways = Int(((r.ebx >> 22) & 0x3FF) + 1)
@@ -82,9 +82,22 @@ def _detect_l2_size() -> Int:
     return 0
 
 
+def _detect_l2_size() -> Int:
+    """The per-core L2 data/unified cache size in bytes, or 0 if undetectable."""
+    return _detect_cache_size(2)
+
+
+def _detect_l3_size() -> Int:
+    """The L3 data/unified cache size in bytes, or 0 if undetectable. On Intel
+    the L3 is shared, so `cpuid` reports the whole cache; on AMD leaf 0x8000001D
+    reports the per-CCX slice."""
+    return _detect_cache_size(3)
+
+
 # Process-global, thread-safe, lazily initialized: the first read runs the
 # `cpuid` walk, every later read returns the memoized value.
 comptime _L2_SIZE = _Global["agentic_matmul_l2_size", _detect_l2_size]
+comptime _L3_SIZE = _Global["agentic_matmul_l3_size", _detect_l3_size]
 
 
 def l2_cache_size() -> Int:
@@ -93,4 +106,12 @@ def l2_cache_size() -> Int:
         return _L2_SIZE.get_or_create_ptr()[]
     except:
         # Detection itself never raises; this only guards the global accessor.
+        return 0
+
+
+def l3_cache_size() -> Int:
+    """L3 cache size in bytes, memoized; 0 if undetectable."""
+    try:
+        return _L3_SIZE.get_or_create_ptr()[]
+    except:
         return 0

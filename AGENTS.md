@@ -85,6 +85,21 @@ call a shape a win or loss when its verdict says so; a `tie` is within noise.
 `--quick` gives the old single-epoch ratios for a fast edit-loop check, but it is
 NOT a basis for judging a change.
 
+**Judge by % of SOL, not the linalg ratio.** `bench_focus` now measures this
+machine's own ceilings in the same process (all-core FMA peak, L3/DRAM read
+bandwidth, L3 size, via `sol.mojo`, a Mojo port of `sol/`) and prints each shape
+as a **%SOL** column: the dispatch GFLOPS as a fraction of that shape's roofline
+(min of the FMA peak and bandwidth × arithmetic intensity), with a `compute`/`bw`
+bound tag. The linalg ratio keeps pointing at the wrong work, because its
+denominator drifts with the nightly and the host: a shape at 0.99 vs linalg can
+be at 92% of SOL (at the wall, nothing to win) while a shape that WINS vs linalg
+sits at 63% of SOL (the real gap). Use %SOL to pick what to work on and to state
+efficiency, and the ratio + 2σ verdict only to gate a regression. A bandwidth-
+bound shape reading over 100% of SOL means the harness is holding its operand
+cache-hot across reps versus the cold-DRAM roofline (see SOL.md idea 5). The SOL
+numbers are re-measured every run, so they transfer across machines and
+nightlies; the tables in SOL.md are from specific boots and will not match yours.
+
 ## Style preferences
 
 - When providing links to the user, always use raw plain text. Do not wrap them in markdown bold (`**`) or other formatting

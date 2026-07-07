@@ -127,18 +127,30 @@ a single thread.
 Ordered by expected value. Judge every kernel change with `mojo
 bench_focus.mojo` (2-sigma verdict), never a single ratio.
 
-## 1. SOL-aware verdicts: report % of roofline, not just ratio-vs-linalg
+## 1. SOL-aware verdicts: report % of roofline, not just ratio-vs-linalg — DONE
 
-Add a tiny FMA-peak + bandwidth self-measurement (port `sol/sol_fma.c` /
-`sol_bw.c` to Mojo, or shell out to them) and have `bench_focus` print each
-shape as a % of its roofline SOL next to the linalg ratio. Motivation: the
-linalg-relative lens has repeatedly pointed agents at the wrong work. The
-"open problem" squares are at 96-97% of the machine peak (tuning them is
-wasted effort), while prefill, a comfortable WIN vs linalg, hides the
-suite's largest real gap at 76% of SOL. A % SOL column also transfers across
-machines and Mojo nightlies, where the linalg denominator keeps moving.
-Cheap, pure tooling, no kernel risk, and it compounds: every later agent
-makes better decisions.
+Implemented. `sol.mojo` is a Mojo port of `sol/sol_fma.c` and `sol/sol_bw.c`
+(plus an L3-size probe added to `cpu_cache.mojo`): it self-measures the
+all-core FMA peak (in the dtype under test), L3 and DRAM read bandwidth, and
+the detected L3 size in the same process as the kernel run. `bench_focus` now
+measures those ceilings once up front, prints a SOL banner, and adds a **%SOL**
+column (dispatch GFLOPS / roofline, where roofline = min(FMA peak, BW ×
+arithmetic intensity) with the bandwidth chosen as L3 when the working set fits
+the detected L3, else DRAM) plus a `compute`/`bw` bound tag on every shape.
+
+The lens change is immediate: on a Machine-A-class box (2.80 GHz, 1 MB/core L2,
+33 MB L3), `bench_focus` reports `sq2048` as a LOSE vs linalg (0.987) yet at
+92% of SOL (at the wall), and `prefill` as a WIN vs linalg (1.117) at only 63%
+of SOL (the real gap). Decode reads above 100% of its cold-DRAM roofline
+because its 180 MB B cannot fit this 33 MB L3, so the harness's keep-B-hot reps
+beat a true cold pass, which is exactly the honesty gap idea 5 calls out.
+
+Because the numbers are re-measured every run, they transfer across machines
+and Mojo nightlies, where the linalg denominator keeps moving. The original
+motivation held: the linalg-relative lens repeatedly pointed agents at the
+wrong work (the near-wall squares vs the real prefill gap). The tables above in
+this file are from a specific Machine-B boot and will differ from any given
+run; trust the `bench_focus` banner for the machine you are on.
 
 ## 2. Fix bf16: 4-5 GFLOPS today, 0.02x linalg, a 60x bug-class win
 
