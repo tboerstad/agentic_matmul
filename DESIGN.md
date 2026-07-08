@@ -637,3 +637,142 @@ or 2D at all: it was the A-pack overhead + per-panel C reloads, fixed by the
 pack-B-only / TileK=K path above (which reads linalg's source rather than guessing
 at the structure from the asm).
 
+
+## AMX bf16: the tdpbf16ps tile kernel (`amx.mojo`)
+
+SOL.md idea 3. Machine-B-class parts (Granite Rapids) report `amx_tile` +
+`amx_bf16`: one `tdpbf16ps` instruction multiplies a 16x32 bf16 tile by a
+32x16 bf16 tile (pair-interleaved) into a 16x16 f32 accumulator tile, about
+1024 flops/cycle/core against 64 for an AVX-512 f32 FMA. Neither the stdlib
+linalg bf16 path (~370 GFLOPS on this part) nor the repo's f32-compute bf16
+path (idea 2, ~300-600 GFLOPS) touches the tile units, so the whole ceiling
+was unclaimed.
+
+The kernel (`amx.mojo`) keeps the repo's N-parallel shape: each worker owns a
+contiguous range of 32-column j-tiles. Per j-tile it pair-interleaves B into
+the VNNI layout (`SIMD.interleave` on two 16-lane bf16 rows emits exactly the
+(b[2k][j], b[2k+1][j]) pair row `tdpbf16ps` wants), then sweeps M in 32-row
+blocks. Each 32x32 C block is a 2x2 grid of accumulator tiles (tmm0-3) that
+stays in TILE REGISTERS across the whole K sweep, so C is written exactly
+once and there is no per-K-panel C traffic at all; the K-step loads two A
+tiles (straight from the row-major source via `tileloadd`'s strided row
+gather, so A is never packed) and two B tiles from the L2-resident packed
+panel, then issues four `tdpbf16ps`. The f32 tiles are `tilestored` to a 4 KB
+scratch and narrowed to bf16 C once per block.
+
+Mojo has no AMX intrinsics, so the tile ops are `inlined_assembly` blocks
+(the same mechanism `cpu_cache.mojo` uses for `cpuid`) over fixed tile
+registers; nothing else touches tmm state, so values persist across the
+separate asm blocks of the K loop. Using AMX at all needs a per-process
+opt-in from the kernel: `arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)`
+(one `external_call["syscall"]`), memoized together with the cpuid feature
+check in `amx_bf16_usable()`. Each worker invocation runs `ldtilecfg` (all 8
+tiles 16 rows x 64 bytes) and `tilerelease` around its j-tile range.
+
+Dispatch gate: bf16 only, above the tiny cutoff, `m % 32 == 0`,
+`n % 16 == 0`, `k % 32 == 0` (an n % 32 == 16 trailing panel runs a 2x1 tile
+column), and `amx_bf16_usable()`. Everything else - every other dtype, every
+non-conforming shape, every non-AMX machine - falls through to the existing
+cascade unchanged (`verify_dispatch` f64 still max_err 0.0). The gate covers
+13 of the 16 bench_focus shapes, including every headline shape except decode
+(M = 1 stays on the GEMV) and the two odd-geometry shapes (oddN, sq300).
+
+Numerics: `tdpbf16ps` accumulates each bf16 pair's f32 products into the f32
+tile per pair-step, which is not bit-identical to the AVX-512 path's
+sequential f32 FMA over k. `verify_f32_routes` covers the AMX shapes (plus
+the 16-column-tail and single-panel edges) against the naive f64 reference:
+max_rel ~0.004, the same single f32-to-bf16 C rounding as the AVX-512 bf16
+path, well inside the 0.02 gate.
+
+Measured on the 2.10 GHz Granite Rapids Machine-B-class box (4 cores, 2 MB/core
+L2), `bench_focus --dtype bf16` quick pass, before (f32-compute path) -> after
+(AMX):
+
+| Shape | before GFLOPS | after GFLOPS | after/linalg |
+|---|---|---|---|
+| prefill | ~500 | 1080 | 3.2 |
+| sq2048 | ~300 | 2756 | 7.3 |
+| sq512 | ~300 | 2431 | 6.5 |
+| up-m512 | ~500 | 2052 | 5.7 |
+| dn-m512 | ~400 | 2132 | 5.8 |
+| M512-g | ~360 | 2123 | 5.9 |
+
+The big squares land at ~28% of the ~9.8 TFLOPS AMX paper peak, inside the
+"even 30% is ~3 TFLOPS" band idea 3 predicted (the 10-epoch 2-sigma table
+lives in SOL.md idea 3). Two consequences for reading `bench_focus`: the bf16
+SOL banner still measures the AVX-512 f32 FMA peak (the compute dtype), so
+AMX shapes read far past 100% of "SOL" - the machine's real bf16 compute
+ceiling is now the tile units, and measuring a tdpbf16ps peak in `sol.mojo`
+is an open follow-up. And the wide-N shapes (prefill, up-m256) sit well below
+the squares: their per-flop pack/stream traffic is higher, and no AMX-side
+tuning (deeper A-tile reuse, pack prefetch) has been tried yet.
+
+## Dead end: the prefill-band C-traffic and pack-overlap ideas (SOL.md idea 4)
+
+Idea 4 proposed taking prefill (96x11008x2048, the m <= 192 wide-N rung:
+KC=256, TILE_N=8*NELTS, per-worker A pack) from 76% toward 90% of SOL via (a)
+a single C-stored-once k-panel with pack-B-only, like the m > 192 bands, and
+(b) pack/compute overlap. Both halves were measured on the Machine-B-class
+box (interleaved A/B, 4-6 epochs x peak-of-6, f64, M=96/192/64 all in-band)
+and neither pays. Every number below is vs the current rung on the same run.
+
+The C-traffic half (a) is refuted directly:
+
+| Variant | M=96 | M=192 | M=64 |
+|---|---|---|---|
+| KC=2048 tn4 pack-B-only (the prescription) | 0.83 | 0.93 | 0.81 |
+| KC=2048 tn8 pack-B-only | 0.85 | 0.93 | 0.82 |
+| KC=2048 tn4 SHARED_A | 0.82 | 0.88 | 0.77 |
+| KC=512 tn8 (packed A) | 0.97 | 0.97 | 1.00 |
+| KC=128 tn8 | 0.91 | 0.93 | 0.93 |
+| TILE_N=4*NELTS at KC=256 | 0.95 | 0.97 | 0.93 |
+| TILE_N=16*NELTS at KC=256 | 0.98 | 0.97 | 0.97 |
+| pack-B-only at KC=256 | 0.96 | 0.96 | 0.95 |
+| j-tile-outer loop order (C tile stays L2-hot), SHARED_A | 0.93 | 0.94 | 0.91 |
+| linalg (its own TileK=K design) | 0.80 | 0.89 | 0.80 |
+
+The deep C-stored-once panel that wins at m > 192 loses here because at small
+M the panel geometry breaks L2 residency: the per-worker working set that
+must stay resident is the packed A panel PLUS the B slab PLUS the C tile, and
+at M <= 192 the KC=256 combination (196 KB A panel + 128 KB slab) is the only
+one that keeps everything hot. Reading B in place instead of packing
+(a `b_k_step` variant of the microkernel) is catastrophic - 0.73 at KC=256,
+0.22 at KC=2048 - the strided (row-stride-apart) B loads stall the FMA loop;
+packing is what makes the K-sweep contiguous, and it is mandatory.
+
+The overlap half (b) is bounded by a phase-split measurement (DO_PACK /
+DO_COMPUTE variants of the same kernel, same run): at M=96 the B pack alone
+is 16% of runtime (10% at M=192, 19% at M=64 - the pack cost per B byte is
+constant while flops per B byte scale with M, which is exactly the band's
+%SOL gradient), compute-only reaches 285 GFLOPS = 92% of the 310 GFLOPS
+measured FMA peak, and pack + compute sum to ~95% of the total: the phases
+are strictly serialized. The pack itself runs at ~59 GB/s aggregate read
+(~15 GB/s/core against the ~27 GB/s/core measured L3 ceiling, i.e. about
+what a read+write copy can do per core), so it is at its own throughput
+floor: full-row software prefetch in `_pack_b_slab` at 2/4/8/16-row
+distances is a wash. Prefetching the NEXT slab in small bursts between
+microkernel sweeps (so the later pack would hit L2) LOSES 2-5% at every
+prefetch locality (t0/t1/t2) - the burst's fills contend with the sweep's
+own L2 traffic, and compute has no memory slack to hide them.
+
+Consequence: with this kernel architecture the prefill band's ceiling is not
+the FMA peak but the serialized pack+compute model, 1/(1/1407 + 1/285) ~ 237
+GFLOPS at M=96 on the boot measured (pack-only "1407 GFLOPS-equivalent"
+time), and the rung was measured at 226-230 = 95-97% OF THAT MODEL. The
+~76%-of-SOL standing is structural: closing it needs a second memory agent
+per core (SMT or a dedicated pack thread) or a fundamentally different B
+handling, not tile tuning. The rung keeps KC=256 / TILE_N=8*NELTS /
+per-worker A pack unchanged.
+
+## SOL.md idea 5 note: decode re-measured at the L3 roofline
+
+The decode GEMV was re-measured on the Machine-B-class box (interleaved A/B,
+6 epochs x peak-of-10, f64): 25 GFLOPS = ~101 GB/s effective, ~94% of the
+same-process measured 108 GB/s L3 read ceiling and above the MKL 24.7 the
+idea cited; the 18 GFLOPS / 72 GB/s figure in SOL.md was that boot's, not a
+kernel property. The idea's specific suggestions all measured worse or flat:
+2 workers 0.50, 3 workers 0.76 (the j-parallelism does NOT self-interfere;
+fewer cores just leave read bandwidth idle), KU=16 0.97, doubled prefetch
+distance 0.98, KU=4 0.98. The kernel is at the wall this boot; the remaining
+open item from idea 5 is the harness-honesty half (a cold-B benchmark
+variant), plus fewer-byte formats (f16/bf16/int8 weights).
