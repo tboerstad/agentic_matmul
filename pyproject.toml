@@ -1,11 +1,11 @@
 [project]
 name = "matmul"
 version = "0.1.0"
-description = "Add your description here"
+description = "Optimized CPU matmul kernels in Mojo, benchmarked against OpenBLAS, MKL, and the Mojo stdlib"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "numpy",
     "scipy",
-    "mkl",  # provides libmkl_rt for the Intel MKL dgemm benchmark in bench_sota.py
+    "mkl",  # provides libmkl_rt for the Intel MKL dgemm benchmark in bench/sota.py
 ]

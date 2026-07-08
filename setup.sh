@@ -18,12 +18,12 @@ uv venv
 source .venv/bin/activate
 uv pip install modular --index https://whl.modular.com/nightly/simple/ --prerelease allow
 
-# Install the Python benchmark deps (numpy/scipy/mkl) so `python bench_sota.py`
+# Install the Python benchmark deps (numpy/scipy/mkl) so `python bench/sota.py`
 # works out of the box, including the Intel MKL dgemm comparison.
 uv pip install numpy scipy mkl
 
 echo ""
 echo "Setup complete! To get started:"
 echo "  source .venv/bin/activate"
-echo "  mojo main.mojo"
-echo "  python bench_sota.py   # NumPy / SciPy / MKL benchmarks"
+echo "  mojo -I . examples/demo.mojo"
+echo "  python bench/sota.py   # NumPy / SciPy / MKL benchmarks"

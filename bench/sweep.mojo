@@ -7,7 +7,7 @@
 #
 # Two modes (pick one on the command line):
 #
-#   mojo bench_sweep.mojo --iterate   (default)
+#   mojo -I . bench/sweep.mojo --iterate   (default)
 #       Fast, surgical pass over the CORNERS & EDGES of the (M,N,K) space,
 #       the shapes most likely to expose a dispatch/tiling weakness or a
 #       regression: square GEMMs (N==K branch boundary), N that doesn't tile
@@ -16,7 +16,7 @@
 #       small-batch, large). ~A few seconds of runtime, built for the
 #       edit-kernel -> remeasure dev loop.
 #
-#   mojo bench_sweep.mojo --full
+#   mojo -I . bench/sweep.mojo --full
 #       The complete picture: a per-M sweep across several aspect ratios
 #       (square, wide-N, tall-K, plus the two Qwen MLP orientations) and a
 #       broad general (M,N,K) shape grid. Slower; run before committing a
@@ -24,8 +24,7 @@
 #
 # The goal is a general-purpose matmul. The Qwen shapes appear here as two
 # aspect ratios among many, with no special status in the sweep.
-from gemm import matmul_dispatch
-from matrix import Matrix
+from matmul import Matrix, matmul_dispatch
 from linalg.matmul import matmul as linalg_matmul
 from layout import Coord, TileTensor, row_major
 from std.collections import List
@@ -174,25 +173,25 @@ def run_full() raises:
     run_set("square sweep (M = N = K)", sq_l, sq_m, sq_n, sq_k, n_runs)
 
     var w_l = List[String]()
-    for i in range(len(ms)): w_l.append("wide")
+    for _ in range(len(ms)): w_l.append("wide")
     run_set("wide-N sweep: N=8192 K=2048", w_l, ms,
             [8192,8192,8192,8192,8192,8192,8192,8192,8192,8192,8192],
             [2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048], n_runs)
 
     var t_l = List[String]()
-    for i in range(len(ms)): t_l.append("tall")
+    for _ in range(len(ms)): t_l.append("tall")
     run_set("tall-K sweep: N=2048 K=8192", t_l, ms,
             [2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048],
             [8192,8192,8192,8192,8192,8192,8192,8192,8192,8192,8192], n_runs)
 
     var up_l = List[String]()
-    for i in range(len(ms)): up_l.append("up  ")
+    for _ in range(len(ms)): up_l.append("up  ")
     run_set("Qwen up/gate proj (wide-N): N=11008 K=2048", up_l, ms,
             [11008,11008,11008,11008,11008,11008,11008,11008,11008,11008,11008],
             [2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048], n_runs)
 
     var dn_l = List[String]()
-    for i in range(len(ms)): dn_l.append("down")
+    for _ in range(len(ms)): dn_l.append("down")
     run_set("Qwen down proj (tall-K): N=2048 K=11008", dn_l, ms,
             [2048,2048,2048,2048,2048,2048,2048,2048,2048,2048,2048],
             [11008,11008,11008,11008,11008,11008,11008,11008,11008,11008,11008], n_runs)

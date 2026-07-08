@@ -5,14 +5,14 @@ stdlib linalg ratio, and that denominator keeps moving (it drifts with the
 Mojo nightly and with the host) while pointing agents at the wrong work: the
 big squares sit at ~0.96 vs linalg yet are already at ~97% of the machine's
 FMA peak, and prefill looks like a comfortable win vs linalg while hiding the
-suite's largest gap to the roofline. See SOL.md.
+suite's largest gap to the roofline. See docs/SOL.md.
 
 This module measures the machine's own ceilings in the same process as the
-kernel run, so `bench_focus` can print each shape as a % of its roofline SOL.
+kernel run, so `bench/focus.mojo` can print each shape as a % of its roofline SOL.
 It is a Mojo port of `sol/sol_fma.c` and `sol/sol_bw.c`, kept in-tree so the
 number transfers across machines and nightlies with no external toolchain.
 
-    from sol import fma_peak_gflops, l3_read_bw_gbs, dram_read_bw_gbs
+    from matmul.sol import fma_peak_gflops, l3_read_bw_gbs, dram_read_bw_gbs
 
     var peak = fma_peak_gflops[DType.float64]()  # all-core FMA peak, GFLOPS
     var l3 = l3_read_bw_gbs()                     # all-core L3 read BW, GB/s
@@ -22,7 +22,7 @@ Every number is hardware- and boot-specific; re-measure in the same boot as
 any kernel benchmark you want to state as a % of SOL.
 """
 
-from amx import (
+from matmul.amx import (
     amx_bf16_usable,
     _amx_configure,
     _amx_release,
@@ -31,7 +31,7 @@ from amx import (
     _tile_dpbf16ps,
     _tile_store,
 )
-from cpu_cache import l3_cache_size
+from matmul.cpu_cache import l3_cache_size
 from std.algorithm.functional import parallelize
 from std.collections import InlineArray
 from std.memory.unsafe_pointer import alloc
@@ -53,7 +53,7 @@ def fma_peak_gflops[dtype: DType](iters: Int = 20_000_000) -> Float64:
     reduced accumulators escape through `sinks` so the work is not dead-code
     eliminated. A single warm chain runs first to reach steady turbo, as the C
     benchmark does. Pass the dtype the kernels actually FMA in: the bf16
-    kernels compute in f32 (gemm._compute_dtype, SOL.md idea 2), so their
+    kernels compute in f32 (microkernel.compute_dtype, docs/SOL.md idea 2), so their
     ceiling is the f32 peak; a raw bf16 chain would measure LLVM's
     element-wise emulation instead, which nothing in the repo runs anymore."""
     comptime W = simd_width_of[dtype]()
@@ -287,7 +287,7 @@ struct MachineSol(Copyable, Movable):
         peak and the bandwidth roofline BW * arithmetic-intensity. Arithmetic
         intensity uses the compulsory traffic (read A + read B + write C
         once); the bandwidth is L3 when that working set fits the detected L3,
-        else DRAM. This reproduces SOL.md's per-shape rooflines from measured
+        else DRAM. This reproduces docs/SOL.md's per-shape rooflines from measured
         ceilings: a big square lands compute-bound at the FMA peak, and M=1
         decode lands bandwidth-bound at 2/elem flops-per-byte times the
         relevant BW. `use_amx` selects the tile-unit compute peak for shapes

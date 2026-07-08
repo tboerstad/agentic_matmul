@@ -1,5 +1,5 @@
+from matmul.tile import Tile
 from std.collections import List
-from tile import Tile
 
 
 struct Matrix[dtype: DType = DType.float64](Movable):
@@ -89,15 +89,3 @@ struct Matrix[dtype: DType = DType.float64](Movable):
                 line += String(self.data[i * self.cols + j])
             line += "]"
             print(line)
-
-
-def main():
-    # float64 (default), built row-by-row
-    var m = Matrix.from_rows([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
-    print("Matrix[float64] 2x3:")
-    m.print()
-
-    # float32
-    var m32 = Matrix[DType.float32].from_rows([[1.0, 2.0], [3.0, 4.0]])
-    print("Matrix[float32] 2x2:")
-    m32.print()

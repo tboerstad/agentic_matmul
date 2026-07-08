@@ -7,7 +7,7 @@ it from the hardware via the x86 `cpuid` instruction: Intel enumerates the
 cache hierarchy through the deterministic cache parameters leaf (EAX = 4), and
 AMD mirrors the identical encoding at leaf 0x8000001D.
 
-    from cpu_cache import l2_cache_size
+    from matmul.cpu_cache import l2_cache_size
 
     var l2 = l2_cache_size()   # bytes, or 0 if undetectable
 
