@@ -106,7 +106,7 @@ Two headlines:
   lower to and emulated element-wise. Fixed since (idea 2 below, DONE): bf16
   now computes in f32 and every shape is a WIN or tie vs linalg. The bf16
   columns above are the historical broken numbers. On AMX parts (this
-  machine), bf16 shapes with M % 32 == N % 16 == K % 32 == 0 now dispatch to
+  machine), bf16 shapes with M % 32 == K % 32 == 0 (any N) now dispatch to
   the tdpbf16ps tile kernel (idea 3 below, DONE) and run 1.1-2.4 TFLOPS,
   past even the f16 column's AVX-512 ceiling.
 
@@ -230,15 +230,20 @@ bench_focus --dtype bf16, 10 epochs, 2-sigma verdicts, mean dispatch GFLOPS:
 | up-m512 | ~405 | **1829** | 5.19 WIN |
 | prefill | ~500 | **1051** | 3.21 WIN |
 
-All 16 shapes WIN (decode, oddN and sq300 stay on the AVX-512 routes: M=1,
-n % 16 != 0, k % 32 != 0). The squares land at ~25% of the ~9.8 TFLOPS AMX
-paper peak — inside the "even 25-30%" band above — and ~3.7x past the 666
-GFLOPS AVX-512 f32 ceiling, so the bf16 %SOL column now reads far past 100%
-on AMX shapes: the banner still measures the AVX-512 f32 FMA peak. Two
-follow-ups for the next agents: measure a `tdpbf16ps` peak in `sol.mojo` so
-the bf16 roofline is honest again, and tune the AMX wide-N band (prefill at
-1.05 TFLOPS is well under the squares' 2.4; the pack/stream traffic per flop
-is higher there, and nothing AMX-side has been tuned yet).
+All 16 shapes WIN (decode and sq300 stay on the AVX-512 routes: M=1 and
+m/k % 32 != 0). The squares land at ~25% of the ~9.8 TFLOPS AMX paper peak —
+inside the "even 25-30%" band above — and ~3.7x past the 666 GFLOPS AVX-512
+f32 ceiling. Two follow-ups have since landed (DESIGN.md "Second pass"): the
+gate now takes any N (a partial trailing panel packs zero-padded and masks
+its C store), which moves oddN (n=11007, previously a fall-through at ~550
+GFLOPS) onto the tiles, and `sol.mojo` measures a `tdpbf16ps` peak so the
+bf16 %SOL column judges AMX-routed shapes against the real tile ceiling
+instead of reading 250-370% of the AVX-512 peak. Still open: tune the AMX
+wide-N band (prefill at 1.05 TFLOPS is well under the squares' 2.4; the
+pack/stream traffic per flop is higher there, and nothing AMX-side has been
+tuned yet), and re-validate the any-N path on an AMX box (the session's VM
+migrated to a non-AMX Skylake host right after the first pass;
+verify_f32_routes carries the shapes).
 
 ## 4. Take prefill from 76% to ~90% of SOL: C traffic and pack overlap — DEAD END (measured)
 

@@ -79,10 +79,14 @@ def main() raises:
     check[DType.bfloat16](257, 2048, 1100, 0.02)  # wide-N SHARED_A, k-panels
     check[DType.bfloat16](257, 512, 2048, 0.02)   # tall-K SHARED_A, M tail
     check[DType.bfloat16](512, 512, 2048, 0.02)   # tall-K big-KC panel
-    # AMX tile-kernel gate shapes (m % 32 == n % 16 == k % 32 == 0): on an
-    # AMX part these run tdpbf16ps; elsewhere they fall through to the
-    # AVX-512 routes above, so the same checks cover both machines.
+    # AMX tile-kernel gate shapes (m % 32 == k % 32 == 0, any n): on an AMX
+    # part these run tdpbf16ps; elsewhere they fall through to the AVX-512
+    # routes above, so the same checks cover both machines.
     check[DType.bfloat16](64, 2064, 64, 0.02)   # AMX, 16-column N tail
     check[DType.bfloat16](32, 16, 1024, 0.02)   # AMX, single 16-column panel
     check[DType.bfloat16](96, 2048, 2048, 0.02)  # AMX, prefill-like
+    check[DType.bfloat16](64, 2063, 64, 0.02)   # AMX, 15-column partial tail
+    check[DType.bfloat16](32, 31, 1024, 0.02)   # AMX, 16 + 15 partial panels
+    check[DType.bfloat16](64, 9, 4096, 0.02)    # AMX, single partial panel
+    check[DType.bfloat16](512, 11007, 128, 0.02)  # AMX, oddN-like wide
     print("all passed")

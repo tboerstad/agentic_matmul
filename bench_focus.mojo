@@ -33,6 +33,7 @@
 #                    f16 and bf16 dispatch computes in f32 (storage stays bf16;
 #                    see gemm._compute_dtype), so dispatch and linalg diverge
 #                    numerically; the ratio still measures throughput, not accuracy.
+from amx import amx_shape_ok
 from gemm import matmul_dispatch, _compute_dtype
 from matrix import Matrix
 from sol import MachineSol, measure_sol
@@ -60,14 +61,27 @@ def round3(x: Float64) -> Float64:
 
 
 # The % of the machine's roofline SOL that `gflops` reaches for one shape.
-# See sol.MachineSol.roofline: the SOL is min(FMA peak, bandwidth * arithmetic
-# intensity), all self-measured this process. This is the number to judge a
-# kernel by; the linalg ratio moves with the nightly and points at the wrong
-# work (SOL.md), while a shape's % of SOL says how much of the machine is left.
+# See sol.MachineSol.roofline: the SOL is min(compute peak, bandwidth *
+# arithmetic intensity), all self-measured this process. This is the number to
+# judge a kernel by; the linalg ratio moves with the nightly and points at the
+# wrong work (SOL.md), while a shape's % of SOL says how much of the machine is
+# left. A bf16 shape that the dispatch routes to the AMX tile kernel is judged
+# against the measured tdpbf16ps peak, not the AVX-512 f32 peak it would
+# otherwise compute in (the same amx_shape_ok gate the dispatch uses).
+def _uses_amx[dtype: DType](sol: MachineSol, m: Int, n: Int, k: Int) -> Bool:
+    return (
+        dtype == DType.bfloat16
+        and sol.amx_peak > 0.0
+        and amx_shape_ok(m, n, k)
+    )
+
+
 def pct_of_sol[
     dtype: DType
 ](sol: MachineSol, m: Int, n: Int, k: Int, gflops: Float64) -> Float64:
-    var roof = sol.roofline(m, n, k, size_of[Scalar[dtype]]())
+    var roof = sol.roofline(
+        m, n, k, size_of[Scalar[dtype]](), _uses_amx[dtype](sol, m, n, k)
+    )
     if roof <= 0.0:
         return 0.0
     return 100.0 * gflops / roof
@@ -82,6 +96,12 @@ def print_sol_banner[dtype: DType](sol: MachineSol):
         "L3", sol.l3_bytes // (1 << 20), "MB |",
         sol.cores, "cores",
     )
+    if sol.amx_peak > 0.0:
+        print(
+            "  AMX bf16 tile peak", Int(sol.amx_peak), "GFLOPS:",
+            "the compute ceiling for shapes the bf16 dispatch routes to the",
+            "tdpbf16ps kernel (m % 32 == k % 32 == 0).",
+        )
     print(
         "  (%SOL = dispatch GFLOPS / roofline; roofline = min(FMA peak,"
         " BW x arithmetic-intensity). Judge by %SOL, not the linalg ratio.)"
@@ -184,7 +204,10 @@ def run_quick[dtype: DType](sol: MachineSol, runs: Int) raises:
             "| dispatch", Int(r[0]), "| linalg", Int(r[1]),
             "| ratio", round3(r[0] / r[1]),
             "| %SOL", Int(pct_of_sol[dtype](sol, ms[s], ns[s], ks[s], r[0])),
-            sol.bound(ms[s], ns[s], ks[s], size_of[Scalar[dtype]]()),
+            sol.bound(
+                ms[s], ns[s], ks[s], size_of[Scalar[dtype]](),
+                _uses_amx[dtype](sol, ms[s], ns[s], ks[s]),
+            ),
         )
 
 
@@ -253,7 +276,10 @@ def run_stats[dtype: DType](sol: MachineSol, epochs: Int, runs: Int) raises:
             "[", round3(rmin), "..", round3(rmax), "]",
             tag,
             "| %SOL", Int(pct_of_sol[dtype](sol, ms[s], ns[s], ks[s], d_mean)),
-            sol.bound(ms[s], ns[s], ks[s], size_of[Scalar[dtype]]()),
+            sol.bound(
+                ms[s], ns[s], ks[s], size_of[Scalar[dtype]](),
+                _uses_amx[dtype](sol, ms[s], ns[s], ks[s]),
+            ),
         )
 
 
@@ -263,7 +289,9 @@ def run_stats[dtype: DType](sol: MachineSol, epochs: Int, runs: Int) raises:
 # in (f32 for bf16 storage), which is the ceiling the kernels can reach; the
 # bandwidth rooflines still use the storage element size via size_of.
 def run[dtype: DType](quick: Bool, epochs: Int, runs: Int) raises:
-    var sol = measure_sol[_compute_dtype[dtype]()]()
+    var sol = measure_sol[
+        _compute_dtype[dtype](), dtype == DType.bfloat16
+    ]()
     if quick:
         run_quick[dtype](sol, runs)
     else:

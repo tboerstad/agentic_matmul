@@ -39,9 +39,10 @@ Using AMX at all needs a per-process opt-in from the kernel:
 in `amx_bf16_usable()`. Each worker invocation runs `ldtilecfg` (all 8 tiles
 16 rows x 64 bytes) and `tilerelease` around its j-tile range.
 
-The dispatch gate (`amx_bf16_usable` plus the shape divisibility checks in
+The dispatch gate (`amx_shape_ok` + `amx_bf16_usable`, both checked in
 gemm.matmul_dispatch) keeps every other dtype and machine byte-identical:
-this path runs only for bf16 with m % 32 == n % 16 == k % 32 == 0 on a CPU
+this path runs only for bf16 with m % 32 == k % 32 == 0 (any n; a partial
+trailing 16-column panel packs zero-padded and masks its C store) on a CPU
 that reports AMX-TILE + AMX-BF16 and grants the tile-data xstate.
 
 Numerics: tdpbf16ps truncates the f32 products of each bf16 pair and adds
@@ -99,6 +100,21 @@ def amx_bf16_usable() -> Bool:
         return _AMX_OK.get_or_create_ptr()[] == 1
     except:
         return False
+
+
+@always_inline
+def amx_shape_ok(m: Int, n: Int, k: Int) -> Bool:
+    """The shape half of the AMX dispatch gate: above the tiny cutoff, whole
+    32-row M blocks, whole 32-deep K pair-steps. Any N works (a partial
+    trailing 16-column panel packs zero-padded and masks its C store), but M
+    and K remainders would read past the source A rows, so they stay on the
+    AVX-512 routes. Shared by matmul_dispatch and the benchmark's roofline
+    pick so the two can never disagree."""
+    return (
+        m * n * k >= (1 << 19)
+        and m % 32 == 0
+        and k % 32 == 0
+    )
 
 
 # --- The tile ops, one comptime-numbered intrinsic each ---------------------
@@ -168,19 +184,32 @@ def _pack_vnni_panel[
     bp: UnsafePointer[Scalar[dtype], bp_org],
     j0: Int,
     k: Int,
+    cols: Int,
 ):
     """Pair-interleave one 16-column panel of B into the VNNI layout: packed
     row k2 (64 bytes) holds (b[2k2][j0+j], b[2k2+1][j0+j]) pairs for j in
-    0..16. `interleave` on two 16-lane rows emits exactly that permutation."""
+    0..cols. `interleave` on two 16-lane rows emits exactly that permutation
+    for a full panel; a partial trailing panel (cols < 16) packs element-wise
+    and zero-fills the dead columns, so the tile FMA runs unmasked and the
+    dead columns contribute nothing (the C store masks them off)."""
     for k2 in range(k // 2):
         var r0 = b.addr(2 * k2, j0)
         var r1 = b.addr(2 * k2 + 1, j0)
         prefetch[PrefetchOptions().for_read().high_locality().to_data_cache()](
             b.addr(2 * k2 + 16, j0)
         )
-        var v0 = r0.load[width=16]()
-        var v1 = r1.load[width=16]()
-        (bp + k2 * 32).store(offset=0, val=v0.interleave(v1))
+        var dst = bp + k2 * 32
+        if cols == 16:
+            var v0 = r0.load[width=16]()
+            var v1 = r1.load[width=16]()
+            dst.store(offset=0, val=v0.interleave(v1))
+        else:
+            for j in range(cols):
+                dst[2 * j] = r0[j]
+                dst[2 * j + 1] = r1[j]
+            for j in range(cols, 16):
+                dst[2 * j] = Scalar[dtype](0)
+                dst[2 * j + 1] = Scalar[dtype](0)
 
 
 @always_inline
@@ -191,19 +220,27 @@ def _amx_store_c_tile[
     scratch: UnsafePointer[Float32, s_org],
     i0: Int,
     j0: Int,
+    cols: Int,
 ):
-    """Narrow one 16x16 f32 scratch tile into the bf16 C block at (i0, j0):
-    the single f32-to-bf16 rounding of the result."""
-    for r in range(16):
-        var v = (scratch + r * 16).load[width=16]()
-        c.addr(i0 + r, j0).store(offset=0, val=v.cast[dtype]())
+    """Narrow one 16x16 f32 scratch tile into the bf16 C block at (i0, j0),
+    keeping only the first `cols` columns (the zero-padded rest of a partial
+    trailing panel): the single f32-to-bf16 rounding of the result."""
+    if cols == 16:
+        for r in range(16):
+            var v = (scratch + r * 16).load[width=16]()
+            c.addr(i0 + r, j0).store(offset=0, val=v.cast[dtype]())
+    else:
+        for r in range(16):
+            var row = c.addr(i0 + r, j0)
+            for j in range(cols):
+                row[j] = scratch[r * 16 + j].cast[dtype]()
 
 
 def amx_bf16_gemm[
     dtype: DType
 ](mut c: Matrix[dtype], a: Matrix[dtype], b: Matrix[dtype]):
     """C = A * B on the AMX tile units. Caller guarantees (via the dispatch
-    gate) bf16 element type, m % 32 == 0, n % 16 == 0, k % 32 == 0, and
+    gate) bf16 element type, `amx_shape_ok(m, n, k)`, and
     `amx_bf16_usable()`."""
     comptime assert dtype == DType.bfloat16, "AMX kernel is bf16-only"
     # On a target without the amx-tile feature the intrinsics below cannot be
@@ -245,10 +282,13 @@ def amx_bf16_gemm[
 
         for jt in range(jt0, jt1):
             var j0 = jt * 32
-            var two_wide = j0 + 32 <= n  # else a single 16-column panel
-            _pack_vnni_panel(b_view, bp, j0, k)
+            var rem = min(32, n - j0)
+            var cols0 = min(16, rem)  # 1..16
+            var cols1 = rem - cols0  # 0..16; > 0 means a second panel
+            var two_wide = cols1 > 0
+            _pack_vnni_panel(b_view, bp, j0, k, cols0)
             if two_wide:
-                _pack_vnni_panel(b_view, bp + half, j0 + 16, k)
+                _pack_vnni_panel(b_view, bp + half, j0 + 16, k, cols1)
 
             for i0 in range(0, m, 32):
                 _tile_zero[0]()
@@ -277,13 +317,13 @@ def amx_bf16_gemm[
                 # Store the f32 tiles once and narrow to bf16 C.
                 _tile_store[0](sc, 64)
                 _tile_store[2](sc + 512, 64)
-                _amx_store_c_tile(c_view, sc, i0, j0)
-                _amx_store_c_tile(c_view, sc + 512, i0 + 16, j0)
+                _amx_store_c_tile(c_view, sc, i0, j0, cols0)
+                _amx_store_c_tile(c_view, sc + 512, i0 + 16, j0, cols0)
                 if two_wide:
                     _tile_store[1](sc + 256, 64)
                     _tile_store[3](sc + 768, 64)
-                    _amx_store_c_tile(c_view, sc + 256, i0, j0 + 16)
-                    _amx_store_c_tile(c_view, sc + 768, i0 + 16, j0 + 16)
+                    _amx_store_c_tile(c_view, sc + 256, i0, j0 + 16, cols1)
+                    _amx_store_c_tile(c_view, sc + 768, i0 + 16, j0 + 16, cols1)
 
         _amx_release()
 

@@ -714,13 +714,49 @@ L2), `bench_focus --dtype bf16` quick pass, before (f32-compute path) -> after
 
 The big squares land at ~28% of the ~9.8 TFLOPS AMX paper peak, inside the
 "even 30% is ~3 TFLOPS" band idea 3 predicted (the 10-epoch 2-sigma table
-lives in SOL.md idea 3). Two consequences for reading `bench_focus`: the bf16
-SOL banner still measures the AVX-512 f32 FMA peak (the compute dtype), so
-AMX shapes read far past 100% of "SOL" - the machine's real bf16 compute
-ceiling is now the tile units, and measuring a tdpbf16ps peak in `sol.mojo`
-is an open follow-up. And the wide-N shapes (prefill, up-m256) sit well below
+lives in SOL.md idea 3). The wide-N shapes (prefill, up-m256) sit well below
 the squares: their per-flop pack/stream traffic is higher, and no AMX-side
 tuning (deeper A-tile reuse, pack prefetch) has been tried yet.
+
+### Second pass: any-N gate, and an honest bf16 roofline
+
+Two follow-ups landed after the first pass:
+
+1. **The N-divisibility gate is gone.** The first gate required n % 16 == 0,
+   which dropped oddN (512x11007x2048) back to the AVX-512 routes at ~550
+   GFLOPS while its N=11008 twin ran ~2000 on the tiles, for one missing
+   column. An N remainder is cheap to support exactly, because the kernel
+   already owns both sides of the boundary: `_pack_vnni_panel` zero-fills the
+   dead columns of a partial trailing panel (the tile FMA runs unmasked and
+   the zero columns contribute nothing), and `_amx_store_c_tile` narrows only
+   the live columns from the f32 scratch into C. M and K remainders stay
+   excluded: those would read past the source A rows (`tileloadd` has no
+   masking), so `amx_shape_ok` requires m % 32 == k % 32 == 0 and any n. The
+   gate predicate is shared between `matmul_dispatch` and `bench_focus` so
+   the dispatch and the roofline pick can never disagree.
+
+2. **The bf16 %SOL column uses a measured tile-unit ceiling.** The SOL banner
+   used to measure only the AVX-512 FMA peak in the compute dtype, so AMX
+   shapes read 250-370% of "SOL". `sol.mojo` now measures the tdpbf16ps peak
+   (`amx_bf16_peak_gflops`: four independent tile accumulator chains per
+   core, tmm0-3 fed from preloaded tmm4-7, covering the instruction's
+   accumulation latency the same way the 16 FMA chains cover the FMA pipes;
+   0 when AMX is not usable), `MachineSol` carries it, and `bench_focus`
+   judges a bf16 shape against it exactly when `amx_shape_ok` says the
+   dispatch routes it to the tiles.
+
+Honesty note on validation: the session's VM migrated from the Granite
+Rapids box to a Skylake-class host (no AMX) between the first pass and this
+one, which validated the fallback for real - the repo compiles and runs on
+the non-AMX host, `verify_f32_routes` (including the new partial-N shapes)
+passes on the AVX-512 routes, and the bf16 suite still WINs there - but it
+means the partial-N tile path and the tdpbf16ps peak have not yet executed
+on AMX hardware. The pack/store helpers (the only changed logic; the tile
+intrinsics are untouched from the validated first pass) are additionally
+checked by a host-side unit test of the VNNI zero-padding and the masked C
+narrowing. The first AMX box to run `mojo verify_f32_routes.mojo` and
+`mojo bench_focus.mojo --dtype bf16` confirms both on the tiles; oddN is
+expected to move from ~550 GFLOPS to its N=11008 twin's ~2 TFLOPS class.
 
 ## Dead end: the prefill-band C-traffic and pack-overlap ideas (SOL.md idea 4)
 

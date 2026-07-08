@@ -22,11 +22,20 @@ Every number is hardware- and boot-specific; re-measure in the same boot as
 any kernel benchmark you want to state as a % of SOL.
 """
 
+from amx import (
+    amx_bf16_usable,
+    _amx_configure,
+    _amx_release,
+    _tile_zero,
+    _tile_load,
+    _tile_dpbf16ps,
+    _tile_store,
+)
 from cpu_cache import l3_cache_size
 from std.algorithm.functional import parallelize
 from std.collections import InlineArray
 from std.memory.unsafe_pointer import alloc
-from std.sys import num_physical_cores, simd_width_of
+from std.sys import CompilationTarget, num_physical_cores, simd_width_of
 from std.time import perf_counter_ns
 
 
@@ -88,6 +97,72 @@ def fma_peak_gflops[dtype: DType](iters: Int = 20_000_000) -> Float64:
     sinks.free()
     # NaN never happens here; the compare just keeps `guard` (and the chains
     # feeding it) live so the timed loop is not optimized away.
+    if guard != guard:
+        return -1.0
+    return total
+
+
+def amx_bf16_peak_gflops(iters: Int = 250_000) -> Float64:
+    """All-core AMX bf16 tile-FMA peak in GFLOPS, or 0 when the AMX kernel is
+    not usable on this machine (so callers can fall back to the AVX-512
+    peak). Each core runs four independent tdpbf16ps accumulator chains
+    (tmm0-3, fed from preloaded tmm4-7): four chains at ~16-cycle throughput
+    cover the instruction's accumulation latency, the same reasoning as the
+    16 FMA chains above. One tile op is 16x16x32 MACs = 16384 flops. The
+    source tiles hold small values so 250k accumulations stay far from
+    overflow, and a stored tile feeds the sink so the loop stays live."""
+    comptime if not CompilationTarget.has_intel_amx():
+        return 0.0
+    if not amx_bf16_usable():
+        return 0.0
+
+    var nw = num_physical_cores()
+    var gfs = alloc[Float64](nw)
+    var sinks = alloc[Float64](nw)
+    var src = alloc[BFloat16](16 * 32)
+    for i in range(16 * 32):
+        src[i] = BFloat16(0.001)
+    var scratch = alloc[Float32](nw * 256)
+
+    def worker(wid: Int) {read iters, mut gfs, mut sinks, read src, mut scratch}:
+        _amx_configure()
+        _tile_zero[0]()
+        _tile_zero[1]()
+        _tile_zero[2]()
+        _tile_zero[3]()
+        _tile_load[4](src, 64)
+        _tile_load[5](src, 64)
+        _tile_load[6](src, 64)
+        _tile_load[7](src, 64)
+        var t0 = perf_counter_ns()
+        for _ in range(iters):
+            _tile_dpbf16ps[0, 4, 6]()
+            _tile_dpbf16ps[1, 4, 7]()
+            _tile_dpbf16ps[2, 5, 6]()
+            _tile_dpbf16ps[3, 5, 7]()
+        var t1 = perf_counter_ns()
+        var sc = scratch + wid * 256
+        _tile_store[0](sc, 64)
+        _amx_release()
+        var s = Float64(0)
+        for i in range(256):
+            s += Float64(sc[i])
+        sinks[wid] = s
+        var flops = Float64(iters) * 4.0 * 16.0 * 16.0 * 32.0 * 2.0
+        gfs[wid] = flops / Float64(t1 - t0)
+
+    worker(0)  # warm to steady turbo (and take the first-use xstate trap)
+    parallelize(worker, nw, nw)
+
+    var total = Float64(0)
+    var guard = Float64(0)
+    for i in range(nw):
+        total += gfs[i]
+        guard += sinks[i]
+    gfs.free()
+    sinks.free()
+    src.free()
+    scratch.free()
     if guard != guard:
         return -1.0
     return total
@@ -176,6 +251,7 @@ struct MachineSol(Copyable, Movable):
     the benchmark reports each shape against."""
 
     var fma_peak: Float64  # all-core FMA peak for the measured dtype, GFLOPS
+    var amx_peak: Float64  # all-core AMX bf16 tile peak, GFLOPS (0 = no AMX)
     var l3_bw: Float64  # all-core L3 read bandwidth, GB/s
     var dram_bw: Float64  # all-core DRAM read bandwidth, GB/s
     var l3_bytes: Int  # detected L3 size, bytes (0 if undetectable)
@@ -188,21 +264,34 @@ struct MachineSol(Copyable, Movable):
         dram_bw: Float64,
         l3_bytes: Int,
         cores: Int,
+        amx_peak: Float64 = 0.0,
     ):
         self.fma_peak = fma_peak
+        self.amx_peak = amx_peak
         self.l3_bw = l3_bw
         self.dram_bw = dram_bw
         self.l3_bytes = l3_bytes
         self.cores = cores
 
-    def roofline(self, m: Int, n: Int, k: Int, elem_bytes: Int) -> Float64:
-        """The speed-of-light GFLOPS for one GEMM shape: min of the FMA peak and
-        the bandwidth roofline BW * arithmetic-intensity. Arithmetic intensity
-        uses the compulsory traffic (read A + read B + write C once); the
-        bandwidth is L3 when that working set fits the detected L3, else DRAM.
-        This reproduces SOL.md's per-shape rooflines from measured ceilings: a
-        big square lands compute-bound at the FMA peak, and M=1 decode lands
-        bandwidth-bound at 2/elem flops-per-byte times the relevant BW."""
+    def _compute_peak(self, use_amx: Bool) -> Float64:
+        """The compute ceiling for one shape: the tile-unit peak when the
+        shape runs on the AMX kernel, else the AVX-512 FMA peak."""
+        if use_amx and self.amx_peak > 0:
+            return self.amx_peak
+        return self.fma_peak
+
+    def roofline(
+        self, m: Int, n: Int, k: Int, elem_bytes: Int, use_amx: Bool = False
+    ) -> Float64:
+        """The speed-of-light GFLOPS for one GEMM shape: min of the compute
+        peak and the bandwidth roofline BW * arithmetic-intensity. Arithmetic
+        intensity uses the compulsory traffic (read A + read B + write C
+        once); the bandwidth is L3 when that working set fits the detected L3,
+        else DRAM. This reproduces SOL.md's per-shape rooflines from measured
+        ceilings: a big square lands compute-bound at the FMA peak, and M=1
+        decode lands bandwidth-bound at 2/elem flops-per-byte times the
+        relevant BW. `use_amx` selects the tile-unit compute peak for shapes
+        the bf16 dispatch routes to the AMX kernel."""
         var flops = 2.0 * Float64(m) * Float64(n) * Float64(k)
         var bytes = Float64((m * k + k * n + m * n) * elem_bytes)
         var ai = flops / bytes
@@ -211,9 +300,11 @@ struct MachineSol(Copyable, Movable):
         if self.l3_bytes > 0 and footprint <= self.l3_bytes:
             bw = self.l3_bw
         var bw_roof = bw * ai
-        return min(self.fma_peak, bw_roof)
+        return min(self._compute_peak(use_amx), bw_roof)
 
-    def bound(self, m: Int, n: Int, k: Int, elem_bytes: Int) -> String:
+    def bound(
+        self, m: Int, n: Int, k: Int, elem_bytes: Int, use_amx: Bool = False
+    ) -> String:
         """"compute" or "bw": which ceiling the shape's roofline hit."""
         var flops = 2.0 * Float64(m) * Float64(n) * Float64(k)
         var bytes = Float64((m * k + k * n + m * n) * elem_bytes)
@@ -221,18 +312,25 @@ struct MachineSol(Copyable, Movable):
         var bw = self.dram_bw
         if self.l3_bytes > 0 and footprint <= self.l3_bytes:
             bw = self.l3_bw
-        if bw * (flops / bytes) < self.fma_peak:
+        if bw * (flops / bytes) < self._compute_peak(use_amx):
             return "bw"
         return "compute"
 
 
-def measure_sol[dtype: DType]() -> MachineSol:
+def measure_sol[dtype: DType, WITH_AMX_BF16: Bool = False]() -> MachineSol:
     """Measure this machine's ceilings for `dtype` in the current process: the
-    all-core FMA peak, L3 and DRAM read bandwidth, and the detected L3 size."""
+    all-core FMA peak, L3 and DRAM read bandwidth, and the detected L3 size.
+    WITH_AMX_BF16 additionally measures the tdpbf16ps tile peak (bf16 storage
+    runs the AMX kernel on eligible shapes, so its compute ceiling is the tile
+    units, not the AVX-512 f32 pipes it computes in elsewhere)."""
+    var amx = Float64(0)
+    comptime if WITH_AMX_BF16:
+        amx = amx_bf16_peak_gflops()
     return MachineSol(
         fma_peak=fma_peak_gflops[dtype](),
         l3_bw=l3_read_bw_gbs(),
         dram_bw=dram_read_bw_gbs(),
         l3_bytes=l3_cache_size(),
         cores=num_physical_cores(),
+        amx_peak=amx,
     )
