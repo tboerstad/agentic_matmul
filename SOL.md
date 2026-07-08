@@ -203,7 +203,11 @@ design details in DESIGN.md "AMX bf16"). The xstate request is the one
 `arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)` syscall via
 `external_call`, memoized with the cpuid AMX-TILE/AMX-BF16 check; the tile
 ops (`ldtilecfg`, `tileloadd`, `tdpbf16ps`, `tilestored`, `tilerelease`) are
-`inlined_assembly` blocks because Mojo exposes no AMX intrinsics. The kernel
+LLVM's immediate-tile-register AMX intrinsics via `llvm_intrinsic`,
+comptime-gated on `CompilationTarget.has_intel_amx()` so non-AMX targets
+compile the old cascade unchanged (Mojo cannot express the `x86_amx` IR
+type the register-allocated `*.internal` intrinsic family needs, so the
+fixed-register family is the fit). The kernel
 is N-parallel over 32-column j-tiles: B is VNNI pair-interleaved per j-tile
 (`SIMD.interleave`), A is read unpacked by `tileloadd`'s strided row gather,
 and each 32x32 C block is a 2x2 grid of f32 accumulator tiles that stays in

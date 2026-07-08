@@ -21,6 +21,24 @@ Shape of the kernel:
   * The f32 accumulator tiles are stored to a small scratch and narrowed to
     the bf16 C once per block.
 
+The tile instructions are LLVM's immediate-tile-register AMX intrinsics
+(`llvm.x86.tileloadd64`, `llvm.x86.tdpbf16ps`, ..., the same family clang's
+`_tile_loadd`-style intrinsics lower to) through `llvm_intrinsic`, with the
+tile numbers as compile-time parameters so they land as the immediates the
+intrinsics require. LLVM's other AMX family (`*.internal`, whose values the
+register allocator assigns) needs the `x86_amx` IR type, which Mojo cannot
+express, so the fixed-register form is the right fit; nothing else in a
+worker touches tile state, so fixed tmm numbers are safe. Everything is
+comptime-gated on `CompilationTarget.has_intel_amx()`: on a target without
+the amx-tile feature none of the intrinsics are instantiated (they would be
+rejected at instruction selection), and the dispatch gate folds to False.
+
+Using AMX at all needs a per-process opt-in from the kernel:
+`arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)` (one
+`external_call["syscall"]`), memoized together with the cpuid feature check
+in `amx_bf16_usable()`. Each worker invocation runs `ldtilecfg` (all 8 tiles
+16 rows x 64 bytes) and `tilerelease` around its j-tile range.
+
 The dispatch gate (`amx_bf16_usable` plus the shape divisibility checks in
 gemm.matmul_dispatch) keeps every other dtype and machine byte-identical:
 this path runs only for bf16 with m % 32 == n % 16 == k % 32 == 0 on a CPU
@@ -42,16 +60,22 @@ from std.math import ceildiv
 from std.memory import stack_allocation
 from std.memory.unsafe_pointer import alloc
 from std.sys import CompilationTarget, num_physical_cores
-from std.sys.intrinsics import inlined_assembly, prefetch, PrefetchOptions
+from std.sys.intrinsics import (
+    llvm_intrinsic,
+    prefetch,
+    PrefetchOptions,
+)
 
 
 def _detect_amx_bf16() -> Int:
     """1 when the CPU reports AMX-TILE + AMX-BF16 (cpuid leaf 7 EDX bits 24
     and 22) AND the kernel grants the tile-data xstate
-    (arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)); else 0. The
-    syscall is Linux-specific, which is fine: the permission request only
-    runs after the cpuid gate passes, and AMX parts are Linux servers."""
-    comptime if not CompilationTarget.is_x86():
+    (arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)); else 0. The cpuid
+    re-check on top of the comptime target feature guards against running a
+    binary on a different host than it was compiled on. The syscall is
+    Linux-specific, which is fine: it only runs after both gates pass, and
+    AMX parts are Linux servers."""
+    comptime if not CompilationTarget.has_intel_amx():
         return 0
     var r = cpuid(7, 0)
     if (r.edx >> 24) & 1 == 0 or (r.edx >> 22) & 1 == 0:
@@ -66,11 +90,52 @@ comptime _AMX_OK = _Global["agentic_matmul_amx_bf16", _detect_amx_bf16]
 
 def amx_bf16_usable() -> Bool:
     """True when the AMX bf16 tile kernel can run on this machine, memoized
-    (cpuid + one syscall on first call, a load afterwards)."""
+    (cpuid + one syscall on first call, a load afterwards). Comptime-False
+    on targets without the amx-tile feature, so the dispatch branch folds
+    away entirely there."""
+    comptime if not CompilationTarget.has_intel_amx():
+        return False
     try:
         return _AMX_OK.get_or_create_ptr()[] == 1
     except:
         return False
+
+
+# --- The tile ops, one comptime-numbered intrinsic each ---------------------
+
+
+@always_inline
+def _tile_zero[t: Int]():
+    llvm_intrinsic["llvm.x86.tilezero", NoneType](Int8(t))
+
+
+@always_inline
+def _tile_load[
+    t: Int, dtype: DType, org: Origin
+](p: UnsafePointer[Scalar[dtype], org], stride_bytes: Int):
+    """tileloadd tmm{t} <- 16 rows of 64 bytes at `p`, rows `stride_bytes`
+    apart."""
+    llvm_intrinsic["llvm.x86.tileloadd64", NoneType](
+        Int8(t), p, Int64(stride_bytes)
+    )
+
+
+@always_inline
+def _tile_dpbf16ps[dst: Int, src_a: Int, src_b: Int]():
+    """tmm{dst} (16x16 f32) += tmm{src_a} (16x32 bf16) * tmm{src_b} (32x16
+    bf16, pair-interleaved)."""
+    llvm_intrinsic["llvm.x86.tdpbf16ps", NoneType](
+        Int8(dst), Int8(src_a), Int8(src_b)
+    )
+
+
+@always_inline
+def _tile_store[
+    t: Int, org: MutOrigin
+](p: UnsafePointer[Float32, org], stride_bytes: Int):
+    llvm_intrinsic["llvm.x86.tilestored64", NoneType](
+        Int8(t), p, Int64(stride_bytes)
+    )
 
 
 @always_inline
@@ -85,21 +150,14 @@ def _amx_configure():
     comptime for t in range(8):
         cfg[16 + 2 * t] = 64  # colsb, low byte
         cfg[48 + t] = 16  # rows
-    inlined_assembly[
-        "ldtilecfg ($0)",
-        NoneType,
-        constraints="r,~{memory}",
-        has_side_effect=True,
-    ](cfg)
+    llvm_intrinsic["llvm.x86.ldtilecfg", NoneType](cfg)
 
 
 @always_inline
 def _amx_release():
     """Return the tile file to the init state so later thread work carries no
     tile xstate."""
-    inlined_assembly[
-        "tilerelease", NoneType, constraints="", has_side_effect=True
-    ]()
+    llvm_intrinsic["llvm.x86.tilerelease", NoneType]()
 
 
 @always_inline
@@ -148,6 +206,11 @@ def amx_bf16_gemm[
     gate) bf16 element type, m % 32 == 0, n % 16 == 0, k % 32 == 0, and
     `amx_bf16_usable()`."""
     comptime assert dtype == DType.bfloat16, "AMX kernel is bf16-only"
+    # On a target without the amx-tile feature the intrinsics below cannot be
+    # instruction-selected; `amx_bf16_usable()` is comptime-False there, so
+    # this body is unreachable and can compile to nothing.
+    comptime if not CompilationTarget.has_intel_amx():
+        return
 
     var c_view = c.noalias_view()
     var a_view = a.noalias_view()
@@ -188,20 +251,11 @@ def amx_bf16_gemm[
                 _pack_vnni_panel(b_view, bp + half, j0 + 16, k)
 
             for i0 in range(0, m, 32):
+                _tile_zero[0]()
+                _tile_zero[2]()
                 if two_wide:
-                    inlined_assembly[
-                        "tilezero %tmm0\ntilezero %tmm1\ntilezero %tmm2\ntilezero %tmm3",
-                        NoneType,
-                        constraints="",
-                        has_side_effect=True,
-                    ]()
-                else:
-                    inlined_assembly[
-                        "tilezero %tmm0\ntilezero %tmm2",
-                        NoneType,
-                        constraints="",
-                        has_side_effect=True,
-                    ]()
+                    _tile_zero[1]()
+                    _tile_zero[3]()
 
                 # K sweep: 32 bf16 (16 pairs) per step; C tiles stay in
                 # registers for the whole sweep.
@@ -209,43 +263,27 @@ def amx_bf16_gemm[
                     var a0 = a_view.addr(i0, 2 * p2)
                     var a1 = a_view.addr(i0 + 16, 2 * p2)
                     var b0 = bp + p2 * 32
+                    _tile_load[4](a0, a_stride)
+                    _tile_load[5](a1, a_stride)
+                    _tile_load[6](b0, 64)
+                    _tile_dpbf16ps[0, 4, 6]()
+                    _tile_dpbf16ps[2, 5, 6]()
                     if two_wide:
                         var b1 = bp + half + p2 * 32
-                        inlined_assembly[
-                            "tileloadd ($0,$1,1), %tmm4\ntileloadd ($2,$1,1), %tmm5\ntileloadd ($3,$4,1), %tmm6\ntileloadd ($5,$4,1), %tmm7\ntdpbf16ps %tmm6, %tmm4, %tmm0\ntdpbf16ps %tmm7, %tmm4, %tmm1\ntdpbf16ps %tmm6, %tmm5, %tmm2\ntdpbf16ps %tmm7, %tmm5, %tmm3",
-                            NoneType,
-                            constraints="r,r,r,r,r,r,~{memory}",
-                            has_side_effect=True,
-                        ](a0, a_stride, a1, b0, Int(64), b1)
-                    else:
-                        inlined_assembly[
-                            "tileloadd ($0,$1,1), %tmm4\ntileloadd ($2,$1,1), %tmm5\ntileloadd ($3,$4,1), %tmm6\ntdpbf16ps %tmm6, %tmm4, %tmm0\ntdpbf16ps %tmm6, %tmm5, %tmm2",
-                            NoneType,
-                            constraints="r,r,r,r,r,~{memory}",
-                            has_side_effect=True,
-                        ](a0, a_stride, a1, b0, Int(64))
+                        _tile_load[7](b1, 64)
+                        _tile_dpbf16ps[1, 4, 7]()
+                        _tile_dpbf16ps[3, 5, 7]()
 
                 # Store the f32 tiles once and narrow to bf16 C.
+                _tile_store[0](sc, 64)
+                _tile_store[2](sc + 512, 64)
+                _amx_store_c_tile(c_view, sc, i0, j0)
+                _amx_store_c_tile(c_view, sc + 512, i0 + 16, j0)
                 if two_wide:
-                    inlined_assembly[
-                        "tilestored %tmm0, ($0,$4,1)\ntilestored %tmm1, ($1,$4,1)\ntilestored %tmm2, ($2,$4,1)\ntilestored %tmm3, ($3,$4,1)",
-                        NoneType,
-                        constraints="r,r,r,r,r,~{memory}",
-                        has_side_effect=True,
-                    ](sc, sc + 256, sc + 512, sc + 768, Int(64))
-                    _amx_store_c_tile(c_view, sc, i0, j0)
+                    _tile_store[1](sc + 256, 64)
+                    _tile_store[3](sc + 768, 64)
                     _amx_store_c_tile(c_view, sc + 256, i0, j0 + 16)
-                    _amx_store_c_tile(c_view, sc + 512, i0 + 16, j0)
                     _amx_store_c_tile(c_view, sc + 768, i0 + 16, j0 + 16)
-                else:
-                    inlined_assembly[
-                        "tilestored %tmm0, ($0,$2,1)\ntilestored %tmm2, ($1,$2,1)",
-                        NoneType,
-                        constraints="r,r,r,~{memory}",
-                        has_side_effect=True,
-                    ](sc, sc + 256, Int(64))
-                    _amx_store_c_tile(c_view, sc, i0, j0)
-                    _amx_store_c_tile(c_view, sc + 256, i0 + 16, j0)
 
         _amx_release()
 

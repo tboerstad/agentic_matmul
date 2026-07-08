@@ -660,14 +660,29 @@ gather, so A is never packed) and two B tiles from the L2-resident packed
 panel, then issues four `tdpbf16ps`. The f32 tiles are `tilestored` to a 4 KB
 scratch and narrowed to bf16 C once per block.
 
-Mojo has no AMX intrinsics, so the tile ops are `inlined_assembly` blocks
-(the same mechanism `cpu_cache.mojo` uses for `cpuid`) over fixed tile
-registers; nothing else touches tmm state, so values persist across the
-separate asm blocks of the K loop. Using AMX at all needs a per-process
-opt-in from the kernel: `arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)`
-(one `external_call["syscall"]`), memoized together with the cpuid feature
-check in `amx_bf16_usable()`. Each worker invocation runs `ldtilecfg` (all 8
-tiles 16 rows x 64 bytes) and `tilerelease` around its j-tile range.
+The tile ops go through `llvm_intrinsic` on LLVM's immediate-tile-register
+AMX intrinsics (`llvm.x86.ldtilecfg`, `llvm.x86.tileloadd64`,
+`llvm.x86.tdpbf16ps`, `llvm.x86.tilestored64`, `llvm.x86.tilerelease`; the
+family clang's `_tile_loadd`-style builtins lower to), with the tile numbers
+as comptime parameters so they land as the immediates the intrinsics
+require. LLVM's other AMX family (`*.internal`, whose tile values the
+register allocator assigns) needs the `x86_amx` IR type, which Mojo cannot
+express, so the fixed-register form is the right fit; nothing else in a
+worker touches tile state, so fixed tmm numbers are safe. (A first version
+used `inlined_assembly` blocks; the intrinsics emit the same instructions at
+the same measured throughput, and drop the per-block memory-clobber
+barriers.) The whole kernel and its dispatch gate are comptime-gated on
+`CompilationTarget.has_intel_amx()`: on a target without the amx-tile
+feature the intrinsics are never instantiated (they cannot be
+instruction-selected there) and `amx_bf16_usable()` folds to False, so
+non-AMX machines compile exactly the old cascade. Using AMX at all also
+needs a per-process opt-in from the kernel:
+`arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)` (one
+`external_call["syscall"]`), memoized together with a runtime cpuid re-check
+(a binary can run on a different host than it was compiled on) in
+`amx_bf16_usable()`. Each worker invocation runs `ldtilecfg` (all 8 tiles 16
+rows x 64 bytes, from a 64-byte-aligned config block - ldtilecfg #GPs on an
+unaligned one) and `tilerelease` around its j-tile range.
 
 Dispatch gate: bf16 only, above the tiny cutoff, `m % 32 == 0`,
 `n % 16 == 0`, `k % 32 == 0` (an n % 32 == 16 trailing panel runs a 2x1 tile

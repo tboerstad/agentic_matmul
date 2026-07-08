@@ -30,8 +30,8 @@ That took every bf16 shape from 0.005-0.07× linalg to a WIN or tie over 10
 epochs (prefill 1 → 216 GFLOPS at 1.22× linalg, decode 2 → 42 at 3.9×; see
 DESIGN.md "bf16: keep bf16 storage, compute in f32" and SOL.md idea 2). On
 CPUs with Intel AMX (`amx_tile` + `amx_bf16`, e.g. Granite Rapids), bf16
-additionally dispatches to a `tdpbf16ps` tile kernel (`amx.mojo`, inline
-assembly; SOL.md idea 3) for shapes with M % 32 == N % 16 == K % 32 == 0:
+additionally dispatches to a `tdpbf16ps` tile kernel (`amx.mojo`, LLVM AMX
+intrinsics via `llvm_intrinsic`; SOL.md idea 3) for shapes with M % 32 == N % 16 == K % 32 == 0:
 2x2 f32 accumulator tiles stay in tile registers across the whole K sweep,
 A is read unpacked by `tileloadd`'s strided gather, and B is VNNI
 pair-interleaved per j-tile. That raises the bf16 ceiling roughly 7x past
