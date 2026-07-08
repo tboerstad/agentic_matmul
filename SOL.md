@@ -105,7 +105,10 @@ Two headlines:
   dropped to 4-5 GFLOPS, 0.02x linalg, because LLVM has no bf16 SIMD FMA to
   lower to and emulated element-wise. Fixed since (idea 2 below, DONE): bf16
   now computes in f32 and every shape is a WIN or tie vs linalg. The bf16
-  columns above are the historical broken numbers.
+  columns above are the historical broken numbers. On AMX parts (this
+  machine), bf16 shapes with M % 32 == K % 32 == 0 (any N) now dispatch to
+  the tdpbf16ps tile kernel (idea 3 below, DONE) and run 1.1-2.4 TFLOPS,
+  past even the f16 column's AVX-512 ceiling.
 
 ## SOTA baselines (bench_sota.py, this boot, separate processes)
 
@@ -193,40 +196,90 @@ so the bf16 %SOL column is a real f32-peak roofline instead of the
 emulated-FMA rate. `avx512_bf16`'s `vdpbf16ps` remains an optional second
 step on machines that have it (this one does not).
 
-## 3. AMX tile microkernel for bf16: raise the ceiling ~15x
+## 3. AMX tile microkernel for bf16: raise the ceiling ~15x — DONE
 
-This part has `amx_bf16`/`amx_tile`: `tdpbf16ps` does a 16x32 by 32x16 tile
-FMA into f32 accumulators, ~1024 flops/cycle/core, ~9.8 TFLOPS paper across
-4 cores (vs 666 GFLOPS AVX-512 f32). linalg does not use it (bf16 linalg
-measured ~290 GFLOPS), so even 25-30% of the AMX paper peak is ~10x the best
-bf16 number on the machine today. Ingredients: request the AMX xstate from
-the OS (`arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA=18)`, one
-syscall via `external_call`), `ldtilecfg`, then `tdpbf16ps` through
-`llvm_intrinsic`. B must be packed K-pairs-interleaved, which the packed
-kernels' pack stage can produce. Start with one serial 32x32 C tile kernel
-vs naive (tolerance check), then graft onto `_packed_gemm`'s tiling. High
-effort, highest ceiling in the repo. Gate it on `os_is_linux()` plus a cpuid
-check so other machines keep the current path. Watch for AMX clock/license
-throttling: measure the f64 suite before/after to confirm no regression.
+Implemented as prescribed (`amx.mojo`, dispatched from `matmul_dispatch`;
+design details in DESIGN.md "AMX bf16"). The xstate request is the one
+`arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)` syscall via
+`external_call`, memoized with the cpuid AMX-TILE/AMX-BF16 check; the tile
+ops (`ldtilecfg`, `tileloadd`, `tdpbf16ps`, `tilestored`, `tilerelease`) are
+LLVM's immediate-tile-register AMX intrinsics via `llvm_intrinsic`,
+comptime-gated on `CompilationTarget.has_intel_amx()` so non-AMX targets
+compile the old cascade unchanged (Mojo cannot express the `x86_amx` IR
+type the register-allocated `*.internal` intrinsic family needs, so the
+fixed-register family is the fit). The kernel
+is N-parallel over 32-column j-tiles: B is VNNI pair-interleaved per j-tile
+(`SIMD.interleave`), A is read unpacked by `tileloadd`'s strided row gather,
+and each 32x32 C block is a 2x2 grid of f32 accumulator tiles that stays in
+tile registers across the whole K sweep (C stored once, then narrowed to
+bf16). Gated to bf16 with m % 32 == n % 16 == k % 32 == 0 above the tiny
+cutoff on a machine that grants AMX; everything else falls through to the
+existing cascade unchanged (verify_dispatch f64 max_err 0.0, and the f64
+suite re-ran clean).
 
-## 4. Take prefill from 76% to ~90% of SOL: C traffic and pack overlap
+Measured on this Machine-B-class box (2.10 GHz Granite Rapids, 4 cores),
+bench_focus --dtype bf16, 10 epochs, 2-sigma verdicts, mean dispatch GFLOPS:
 
-Prefill (M=96) runs in the m <= 192 wide-N band with KC=256, so the 8.5 MB C
-is loaded and stored K/KC = 8 times per call (~135 MB of extra C traffic,
-roughly 12% of runtime at L3 bandwidth). The heavy bands already won their
-last 2-6% by moving to a single C-stored-once k-panel (see DESIGN.md
-`_l2_resident_kc`), and the same treatment is untried here: with pack-B-only
-and a deeper KC, the per-worker packed-B tile (TILE_N x KC) still fits half
-the L2 while A (1.6 MB) streams from L3 unpacked. If the C-traffic fix
-lands, the remaining gap is pack/compute serialization; try double-buffering
-the B j-tile pack (pack tile j+1 while computing tile j, or prefetch the
-next source panel during the current microkernel sweep). Prefill is the
-headline shape; +10% of SOL is ~30 GFLOPS, the largest available compute win
-in f64/f32.
+| Shape | before (f32-compute path) | after (AMX) | vs linalg |
+|---|---|---|---|
+| sq2048 | ~296 | **2438** | 6.67 WIN |
+| sq384 | ~250 | **2262** | 6.67 WIN |
+| sq1024 | ~286 | **2247** | 6.20 WIN |
+| dn-m512 | ~300 | **1923** | 5.46 WIN |
+| M512-g | ~330 | **1912** | 5.36 WIN |
+| up-m512 | ~405 | **1829** | 5.19 WIN |
+| prefill | ~500 | **1051** | 3.21 WIN |
+
+All 16 shapes WIN (decode and sq300 stay on the AVX-512 routes: M=1 and
+m/k % 32 != 0). The squares land at ~25% of the ~9.8 TFLOPS AMX paper peak —
+inside the "even 25-30%" band above — and ~3.7x past the 666 GFLOPS AVX-512
+f32 ceiling. Two follow-ups have since landed (DESIGN.md "Second pass"): the
+gate now takes any N (a partial trailing panel packs zero-padded and masks
+its C store), which moves oddN (n=11007, previously a fall-through at ~550
+GFLOPS) onto the tiles, and `sol.mojo` measures a `tdpbf16ps` peak so the
+bf16 %SOL column judges AMX-routed shapes against the real tile ceiling
+instead of reading 250-370% of the AVX-512 peak. Still open: tune the AMX
+wide-N band (prefill at 1.05 TFLOPS is well under the squares' 2.4; the
+pack/stream traffic per flop is higher there, and nothing AMX-side has been
+tuned yet), and re-validate the any-N path on an AMX box (the session's VM
+migrated to a non-AMX Skylake host right after the first pass;
+verify_f32_routes carries the shapes).
+
+## 4. Take prefill from 76% to ~90% of SOL: C traffic and pack overlap — DEAD END (measured)
+
+Both halves of this idea were implemented and measured on a Machine-B-class
+box, and neither pays; the full experiment tables are in DESIGN.md "Dead
+end: the prefill-band C-traffic and pack-overlap ideas". Summary: the
+C-stored-once deeper k-panel (pack-B-only KC=2048, the m > 192 treatment)
+runs 0.83 vs the current rung at M=96 — at small M the deep panel breaks the
+L2 residency of the packed-A panel + B slab + C tile, which the KC=256
+geometry is the only one to preserve (every KC/TILE_N/pack-choice neighbor
+was swept; all lose). A phase-split measurement (pack-only / compute-only
+variants of the same kernel) shows the real structure: the B pack is 16% of
+runtime at M=96 and runs at its own per-core copy-throughput floor, compute
+alone reaches 92% of the FMA peak, and the two are strictly serialized.
+Prefetch-based overlap (full-row pack prefetch at any distance; bursts of
+next-slab prefetches between microkernel sweeps at t0/t1/t2 locality) is a
+wash to a 2-5% LOSS. The rung's ~76% of SOL equals ~96% of the serialized
+pack+compute model, so ~90% of SOL is unreachable with this kernel
+architecture; the levers left are a second memory agent per core (SMT /
+dedicated pack thread) or fewer B bytes per flop (narrower dtypes — which is
+what idea 3's AMX path now delivers for bf16).
 
 ## 5. Decode: close the gap to the L3 roofline, and make the benchmark honest
 
-Decode sits at 72 GB/s effective vs a measured 108 GB/s L3 read ceiling, and
+UPDATE (2026-07-08, Machine-B-class boot): the performance half no longer
+reproduces. Decode re-measured 25 GFLOPS = ~101 GB/s effective, ~94% of the
+same-process 108 GB/s L3 read ceiling and above the MKL 24.7 cited below —
+the 18 GFLOPS / 72 GB/s standing was boot-specific. The idea's tuning
+suggestions all measured worse or flat (2 workers 0.50x, 3 workers 0.76x,
+KU=16 0.97x, doubled prefetch distance 0.98x; DESIGN.md "SOL.md idea 5
+note"). What remains open from this idea is the benchmark-honesty half (the
+cold-B variant below) and fewer-byte weight formats (bf16 decode now rides
+idea 2's path at ~2.1x linalg; int8 weights would halve bytes again).
+
+Original analysis: decode sits at 72 GB/s effective vs a measured 108 GB/s
+L3 read ceiling, and
 MKL demonstrates 99 GB/s (24.7 GFLOPS) on the same machine, so ~1.4x is on
 the table. Profile where the bytes go: per-worker chunk size vs L1
 (the current L1-resident column chunks), prefetch distance, and whether

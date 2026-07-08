@@ -1,3 +1,4 @@
+from amx import amx_bf16_gemm, amx_bf16_usable, amx_shape_ok
 from cpu_cache import l2_cache_size
 from matrix import Matrix
 from tile import Tile
@@ -1190,6 +1191,7 @@ def matmul_dispatch[
     authoritative dispatch map; each regime's helper holds the tile picks and
     the per-branch rationale.
 
+        bf16 + AMX, M%32=K%32=0  amx_bf16_gemm  tdpbf16ps tile kernel
         tiny  M*N*K < 2^19       _serial_gemm  serial, no threads/packing
         M == 1                   _decode_gemv  j-parallel GEMV, streams B once
         M in 2..5                _small_batch  packed MR=M, reuse B across rows
@@ -1210,6 +1212,16 @@ def matmul_dispatch[
     var m = a.rows
     var n = c.cols
     var k = a.cols
+
+    # bf16 on an AMX part: the tdpbf16ps tile kernel (SOL.md idea 3), gated
+    # to the tile geometry it handles (whole 32-row M blocks and 32-deep K
+    # pair-steps; any N) and to above the tiny cutoff. Every other dtype,
+    # machine, and shape falls through to the cascade unchanged.
+    comptime if dtype == DType.bfloat16:
+        if amx_shape_ok(m, n, k) and amx_bf16_usable():
+            amx_bf16_gemm(c, a, b)
+            return
+
     if m * n * k < (1 << 19):
         _serial_gemm[dtype, 6, 2](c, a, b)
     elif m == 1:

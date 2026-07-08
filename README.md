@@ -28,7 +28,16 @@ at 1-5 GFLOPS): the pack stages widen A/B panels to f32 as they copy, the
 no-pack and GEMV paths widen on load, and C narrows once per tile store.
 That took every bf16 shape from 0.005-0.07× linalg to a WIN or tie over 10
 epochs (prefill 1 → 216 GFLOPS at 1.22× linalg, decode 2 → 42 at 3.9×; see
-DESIGN.md "bf16: keep bf16 storage, compute in f32" and SOL.md idea 2).
+DESIGN.md "bf16: keep bf16 storage, compute in f32" and SOL.md idea 2). On
+CPUs with Intel AMX (`amx_tile` + `amx_bf16`, e.g. Granite Rapids), bf16
+additionally dispatches to a `tdpbf16ps` tile kernel (`amx.mojo`, LLVM AMX
+intrinsics via `llvm_intrinsic`; SOL.md idea 3) for shapes with M % 32 == K % 32 == 0 (any N):
+2x2 f32 accumulator tiles stay in tile registers across the whole K sweep,
+A is read unpacked by `tileloadd`'s strided gather, and B is VNNI
+pair-interleaved per j-tile. That raises the bf16 ceiling roughly 7x past
+both linalg and the machine's AVX-512 f32 peak (sq2048 ~2.7 TFLOPS, the
+heavy band 1.8-2.4 TFLOPS, prefill ~1.1 TFLOPS on the 2.10 GHz 4-core
+Granite Rapids box; see DESIGN.md "AMX bf16").
 
 See SOL.md for the speed-of-light analysis (measured FMA peak and memory
 bandwidth ceilings, per-shape rooflines, % of SOL standings, and five
