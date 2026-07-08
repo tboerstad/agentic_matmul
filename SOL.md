@@ -101,9 +101,11 @@ Two headlines:
 - **f16 is a large undocumented win**: the generic microkernel lowers to
   native `avx512_fp16` FMA and runs 2.4-2.9x faster than linalg (which stays
   around 350 GFLOPS) at ~77% of the 2x-f32 ceiling.
-- **bf16 is broken**: the same generic microkernel drops to 4-5 GFLOPS,
-  0.02x linalg. LLVM has no bf16 SIMD FMA to lower to, so it emulates
-  element-wise. Every bf16 shape is a 20-60x LOSE.
+- **bf16 was broken at the time of this table**: the generic microkernel
+  dropped to 4-5 GFLOPS, 0.02x linalg, because LLVM has no bf16 SIMD FMA to
+  lower to and emulated element-wise. Fixed since (idea 2 below, DONE): bf16
+  now computes in f32 and every shape is a WIN or tie vs linalg. The bf16
+  columns above are the historical broken numbers.
 
 ## SOTA baselines (bench_sota.py, this boot, separate processes)
 
@@ -152,18 +154,44 @@ wrong work (the near-wall squares vs the real prefill gap). The tables above in
 this file are from a specific Machine-B boot and will differ from any given
 run; trust the `bench_focus` banner for the machine you are on.
 
-## 2. Fix bf16: 4-5 GFLOPS today, 0.02x linalg, a 60x bug-class win
+## 2. Fix bf16: 4-5 GFLOPS today, 0.02x linalg, a 60x bug-class win — DONE
 
-The dtype-generic microkernel emulates bf16 FMA element-wise (no native bf16
-SIMD FMA exists). Fix: keep bf16 storage and convert to f32 in registers,
-FMA in f32, convert C back once. The packing stage already touches every
-element, so upconversion can ride the pack for B and A (packed panels become
-f32), with only load-side conversion in the no-pack/GEMV paths (a bf16 load
-plus a 16-bit shift makes an f32). Ceiling is the f32 peak (666 GFLOPS);
-linalg's ~290 shows conversion-in-loop already sustains ~44% of it, so
-pack-time conversion should beat linalg. `avx512_bf16`'s `vdpbf16ps` is an
-optional second step. Verify vs naive with a tolerance (bf16 accumulation
-differs by construction); `verify_f32_routes.mojo` shows the pattern.
+Implemented as prescribed: bf16 keeps bf16 storage for A, B and C and
+computes in f32 (`gemm._compute_dtype`). The upconversion rides the pack for
+the packed kernels (`_pack_a_panel`/`_pack_b_slab` widen as they copy, so
+packed panels are f32 and the hot K-sweep is exactly the f32 microkernel),
+the no-pack and GEMV paths widen on load (`load_a_col`/`load_b_row` take a
+cast target), and C narrows once per register-tile store. The decode GEMV
+accumulates into an f32 staging row (a bf16 accumulator would round to 8
+mantissa bits every KU steps) while B streams in bf16 at half the f32 bytes.
+Tile geometry (NELTS/NR/TILE_N) and the byte-based routing gates follow the
+compute dtype, so bf16 rides the f32-measured dispatch map; the storage-byte
+gates initially routed bf16 sq320 onto the no-pack path at 0.54 vs linalg,
+and routing by compute bytes brought it back (DESIGN.md "bf16: keep bf16
+storage, compute in f32"). Every cast folds away when storage equals
+compute: verify_dispatch (f64) still prints max_err 0.0.
+
+Measured on a Machine-A-class box (2.80 GHz Skylake, 4 cores, no
+avx512_bf16), bench_focus 10 epochs, 2-sigma verdicts, before -> after:
+
+| Shape | before (disp / ratio) | after (disp / ratio) |
+|---|---|---|
+| decode | 2 / 0.29 | **42 / 3.87 WIN** |
+| prefill | 1 / 0.006 | **216 / 1.22 WIN** |
+| sq2048 | 1 / 0.005 | **242 / 1.10 WIN** |
+| up-m512 | 1 / 0.005 | **405 / 1.85 WIN** |
+| dn-m512 | 0 / 0.005 | **242 / 1.06 WIN** |
+| sq300 | 0 / 0.013 | **161 / 1.43 WIN** |
+
+All 16 shapes: 14 WIN, 2 tie (sq128, sq256), no losses. The wide-N band
+lands at 360-405 GFLOPS, past the ~350 the f16 path gets from linalg and
+approaching the f32 kernels on the same shapes. Correctness is gated by
+`verify_f32_routes.mojo`, which now covers every dispatch route in bf16
+against a naive f64 reference: max_rel ~0.006, the single f32-to-bf16
+rounding of C. `bench_focus` measures its SOL banner in the compute dtype,
+so the bf16 %SOL column is a real f32-peak roofline instead of the
+emulated-FMA rate. `avx512_bf16`'s `vdpbf16ps` remains an optional second
+step on machines that have it (this one does not).
 
 ## 3. AMX tile microkernel for bf16: raise the ceiling ~15x
 
@@ -207,9 +235,10 @@ thread; try 2-3 workers). Second, the benchmark keeps B hot in L3 across
 reps, which a real single-pass decode never sees; add a cold-B variant
 (rotate through several 180 MB B buffers so each rep starts uncached) so
 wins are real. Past the roofline, the only lever is fewer bytes: f16 decode
-already measures 93 GFLOPS, and a working bf16 path (ideas 2/3) halves bytes
-again. An int8-weight GEMV with f32 accumulate would quadruple effective
-decode throughput vs f64 at the same bandwidth.
+already measures 93 GFLOPS, and the bf16 path (idea 2, now DONE: bf16 decode
+measured 42 GFLOPS / 3.9x linalg on a Machine-A box) halves bytes again. An
+int8-weight GEMV with f32 accumulate would quadruple effective decode
+throughput vs f64 at the same bandwidth.
 
 ## Honorable mentions
 
