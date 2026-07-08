@@ -31,12 +31,12 @@
 #   --dtype T        element type: f64 (default), f32, f16, or bf16. The whole
 #                    A/B/C path and both kernels run in T. f16 accumulates in
 #                    f16 and bf16 dispatch computes in f32 (storage stays bf16;
-#                    see gemm._compute_dtype), so dispatch and linalg diverge
+#                    see microkernel.compute_dtype), so dispatch and linalg diverge
 #                    numerically; the ratio still measures throughput, not accuracy.
-from amx import amx_shape_ok
-from gemm import matmul_dispatch, _compute_dtype
-from matrix import Matrix
-from sol import MachineSol, measure_sol
+from matmul import Matrix, matmul_dispatch
+from matmul.amx import amx_shape_ok
+from matmul.microkernel import compute_dtype
+from matmul.sol import MachineSol, measure_sol
 from linalg.matmul import matmul as linalg_matmul
 from layout import Coord, TileTensor, row_major
 from std.collections import List
@@ -64,7 +64,7 @@ def round3(x: Float64) -> Float64:
 # See sol.MachineSol.roofline: the SOL is min(compute peak, bandwidth *
 # arithmetic intensity), all self-measured this process. This is the number to
 # judge a kernel by; the linalg ratio moves with the nightly and points at the
-# wrong work (SOL.md), while a shape's % of SOL says how much of the machine is
+# wrong work (docs/SOL.md), while a shape's % of SOL says how much of the machine is
 # left. A bf16 shape that the dispatch routes to the AMX tile kernel is judged
 # against the measured tdpbf16ps peak, not the AVX-512 f32 peak it would
 # otherwise compute in (the same amx_shape_ok gate the dispatch uses).
@@ -108,7 +108,7 @@ def print_sol_banner[dtype: DType](sol: MachineSol):
     )
     print(
         "  (a bw-bound shape reading > 100% means the harness held its operand"
-        " cache-hot across reps vs the cold-DRAM roofline: SOL.md idea 5.)"
+        " cache-hot across reps vs the cold-DRAM roofline: docs/SOL.md idea 5.)"
     )
 
 
@@ -290,7 +290,7 @@ def run_stats[dtype: DType](sol: MachineSol, epochs: Int, runs: Int) raises:
 # bandwidth rooflines still use the storage element size via size_of.
 def run[dtype: DType](quick: Bool, epochs: Int, runs: Int) raises:
     var sol = measure_sol[
-        _compute_dtype[dtype](), dtype == DType.bfloat16
+        compute_dtype[dtype](), dtype == DType.bfloat16
     ]()
     if quick:
         run_quick[dtype](sol, runs)
@@ -321,7 +321,7 @@ def main() raises:
         i += 1
 
     # dtype is a compile-time parameter, so dispatch the string to the matching
-    # instantiation. Default is f64, so a bare `mojo bench_focus.mojo` is unchanged.
+    # instantiation. Default is f64, so a bare `mojo -I . bench/focus.mojo` is unchanged.
     if dt == "f32":
         run[DType.float32](quick, epochs, runs)
     elif dt == "f16":

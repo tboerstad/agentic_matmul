@@ -29,10 +29,10 @@ That formula uses the base clock and can undershoot badly: under full AVX-512 FM
 load these VMs turbo above base (Machine B's paper peak is 268.8 GFLOPS f64, the
 measured peak is ~310). Measure the real ceiling in the same boot with
 `bash sol/run.sh` (FMA peak + DRAM/L3/L2 bandwidth) and use it as the
-denominator for any efficiency claim. See SOL.md for the full speed-of-light
+denominator for any efficiency claim. See docs/SOL.md for the full speed-of-light
 analysis, per-shape rooflines, and the current % of SOL standings.
 
-**All benchmark numbers in README.md and SOL.md were measured on specific machines
+**All benchmark numbers in README.md and docs/SOL.md were measured on specific machines
 (Machine A: Intel Xeon @ 2.80 GHz Skylake; Machine B: Intel Xeon @ 2.10 GHz
 Granite Rapids; both 4 cores, AVX-512, KVM). Your results WILL differ.**
 
@@ -40,7 +40,7 @@ Granite Rapids; both 4 cores, AVX-512, KVM). Your results WILL differ.**
 
 1. Run `bash setup.sh` to install dependencies (uv, latest Mojo nightly — MAX 26.5 → Mojo 1.0.0b3)
 2. Activate the venv: `source .venv/bin/activate`
-3. Verify the setup works: `mojo main.mojo`
+3. Verify the setup works: `mojo -I . examples/demo.mojo`
 
 If an existing `.venv` has a stale nightly, the build can fail with errors like
 `'def' functions will soon stop implying 'raises'` (an intermediate nightly
@@ -68,6 +68,12 @@ The code targets Mojo 1.0.0b3+.
 - Mojo source files use the `.mojo` extension
 - The Mojo compiler and runtime are installed in `.venv/` via `uv`
 - Always activate the venv before running `mojo` commands
+- The library lives in the `matmul/` package; benchmarks in `bench/`, tests in
+  `tests/`, docs in `docs/`. Run every Mojo script from the repo root with
+  `-I .` so the package resolves: `mojo -I . bench/focus.mojo`
+- After a kernel change, gate correctness with `mojo -I . tests/test_dispatch.mojo`
+  (all f64 dispatch branches and edge cases) and
+  `mojo -I . tests/test_dtypes.mojo` (f32/bf16 routes, incl. AMX shapes)
 
 ## Judging a perf change (read before you claim a win or a loss)
 
@@ -77,7 +83,7 @@ swings as real kernel wins or losses (e.g. up-m512 at 0.79 in one launch, 1.04 i
 the next, byte-identical code). Do not trust one ratio, and do not compare
 absolute GFLOPS across separate process launches.
 
-To decide whether a shape genuinely won or lost, run `mojo bench_focus.mojo`
+To decide whether a shape genuinely won or lost, run `mojo -I . bench/focus.mojo`
 (no flag). It runs the shape set for 10 independent epochs, each a peak over 12
 interleaved A/B reps, and prints the ratio's mean ± stdev with a 2σ verdict:
 WIN (mean − 2σ > 1.0), LOSE (mean + 2σ < 1.0), or tie (band straddles 1.0). Only
@@ -85,9 +91,9 @@ call a shape a win or loss when its verdict says so; a `tie` is within noise.
 `--quick` gives the old single-epoch ratios for a fast edit-loop check, but it is
 NOT a basis for judging a change.
 
-**Judge by % of SOL, not the linalg ratio.** `bench_focus` now measures this
+**Judge by % of SOL, not the linalg ratio.** `bench/focus.mojo` now measures this
 machine's own ceilings in the same process (all-core FMA peak, L3/DRAM read
-bandwidth, L3 size, via `sol.mojo`, a Mojo port of `sol/`) and prints each shape
+bandwidth, L3 size, via `matmul/sol.mojo`, a Mojo port of `sol/`) and prints each shape
 as a **%SOL** column: the dispatch GFLOPS as a fraction of that shape's roofline
 (min of the FMA peak and bandwidth × arithmetic intensity), with a `compute`/`bw`
 bound tag. The linalg ratio keeps pointing at the wrong work, because its
@@ -96,9 +102,9 @@ be at 92% of SOL (at the wall, nothing to win) while a shape that WINS vs linalg
 sits at 63% of SOL (the real gap). Use %SOL to pick what to work on and to state
 efficiency, and the ratio + 2σ verdict only to gate a regression. A bandwidth-
 bound shape reading over 100% of SOL means the harness is holding its operand
-cache-hot across reps versus the cold-DRAM roofline (see SOL.md idea 5). The SOL
+cache-hot across reps versus the cold-DRAM roofline (see docs/SOL.md idea 5). The SOL
 numbers are re-measured every run, so they transfer across machines and
-nightlies; the tables in SOL.md are from specific boots and will not match yours.
+nightlies; the tables in docs/SOL.md are from specific boots and will not match yours.
 
 ## Style preferences
 

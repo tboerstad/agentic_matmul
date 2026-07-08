@@ -5,7 +5,7 @@ Measures:
   - SciPy BLAS dgemm (OpenBLAS backend) direct call
   - Intel MKL dgemm via ctypes
 
-Shapes (from bench_matmul.mojo):
+Shapes (the headline Qwen MLP shapes):
   - Decode:  M=1,   N=11008, K=2048  (single-token)
   - Prefill: M=96,  N=11008, K=2048  (batch)
 

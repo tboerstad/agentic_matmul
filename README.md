@@ -5,7 +5,7 @@ An experiment in writing optimized matmul kernels in Mojo using only [Claude Cod
 - **Decode:** 1 × 11008 × 2048 (memory-bandwidth bound)
 - **Prefill:** 96 × 11008 × 2048 (compute-bound)
 
-Beyond those, the dispatch kernel and the `bench_focus.mojo` harness now run a
+Beyond those, the dispatch kernel and the `bench/focus.mojo` harness now run a
 wider shape set and other element types (`--dtype f32/f16/bf16`). The
 cache-blocking constants are byte-based, so every dtype gets the cache
 footprint the kernels were tuned at in f64. Before that, float32 trailed
@@ -16,30 +16,30 @@ split the same N evenly). The heavy wide-N band now uses the finer
 TILE_N=4*NELTS (as the tall-K band already did) with a 16 KB-per-column KC
 cap, which lifts the f32 band to parity (interleaved A/B: up-m512 0.970 to
 0.999, M512-g 0.964 to 1.001, oddN 0.961 to 1.004, up-m256 0.945 to 0.984)
-with f64 tie-or-better on the same shapes (see DESIGN.md "Wide-N heavy
+with f64 tie-or-better on the same shapes (see docs/DESIGN.md "Wide-N heavy
 band"). The float32 small-box band is routed granularity-aware: the
 byte-based small-box gates admit twice the N×K area in f32 while the no-pack /
 1D-column hazards scale with the doubled NR=64, which had sunk sq300-f32 to
 0.25× linalg and sq320-f32 to 0.73×; routing those through `_square_ish`'s
-balanced 2D grid lifts them 3.8× and 1.5× to ~parity (see DESIGN.md
+balanced 2D grid lifts them 3.8× and 1.5× to ~parity (see docs/DESIGN.md
 "Small-box f32 routing"). bfloat16 keeps bf16 storage and computes in f32
 (AVX-512 has no bf16 SIMD FMA, so a bf16 accumulator emulates element-wise
 at 1-5 GFLOPS): the pack stages widen A/B panels to f32 as they copy, the
 no-pack and GEMV paths widen on load, and C narrows once per tile store.
 That took every bf16 shape from 0.005-0.07× linalg to a WIN or tie over 10
 epochs (prefill 1 → 216 GFLOPS at 1.22× linalg, decode 2 → 42 at 3.9×; see
-DESIGN.md "bf16: keep bf16 storage, compute in f32" and SOL.md idea 2). On
+docs/DESIGN.md "bf16: keep bf16 storage, compute in f32" and docs/SOL.md idea 2). On
 CPUs with Intel AMX (`amx_tile` + `amx_bf16`, e.g. Granite Rapids), bf16
-additionally dispatches to a `tdpbf16ps` tile kernel (`amx.mojo`, LLVM AMX
-intrinsics via `llvm_intrinsic`; SOL.md idea 3) for shapes with M % 32 == K % 32 == 0 (any N):
+additionally dispatches to a `tdpbf16ps` tile kernel (`matmul/amx.mojo`, LLVM AMX
+intrinsics via `llvm_intrinsic`; docs/SOL.md idea 3) for shapes with M % 32 == K % 32 == 0 (any N):
 2x2 f32 accumulator tiles stay in tile registers across the whole K sweep,
 A is read unpacked by `tileloadd`'s strided gather, and B is VNNI
 pair-interleaved per j-tile. That raises the bf16 ceiling roughly 7x past
 both linalg and the machine's AVX-512 f32 peak (sq2048 ~2.7 TFLOPS, the
 heavy band 1.8-2.4 TFLOPS, prefill ~1.1 TFLOPS on the 2.10 GHz 4-core
-Granite Rapids box; see DESIGN.md "AMX bf16").
+Granite Rapids box; see docs/DESIGN.md "AMX bf16").
 
-See SOL.md for the speed-of-light analysis (measured FMA peak and memory
+See docs/SOL.md for the speed-of-light analysis (measured FMA peak and memory
 bandwidth ceilings, per-shape rooflines, % of SOL standings, and five
 prioritized ideas for the next agents).
 
@@ -65,22 +65,43 @@ Peak GFLOPS by hardware (higher is better):
 | **Mojo (agentic matmul)** | 13.9 | **28.5** |
 | Mojo linalg (stdlib) | 5.9 | 11.4 |
 
+## Layout
+
+```
+matmul/           the library (a Mojo package)
+  dispatch.mojo     matmul_dispatch: shape gates, cache heuristics, tile picks
+  microkernel.mojo  RegisterTile, operand loaders, the three micro-kernels
+  packed.mojo       packed_gemm (the workhorse) and the pack-B-only 2D grid
+  gemv.mojo         decode_gemv (M = 1)
+  nopack.mojo       serial_gemm (tiny) and nopack_gemm (M-parallel, no packing)
+  amx.mojo          Intel AMX bf16 tile kernel (tdpbf16ps)
+  matrix.mojo       Matrix, the row-major 2D buffer the kernels operate on
+  tile.mojo         Tile, a zero-cost window into a row-major buffer
+  cpu_cache.mojo    memoized cpuid L2/L3 detection
+  sol.mojo          speed-of-light self-measurement (Mojo port of sol/)
+bench/            benchmarks (focus.mojo, sweep.mojo, linalg_baseline.mojo, sota.py)
+tests/            correctness suites (test_basic, test_dispatch, test_dtypes)
+examples/         demo.mojo, the post-setup smoke test
+docs/             DESIGN.md, SOL.md, COMPARISON.md
+sol/              C speed-of-light tools (FMA peak + memory bandwidth)
+```
+
 ## Kernels
 
-`gemm.mojo` keeps only the state-of-the-art kernels — the earlier evolution
+The library keeps only the state-of-the-art kernels — the earlier evolution
 steps (naive, tiled, simd, parallel, register-blocked, packed, comptime, goto,
 and the v2 prefill kernel) have been removed. `matmul_dispatch` routes each
 shape to the fastest of these four:
 
 Every kernel is built on two shared, zero-cost abstractions:
 
-- **`RegisterTile`** (`gemm.mojo`) — an MR×(NR_VECS·NELTS) block of C held in
+- **`RegisterTile`** (`matmul/microkernel.mojo`) — an MR×(NR_VECS·NELTS) block of C held in
   SIMD registers and swept over K with `rank1_update`. The compiler flattens its
   `InlineArray` accumulator into registers, so the FMA/load/store it emits is
   byte-for-byte identical to a hand-numbered register nest.
-- **`Tile`** (`tile.mojo`) — a rows×cols window into a row-major buffer (rows
+- **`Tile`** (`matmul/tile.mojo`) — a rows×cols window into a row-major buffer (rows
   `stride` apart), generic over origin so one type names both read-only operands
-  and the writable C target. Its accessors (`sub`, `tile`, `row`, `addr`) are all
+  and the writable C target. Its accessors (`sub`, `row`, `addr`) are all
   `@always_inline` over the same offset arithmetic the kernels would write by
   hand, so it is a zero-cost rename of `ptr + i*stride + j` — the kernels speak in
   tiles instead of raw pointer math. Each kernel gets its operands from
@@ -90,16 +111,16 @@ Every kernel is built on two shared, zero-cost abstractions:
 
 The four kernels:
 
-- **`_packed_gemm`** — the workhorse packed GEMM: per-worker A/B-panel
+- **`packed_gemm`** — the workhorse packed GEMM: per-worker A/B-panel
   packing, the `RegisterTile` micro-kernel with hoisted B-loads + noalias,
-  a register-tiled masked tail (`_masked_microkernel`) for the M- and
+  a register-tiled masked tail (`masked_microkernel`) for the M- and
   N-remainders, and an optional shared single pack of A.
-- **`_decode_gemv`** — j-parallel GEMV with L1-resident column chunks and
+- **`decode_gemv`** — j-parallel GEMV with L1-resident column chunks and
   software prefetch, for decode shapes (M = 1). Streams B exactly once.
-- **`_nopack_gemm`** — M-parallel, no-packing register-tiled kernel for the
+- **`nopack_gemm`** — M-parallel, no-packing register-tiled kernel for the
   two regimes the N-parallel prefill kernel handles badly: thin-N (small N,
   large M·K) and small M-dominant boxes whose B stays L2-resident.
-- **`_serial_gemm`** — serial register-tiled kernel for tiny shapes, where
+- **`serial_gemm`** — serial register-tiled kernel for tiny shapes, where
   any thread launch / packing overhead dwarfs the compute.
 
 ## Dispatch logic
@@ -107,14 +128,14 @@ The four kernels:
 `matmul_dispatch` routes each shape to the kernel and tile that measured best for
 it (see the comment in `matmul_dispatch` for the authoritative table):
 
-- `M·N·K < 2^19` (tiny): serial register-tiled `_serial_gemm` — no thread
+- `M·N·K < 2^19` (tiny): serial register-tiled `serial_gemm` — no thread
   launch, allocation, or packing. Avoids the fixed parallel-kernel overhead that
   made tiny GEMMs 7–30× slower than `linalg` (sq8 0.03× → 2.37× after).
 - `M == 1`: decode GEMV (streams B once).
 - `2 ≤ M ≤ 5`: the packed micro-kernel with `MR = M` — packs B once and reuses it
   across all rows (vs the GEMV re-streaming all of B per row, ~2× slower at M=4).
 - **Small box, M-dominant, B fits L2** (`M ≥ 64`, `M ≥ N`, B = `K·N·8` fits L2):
-  M-parallel, no-packing `_nopack_gemm` — each core owns a band of C's rows and
+  M-parallel, no-packing `nopack_gemm` — each core owns a band of C's rows and
   sweeps the full N, reading A/B straight from source (B stays L2-resident, so
   packing buys nothing). The packed prefill kernel's packing + thread-launch
   overhead dwarfs the tiny compute on these cache-resident shapes; this branch
@@ -126,7 +147,7 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
   tail one row at a time (a 1×NR tile) far below the MR-row throughput, which made
   sq256 (M%6=4) the single worst shape in the robust peak sweep (~0.84); MR=4
   brings it to ~0.95, 512×128×512 0.89→0.97, 256×128×512 0.97→1.08, while the
-  M%6==0 boxes (sq96, sq192) keep MR=6. See DESIGN.md. The B-fits-L2 test is
+  M%6==0 boxes (sq96, sq192) keep MR=6. See docs/DESIGN.md. The B-fits-L2 test is
   **L2-adaptive**:
   a compile-time 512 KB tier (kept cpuid-free for the few-µs tiny boxes) plus a
   `B ≤ L2/3` tier (`_box_l2_budget`, only reached once B > 512 KB, where the op
@@ -144,7 +165,7 @@ it (see the comment in `matmul_dispatch` for the authoritative table):
   On a 1 MB-L2 part L2/3 = 341 KB sits below the 512 KB tier-1, so it keeps
   no-pack only for B ≤ 512 KB. The `M ≥ N` gate keeps it unreachable for every
   wide/headline shape (Qwen up/down proj are `N ≫ M`).
-- `M ≥ 6`: parallel `_packed_gemm` (N-parallel: each worker owns a band of
+- `M ≥ 6`: parallel `packed_gemm` (N-parallel: each worker owns a band of
   j-tiles, reading the dominant B matrix from DRAM once into private L2). Tile and
   KC are selected per regime — narrow NR=16 for `N ≤ 192` (so a small N still
   splits into ≥ num_workers j-tiles), 8×24 only for very-wide-N small-M (Qwen
@@ -177,17 +198,17 @@ kernels see the same turbo/thermal state:
   **unbalanced** tiling: sq384 (K=384) got TileN=64 → 6 j-tiles across 4 cores
   ([2,2,1,1]), the worst loss in the whole suite (and sq300, sq320 the same way).
   Collapsing the branch to the **finest TileN=4·NELTS** (12 j-tiles for sq384,
-  3/core, balanced) removes it. In the full bench_focus harness (10 epochs, 2σ
+  3/core, balanced) removes it. In the full bench/focus.mojo harness (10 epochs, 2σ
   verdict) sq384 goes **0.828 LOSE → 1.007 tie**, sq1024 0.974 LOSE → 0.983 tie,
   sq512 0.962 → 0.987, sq2048/sq256 unchanged — nothing in the band regresses,
-  bit-identical (see DESIGN.md "Small-N square"). The squares whose column count is
+  bit-identical (see docs/DESIGN.md "Small-N square"). The squares whose column count is
   not a multiple of the core count (sq300, sq320 → 10 columns / 4 cores, a [3,3,3,1]
-  makespan) kept a residual loss that no TileN choice fixes; `_pack_b_only_2d` now
+  makespan) kept a residual loss that no TileN choice fixes; `pack_b_only_2d` now
   splits each column into MR-row blocks so the **columns × row-blocks** grid balances
   (sq320 540 tiles / 4 cores, 135 each), gated to where the grid makespan beats the
-  column makespan by ≥1/8. In bench_focus (10 epochs, 2σ) sq320 goes **0.883 LOSE →
+  column makespan by ≥1/8. In bench/focus.mojo (10 epochs, 2σ) sq320 goes **0.883 LOSE →
   1.021 tie** (221 → 261 GFLOPS) and sq300 1.021 tie → **1.080 WIN**, bit-identical
-  (see DESIGN.md "Small-N square residual"). The same pack-B-only path also
+  (see docs/DESIGN.md "Small-N square residual"). The same pack-B-only path also
   takes the **big boxes** (B ~ 512 KB,
   the top of the small-box window) off the no-pack route — sq256, 512×128×512 and
   256×128×512 lift ~+10–14% (bonly/no-pack) and move from LOSE to parity, while
@@ -199,7 +220,7 @@ kernels see the same turbo/thermal state:
   MR-divides-M tile pick on that route (MR=6 only when M%6==0, else MR=4) lifted
   the no-tail-divisible boxes another step — sq256, the single worst shape in the
   robust peak sweep at ~0.84, to ~0.95, and 256×128×512 to ~1.08 (see the
-  small-box bullet above and DESIGN.md). Residual losses are the mid/large packed
+  small-box bullet above and docs/DESIGN.md). Residual losses are the mid/large packed
   squares (sq512 ~0.96, sq768/1024 ~0.93–0.97 at robust peak) and low-arithmetic-
   intensity corners (K=128, odd N/K) where `linalg`'s masked AVX-512 remainder
   handling wins. The big-square gap is algorithmic (pack/compute overlap or
@@ -207,7 +228,7 @@ kernels see the same turbo/thermal state:
 
 ### Key findings from tuning
 
-The micro-kernel itself is not the bottleneck on most shapes: `_packed_gemm`
+The micro-kernel itself is not the bottleneck on most shapes: `packed_gemm`
 and `linalg.matmul` compile to the same 6×32/8×24 register tile running
 `vfmadd231pd` at ~2 FMA/cycle. The wins and losses came from everything *around*
 it:
@@ -219,7 +240,7 @@ it:
 - **Masked M-remainder.** Handling `m % MR` leftover rows as one register-blocked
   masked block (instead of row-by-row) freed the tile choice from needing
   `MR | M`, flipping 5 losing shapes to wins. Verified bit-identical
-  (`verify_dispatch` max_err 0.0).
+  (`test_dispatch` max_err 0.0).
 - **Masked N-remainder.** The mirror image: the last j-tile of an
   N-not-a-multiple-of-NR shape ends in a partial NR-panel. It used to be computed
   by a row-by-row `vectorize` tail that swept K once per row with only NR_VECS-deep
@@ -232,7 +253,7 @@ it:
   with the remainder width (worst at a 31-wide remainder): on the 2.10 GHz Xeon
   `512×11007×2048` ran **0.85→1.01** vs `linalg`, with the multiple-of-NR
   `512×11008×2048` already at parity. Every N now holds ~parity regardless of its
-  remainder. Bit-identical (`verify_dispatch` max_err 0.0 across remainder widths
+  remainder. Bit-identical (`test_dispatch` max_err 0.0 across remainder widths
   7/8/24/31 on both the wide-N and square-ish branches). A later pass finished
   the job: that shared masked tile was still a cold-path loop (no K-unroll, a
   per-row guard on every K-step), which is fine for the thin M-remainder slice
@@ -240,17 +261,17 @@ it:
   N-not-multiple-of-NR shape is made of it. f32 made that visible (NR doubles
   to 64, so sq300's 44-wide remainder column is 1 of 5 columns, 20% of all
   tiles, and the shape sat at **0.81 LOSE** while the remainder-free sq320 ran
-  1.05). Full-rows partial-N tiles now run `_partial_n_microkernel`, the same
+  1.05). Full-rows partial-N tiles now run `partial_n_microkernel`, the same
   KU-unrolled sweep as the full kernel masking only the C load/store: sq300-f32
   **0.812 LOSE → 0.985 tie** (395 → 492 GFLOPS) and sq300-f64 lifts to a
-  **1.084 WIN** (251 → 271 GFLOPS), bit-identical (see DESIGN.md "Partial-N
+  **1.084 WIN** (251 → 271 GFLOPS), bit-identical (see docs/DESIGN.md "Partial-N
   panels at full throughput").
 - **K-unroll must not exceed the register file.** The 6×32 micro-kernel holds
   `MR·NR_VECS = 24` SIMD accumulators, and the comptime k-unroll `KU` keeps
   `KU·NR_VECS` B-vectors live per unrolled step. `KU=2` needs `24 + 8 = 32` zmm
   registers — exactly the AVX-512 file — while `KU=4` needs `24 + 16 = 40` and
   spills. The `KU` had drifted to 4 on the shared `_prefill` 6×32 path; restoring
-  `KU=2` is bit-identical (codegen-only; `verify_dispatch` max_err 0.0) and
+  `KU=2` is bit-identical (codegen-only; `test_dispatch` max_err 0.0) and
   measured — head-to-head KU2-vs-KU4, peak/30 ×3 on the 2.80 GHz Skylake VM — a
   **uniform win across the heavy-GEMM band**: up-proj/down-proj M=256 **+3 %**
   (flips 0.96–0.99 LOSE→WIN), M=512 **+3–6 %**, h4k/ffn-up8k M=512 +2–5 %, the
@@ -299,7 +320,7 @@ it:
   M=512 0.93→0.97. `SHARED_A=True` is therefore now enabled from the **square-ish,
   wide-N, AND tall-K branches for M ≥ 192** (previously square-ish only); the
   small-M bands and both Qwen headline shapes keep the byte-for-byte per-worker
-  path. Bit-identical (`verify_dispatch` max_err 0.0 across both orientations
+  path. Bit-identical (`test_dispatch` max_err 0.0 across both orientations
   and the gate boundary). On the big squares it had already lifted sq512
   ~0.85→0.90 and sq2048 ~0.86→0.92.
 
@@ -314,7 +335,7 @@ became the whole margin). It is now **back at parity/WIN** after switching that
 band to a single *C-stored-once* k-panel — `KC = min(K, 2048)` in `_l2_resident_kc`,
 the same TileK `linalg` uses (interleaved A/B, 8 epochs: up-proj M=256 0.96→1.00,
 M=512 0.97→1.00, odd-N 0.96→1.00, 512×4096×4096 0.99→**1.02 WIN**; bit-identical,
-2 MB Machine B unchanged — see DESIGN.md *`_l2_resident_kc`*). The residual loss is
+2 MB Machine B unchanged — see docs/DESIGN.md *`_l2_resident_kc`*). The residual loss is
 now just the heavy **squares** (sq512 ~0.96, sq1024 ~0.98). The **tall-K
 down-proj** (dn-m512, K=11008), long the other stable loss, reached parity in two
 passes. First the band stopped inheriting the wide-N `KC=2048` single-panel pick,
@@ -326,13 +347,13 @@ treatment): on a tall K the A matrix is the dominant operand (dn-m512's A is 45 
 past L3), so the shared pre-pack was a full extra DRAM sweep, and without a packed-A
 panel to keep resident the KC cap returns to the deeper C-stored-once 2048.
 Interleaved A/B old→new: dn-m384 0.974→1.005, **dn-m512 0.968→0.995**, dn-k4096
-0.955→0.998 (ffn-dn8k gives back 2% and stays a 1.05 WIN); in full bench_focus
+0.955→0.998 (ffn-dn8k gives back 2% and stays a 1.05 WIN); in full bench/focus.mojo
 **dn-m512 0.956±0.011 LOSE → 1.002±0.006 tie**, dead parity (bit-identical,
-`verify_dispatch` max_err 0.0 — see DESIGN.md *Tall-K large-M, second pass*). The
+`test_dispatch` max_err 0.0 — see docs/DESIGN.md *Tall-K large-M, second pass*). The
 same pass exposed that a packed-B tile sized to the *whole* per-core L2 is a cliff
 (f32 512×4096×4096 ran 0.844 at the whole-L2 KC=4096 tile vs 0.991 at half-L2
 KC=2048, a 17% gap); `_l2_resident_kc` now sizes the tile at **half** the L2, which
-also lifts the f32 tall-K band +3.6–6.5% to ≥1.0 (see DESIGN.md *Half-L2 packed-B
+also lifts the f32 tall-K band +3.6–6.5% to ≥1.0 (see docs/DESIGN.md *Half-L2 packed-B
 tile*). Closing the heavy squares to full parity likely needs pack/compute
 overlap — substantial and unproven on this hardware.
 The odd-N remainder
@@ -350,10 +371,10 @@ whole band to no-pack — once `linalg.matmul` improved in a newer nightly those
 shapes flipped to the *worst* losses in the sweep, sq384 0.42; re-routing them
 back to packed lifts them to 0.78–0.95.)
 
-> **Methodology note:** ratios from a single `bench_sweep` run swing ±5–10% at
+> **Methodology note:** ratios from a single `bench/sweep.mojo` run swing ±5–10% at
 > M ≥ 128 from turbo/thermal state on shared VMs, and we kept misreading those
 > swings as real wins or losses (up-m512 has shown 0.79 in one launch and 1.04 in
-> another with byte-identical code). Judge a kernel change with `bench_focus`,
+> another with byte-identical code). Judge a kernel change with `bench/focus.mojo`,
 > which is built for exactly this: it runs the shape set for N independent epochs
 > (default 10), each a peak over ~12 interleaved A/B reps, and reports the ratio's
 > mean ± stdev with a 2σ verdict (WIN / LOSE / tie). A shape is only a real win or
@@ -369,16 +390,20 @@ bash setup.sh
 
 ## Run
 
+All Mojo commands run from the repo root with `-I .` so the `matmul` package
+resolves:
+
 ```bash
 source .venv/bin/activate
-mojo bench_linalg.mojo           # Mojo stdlib linalg.matmul baseline
-mojo bench_sweep.mojo --iterate  # FAST: dispatch vs linalg on corner/edge shapes (default)
-mojo bench_sweep.mojo --full     # SLOW: full per-M sweep over many aspect ratios + general grid
-mojo bench_focus.mojo            # JUDGE A CHANGE: mean ± stdev + 2σ verdict over 10 epochs
-mojo bench_focus.mojo --quick    # fast single-epoch sanity check (NOT for judging)
-python bench_sota.py             # NumPy/SciPy/MKL benchmarks
-bash sol/run.sh                  # measure this machine's SOL (FMA peak + memory BW)
-mojo test_gemm.mojo              # Correctness tests
-mojo verify_dispatch.mojo        # dispatch correctness vs naive (all branches + edge cases)
-mojo verify_f32_routes.mojo      # f32 small-box routing + bf16 all-route correctness (vs f64 naive)
+mojo -I . examples/demo.mojo             # smoke test: multiply two matrices
+mojo -I . bench/linalg_baseline.mojo     # Mojo stdlib linalg.matmul baseline
+mojo -I . bench/sweep.mojo --iterate     # FAST: dispatch vs linalg on corner/edge shapes (default)
+mojo -I . bench/sweep.mojo --full        # SLOW: full per-M sweep over many aspect ratios + general grid
+mojo -I . bench/focus.mojo               # JUDGE A CHANGE: mean ± stdev + 2σ verdict over 10 epochs
+mojo -I . bench/focus.mojo --quick       # fast single-epoch sanity check (NOT for judging)
+python bench/sota.py                     # NumPy/SciPy/MKL benchmarks
+bash sol/run.sh                          # measure this machine's SOL (FMA peak + memory BW)
+mojo -I . tests/test_basic.mojo          # unit tests on small hand-checked shapes
+mojo -I . tests/test_dispatch.mojo       # dispatch correctness vs naive (all branches + edge cases)
+mojo -I . tests/test_dtypes.mojo         # f32 small-box routing + bf16 all-route correctness (vs f64 naive)
 ```

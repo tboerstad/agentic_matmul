@@ -18,9 +18,9 @@ the current toolchain. Numbers differ from the README table (shared-VM turbo/the
 state and a newer OpenBLAS/Mojo nightly), so treat this as a self-contained run.
 
 Harnesses used:
-- `python bench_sota.py` — OpenBLAS via NumPy `matmul` and SciPy `dgemm`.
-- `mojo bench_linalg.mojo` — stdlib `linalg.matmul`, standalone.
-- `mojo bench_focus.mojo` — **agentic vs `linalg`, interleaved in one process**,
+- `python bench/sota.py` — OpenBLAS via NumPy `matmul` and SciPy `dgemm`.
+- `mojo -I . bench/linalg_baseline.mojo` — stdlib `linalg.matmul`, standalone.
+- `mojo -I . bench/focus.mojo` — **agentic vs `linalg`, interleaved in one process**,
   10 epochs × peak-of-12, reported as mean ratio ± stdev with a 2σ verdict. This is
   the only trustworthy agentic-vs-`linalg` comparison (same turbo/thermal state per
   rep). Cross-process absolute GFLOPS (the OpenBLAS rows) are inherently noisier.
@@ -54,7 +54,7 @@ Derived ratios on the headline shapes:
 
 ## Agentic vs `linalg` — full shape set (interleaved, 2σ verdict)
 
-`mojo bench_focus.mojo`, 10 epochs × peak-of-12. `WIN`/`LOSE` mean the 2σ band
+`mojo -I . bench/focus.mojo`, 10 epochs × peak-of-12. `WIN`/`LOSE` mean the 2σ band
 clears 1.0; `tie` means it straddles 1.0 (within run-to-run noise). The numbers
 below are **after** the large-M wide-N KC fix described in the next section; the
 "was" column is the pre-fix baseline.
@@ -100,13 +100,13 @@ A/B vs linalg, 8 epochs, peak-of-12):
 | odd-N (512×11007×2048) | 0.964 LOSE | 0.996 tie |
 | 512×4096×4096 | 0.986 tie | **1.020 WIN** |
 
-Bit-identical (`verify_dispatch` max_err 0.0); the 2 MB-L2 machine is unchanged
+Bit-identical (`test_dispatch` max_err 0.0); the 2 MB-L2 machine is unchanged
 (its KC was already 2048); the headline prefill (M=96, KC=256 band) is untouched.
 See `DESIGN.md` → *`_l2_resident_kc`*.
 
 ### Wider corner/edge sweep (single run — noise-prone, directional only)
 
-`mojo bench_sweep.mojo --iterate`. A single run swings ±5–10% at M ≥ 128, so read
+`mojo -I . bench/sweep.mojo --iterate`. A single run swings ±5–10% at M ≥ 128, so read
 these as directional, not verdicts:
 
 | Shape | Ratio vs linalg | | Shape | Ratio vs linalg |
@@ -125,7 +125,7 @@ masked-remainder handling.
 
 ---
 
-## OpenBLAS detail (`bench_sota.py`)
+## OpenBLAS detail (`bench/sota.py`)
 
 float64, warmup 5, 20 iters.
 
@@ -156,8 +156,8 @@ the four cores and reaches ~209.
 
 ```bash
 source .venv/bin/activate
-python bench_sota.py        # OpenBLAS (NumPy/SciPy)
-mojo bench_linalg.mojo      # linalg standalone
-mojo bench_focus.mojo       # agentic vs linalg, 2σ verdict (the trustworthy one)
-mojo bench_sweep.mojo --iterate   # wider corner/edge sweep
+python bench/sota.py        # OpenBLAS (NumPy/SciPy)
+mojo -I . bench/linalg_baseline.mojo      # linalg standalone
+mojo -I . bench/focus.mojo       # agentic vs linalg, 2σ verdict (the trustworthy one)
+mojo -I . bench/sweep.mojo --iterate   # wider corner/edge sweep
 ```

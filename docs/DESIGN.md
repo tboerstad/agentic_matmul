@@ -1,6 +1,6 @@
 # Design notes & benchmark rationale
 
-The "why" behind the tuning constants in `gemm.mojo` — relocated out of the
+The "why" behind the tuning constants in the `matmul/` package — relocated out of the
 source so the kernels read as code. Numbers are peak GFLOPS ratios vs Mojo's
 stdlib `linalg.matmul`, measured on the two headline machines:
 
@@ -11,7 +11,7 @@ Both 4 cores, AVX-512, KVM, f64. **Your numbers WILL differ — see `AGENTS.md`.
 
 See `README.md` for the per-branch dispatch table and the full results.
 
-## `_packed_gemm` / `SHARED_A`
+## `packed_gemm` / `SHARED_A`
 
 By default every worker re-packs the FULL A (all i-panels) per k-panel into its
 own buffer: `num_workers` redundant copies. On a wide/tall headline shape A is
@@ -37,7 +37,7 @@ The partial NR-panel and the M-remainder both used to run a row-by-row
 `vectorize` tail, sweeping K once per row with only `NR_VECS`-deep ILP — far too
 shallow to hide FMA latency. N=11007 (rem=31) ran 0.86 vs linalg while the
 multiple-of-NR N=11008 hit parity. Running the full-width register tile
-(`_masked_microkernel`) and storing only the valid columns keeps any N (odd / not
+(`masked_microkernel`) and storing only the valid columns keeps any N (odd / not
 a multiple of NR) at ~parity, and removed the MR-not-dividing-M tax (e.g. 6×32 at
 M=256).
 
@@ -63,7 +63,7 @@ the bigger squares, where the wide tile's lower packed-A traffic wins, on wide.
 An earlier `>= 2` cut sent sq512 to the wide tile and left that ~2–4% on the
 table. Bit-identical either way (same kernel, different TILE_N).
 
-## `_nopack_gemm` MR: divide M with no tail
+## `nopack_gemm` MR: divide M with no tail
 
 The no-pack small-box kernel splits M into MR-row register-tiled blocks; an M
 not divisible by MR leaves a tail block that runs one row at a time (a `1 x NR`
@@ -159,7 +159,7 @@ Implemented by sizing the budget from the per-core L2 and **capping at 2048**
 (the single-panel depth): 1 MB/core → KC=2048 (was 1024), 2 MB/core → KC=2048
 (unchanged, so Machine B is byte-for-byte identical). The `m <= 288` wide rung
 folds into the `m > 192` cache-aware branch instead of its hardcoded KC=512.
-Bit-identical (`verify_dispatch` max_err 0.0). The headline prefill (M=96) is in
+Bit-identical (`test_dispatch` max_err 0.0). The headline prefill (M=96) is in
 the `m <= 192` band (KC=256) and is untouched.
 
 The cap is now **byte-based** (16 KB per packed column), so narrower dtypes
@@ -214,10 +214,10 @@ tie-or-slight-win (up-m512 1.005 vs 0.996, M512-g 0.997 vs 0.991, up-m256
 0.982 vs 0.976), and the f64 KC values are unchanged by construction. Machine
 A has not re-measured the finer wide-N tile; the change follows the tall-K
 precedent (the same tile narrowing lifted that band on Machine A), and on a
-1 MB/core L2 it shrinks the packed-B tile from the whole L2 to half of it. Full bench_focus (10 epochs, 2-sigma): every f32 wide-N
+1 MB/core L2 it shrinks the packed-B tile from the whole L2 to half of it. Full bench/focus.mojo (10 epochs, 2-sigma): every f32 wide-N
 shape moves to tie (up-m256 1.001, up-m512 1.002, M512-g 0.978, oddN 0.985)
 and the f64 set holds (up-m512 1.003, oddN 0.979, M512-g 0.979, all tie).
-Bit-identical (`verify_dispatch` max_err 0.0). The headline prefill (M=96) is
+Bit-identical (`test_dispatch` max_err 0.0). The headline prefill (M=96) is
 in the `m <= 192` band and untouched.
 
 ## Tall-K large-M: cap KC at 1024, finer TILE_N
@@ -225,8 +225,8 @@ in the `m <= 192` band and untouched.
 The `KC = min(K, 2048)` single-panel pick above is right for **wide-N** (K=2048
 *does* fit one panel, so C really is stored once). On **tall K** (down-proj,
 K=11008) it backfires, and the down-proj large-M band was the worst residual in the
-sweep — `dn-m512` swung as low as 0.708 in a single `bench_sweep` run and sat at a
-noisy 0.90 ± 0.073 mean in `bench_focus`.
+sweep — `dn-m512` swung as low as 0.708 in a single `bench/sweep.mojo` run and sat at a
+noisy 0.90 ± 0.073 mean in `bench/focus.mojo`.
 
 Two things go wrong when KC=2048 meets K=11008:
 
@@ -259,10 +259,10 @@ Measured interleaved A/B vs linalg, Machine A (1 MB/core L2), down-proj N=2048:
 | ffn-dn8k | 512×2048×8192 | 1.04 | 1.08 |
 | dn-k4096 | 512×2048×4096 | 0.97 | 1.01 |
 
-In `bench_focus` (10 epochs, 2σ) `dn-m512` goes from 0.90 ± 0.073 (a 0.71..0.95
+In `bench/focus.mojo` (10 epochs, 2σ) `dn-m512` goes from 0.90 ± 0.073 (a 0.71..0.95
 spread that read as a noisy "tie") to **0.956 ± 0.011** (a stable 0.94..0.97 band):
 the mean lifts ~5.6% and the catastrophic low-end collapse is gone. Bit-identical
-(`verify_dispatch` max_err 0.0; KC/TILE_N are codegen-only levers).
+(`test_dispatch` max_err 0.0; KC/TILE_N are codegen-only levers).
 
 A second pass (next section) closed the remaining few percent by dropping the
 A-pack from this rung entirely, which also retired the 8 KB KC cap this
@@ -303,11 +303,11 @@ give-back: dn-m384 0.974 → 1.016, dn-m512 0.976 → 1.011, ffn-dn8k 0.962 →
 1.006, dn-k4096 0.952 → 1.013 (+3.6-6.5%), provided the packed-B tile obeys
 the half-L2 rule below.
 
-In full `bench_focus` (10 epochs, 2σ) `dn-m512` goes **0.956 ± 0.011 LOSE →
+In full `bench/focus.mojo` (10 epochs, 2σ) `dn-m512` goes **0.956 ± 0.011 LOSE →
 1.002 ± 0.006 tie** (dead parity with linalg), and no other f64 shape moves
 outside its band. The wide-N band measured a wash under the same treatment
 (up-m512 0.998×, oddN 0.996×) and keeps SHARED_A. Bit-identical
-(`verify_dispatch` max_err 0.0, including tall-K M=257 N=575 K=1100).
+(`test_dispatch` max_err 0.0, including tall-K M=257 N=575 K=1100).
 
 ## Half-L2 packed-B tile (the f32 KC=4096 cliff)
 
@@ -357,11 +357,11 @@ way if you keep A-packing: TileK=K with a narrow TileN and a *packed* A explodes
 the packed-A re-read (measured 0.43). Dropping the A-pack removes that, because
 the unpacked source-A re-read streams from L3 and the HW prefetcher hides it.
 
-Implemented as `PACK_A=False` on `_packed_gemm` (skip the A-pack; the micro-kernel
+Implemented as `PACK_A=False` on `packed_gemm` (skip the A-pack; the micro-kernel
 reads A via `load_a_col[MR](a_view.addr(i, pc+step), k)` at row-stride k) at the
 narrow TileN = 4*NELTS, KC = min(K, 2048). Interleaved A/B vs the old pack-both
 square path: sq512 1.188, sq768 1.141, sq1024 1.118, sq1536 1.117, sq2048 1.065
-(all 2-sigma WIN); bit-identical to naive (verify_dispatch max_err 0.0). The branch
+(all 2-sigma WIN); bit-identical to naive (test_dispatch max_err 0.0). The branch
 once stepped TileN by K (128/64/32) to keep the packed-B tile near 512 KB, but the
 narrow TileN fits that budget at every K and load-balances better (see "Small-N
 square" below), so the rungs collapsed to this one call. The headline
@@ -387,7 +387,7 @@ maximizes j_tiles and minimizes the rounding waste. sq384 then splits into 12 ti
 (3/core, perfectly balanced). The narrow TileN keeps the packed-B tile within
 budget at every K (32 x 2048 x 8 = 512 KB at the KC=2048 cap).
 
-Measured in the full bench_focus harness (10 epochs, peak-of-12, 2-sigma verdict —
+Measured in the full bench/focus.mojo harness (10 epochs, peak-of-12, 2-sigma verdict —
 the trustworthy one per AGENTS.md), baseline -> fixed:
 
 | Shape | before | after |
@@ -400,7 +400,7 @@ the trustworthy one per AGENTS.md), baseline -> fixed:
 
 The worst loss in the suite is gone and nothing in the band regresses (the headline
 decode/prefill/box512 wins and the wide/tall shapes are on other code paths and
-unmoved). Bit-identical (verify_dispatch max_err 0.0); the whole branch collapses
+unmoved). Bit-identical (test_dispatch max_err 0.0); the whole branch collapses
 from three K-rungs + a pack-both fallback to one line. Two squares (sq300, sq320)
 lift a lot but kept a residual loss: their N gives 10 columns, which 4 cores cannot
 split evenly (makespan 3 vs ideal 2.5), a limit no TileN choice removes because the
@@ -415,7 +415,7 @@ the busiest core where the balanced ideal is 2.5, a [3, 3, 3, 1] makespan. The
 column path parallelizes over N only, so a whole column (every M row of it) belongs
 to one core; no TileN choice splits that last round.
 
-`_pack_b_only_2d` breaks the column into MR-row blocks, so the unit of work is one
+`pack_b_only_2d` breaks the column into MR-row blocks, so the unit of work is one
 MR x NR C tile and the parallel grid is columns x row_blocks. sq320 becomes 10 x 54
 = 540 tiles across 4 cores (135 each, balanced) instead of a 3-column makespan. Each
 worker takes a contiguous column-major slice of the grid and packs into a private
@@ -432,7 +432,7 @@ gated to where it pays: a grid makespan that beats the column makespan by at lea
 row_blocks). At 10 columns that is a 1/6 cut and the 2D path runs; at 11 columns
 only 1/12, and the column path is kept (an interleaved A/B measured 2D a wash-to-
 loss there, sq336 0.93). Interleaved A/B vs the column path (12 epochs, peak-of-14):
-sq320 1.18, sq300 1.09 (both 2-sigma 2D wins). Full bench_focus (10 epochs, 2-sigma
+sq320 1.18, sq300 1.09 (both 2-sigma 2D wins). Full bench/focus.mojo (10 epochs, 2-sigma
 verdict), baseline -> fixed:
 
 | Shape | before | after |
@@ -441,7 +441,7 @@ verdict), baseline -> fixed:
 | sq300 | 1.021 tie | 1.080 **WIN** |
 
 The confident LOSE is gone and nothing else moves (the in-band squares keep the
-column path, their column counts being even). Bit-identical (verify_dispatch
+column path, their column counts being even). Bit-identical (test_dispatch
 max_err 0.0).
 
 The same pack-B-only path also took the **big boxes** off the no-pack route. The
@@ -503,7 +503,7 @@ says so, it just takes f32's NR=64 to reach them on square-ish shapes):
    throughput. sq288 (remainder 32/288 = 11%) stays no-pack, matching the
    measured wash.
 
-Full `bench_focus --dtype f32` (10 epochs, 2σ verdict), before → after:
+Full `bench/focus.mojo --dtype f32` (10 epochs, 2σ verdict), before → after:
 
 | Shape | before | after |
 |---|---|---|
@@ -513,13 +513,13 @@ Full `bench_focus --dtype f32` (10 epochs, 2σ verdict), before → after:
 Nothing else in the f32 set moves outside its noise band (box512 keeps its
 1.07 WIN, sq256 1.05 WIN, the wide-N band's small losses were the separate
 f32-tiling item, fixed in "Wide-N heavy band" above), and the f64 set is
-unchanged (verified with a full 10-epoch f64 run; `verify_dispatch` max_err
+unchanged (verified with a full 10-epoch f64 run; `test_dispatch` max_err
 0.0). sq300's residual (the 2D grid's masked 44-wide column) is fixed by the
 partial-N hot kernel, next section.
 
-## Partial-N panels at full throughput (`_partial_n_microkernel`)
+## Partial-N panels at full throughput (`partial_n_microkernel`)
 
-`_masked_microkernel` handles two leftovers with one loop: M-remainder rows
+`masked_microkernel` handles two leftovers with one loop: M-remainder rows
 and partial NR-columns. It is deliberately a cold path (no K-unroll, and the
 A gather runs a per-row `mr < rows` guard on every K-step), which is the
 right trade for the M-tail: at most MR-1 rows of the whole GEMM. It is the
@@ -539,13 +539,13 @@ masking overhead did.
 
 The fix uses what the pack already guarantees: the packed B panel is
 zero-padded to full NR, so when all MR rows are live the K-sweep needs no
-masking at all. `_partial_n_microkernel` is the same KU-unrolled loop as
-`_full_microkernel` (same packed/unpacked A addressing), masking only the C
-load and store, once per tile instead of once per K-step. `_packed_gemm` and
-`_pack_b_only_2d` route full-rows partial-N tiles there; M-remainder tails
+masking at all. `partial_n_microkernel` is the same KU-unrolled loop as
+`full_microkernel` (same packed/unpacked A addressing), masking only the C
+load and store, once per tile instead of once per K-step. `packed_gemm` and
+`pack_b_only_2d` route full-rows partial-N tiles there; M-remainder tails
 keep the masked kernel (their masked work really is a thin slice).
 
-Full bench_focus (10 epochs, 2-sigma verdict), before -> after:
+Full bench/focus.mojo (10 epochs, 2-sigma verdict), before -> after:
 
 | Shape | dtype | before | after |
 |---|---|---|---|
@@ -556,11 +556,11 @@ Full bench_focus (10 epochs, 2-sigma verdict), before -> after:
 oddN (remainder 63 of N=11007 in f32, 0.6% of its columns) stays at parity as
 before; the kernel matters exactly where the remainder fraction is large.
 Bit-identical: same FMA order per element, the zero columns contribute
-nothing (`verify_dispatch` max_err 0.0 across remainder widths, including the
+nothing (`test_dispatch` max_err 0.0 across remainder widths, including the
 N=519..575 sweep that exercises every masked-column width on the square-ish
 branch).
 
-## bf16: keep bf16 storage, compute in f32 (`_compute_dtype`)
+## bf16: keep bf16 storage, compute in f32 (`compute_dtype`)
 
 AVX-512 has no bf16 SIMD FMA and LLVM has nothing to lower one to (the
 `avx512_bf16` extension adds only a dot-product instruction, and the Skylake
@@ -578,7 +578,7 @@ Each kernel family widens at the cheapest seam it has:
   bf16 appears only at the C boundary, cast once per register-tile load and
   store (a bf16-to-f32 widen is exact, a 16-bit shift; the f32-to-bf16
   narrow is a handful of integer ops, paid once per tile).
-- **No-pack kernels** (`_nopack_gemm`, `_serial_gemm`, and the pack-B-only
+- **No-pack kernels** (`nopack_gemm`, `serial_gemm`, and the pack-B-only
   paths' unpacked-A gathers). Widen on load: `load_a_col` and `load_b_row`
   take a cast target, so the B vectors and A broadcast scalars convert in
   registers on the way into the same f32 FMA nest.
@@ -588,7 +588,7 @@ Each kernel family widens at the cheapest seam it has:
   bf16 C directly would round the partial sum to 8 mantissa bits every KU
   steps; each C row is narrowed once when its K-sweep finishes.
 
-Mechanically, `_compute_dtype[dtype]()` maps bf16 to f32 and is the identity
+Mechanically, `compute_dtype[dtype]()` maps bf16 to f32 and is the identity
 for every other dtype. `RegisterTile` is parameterized on the compute dtype
 and its C load/store methods are generic over the storage dtype, casting at
 the boundary. Every kernel's SIMD geometry (NELTS, and with it NR and
@@ -601,22 +601,22 @@ admit pay a per-load widening tax the windows never priced in. Before that
 last piece, bf16 sq320 slid under the storage-byte gate onto the no-pack
 path and ran 0.54 vs linalg; routed as f32 (the balanced 2D grid) it is a
 1.18 +/- 0.06 WIN over 10 epochs. When storage equals compute every cast
-folds away: `verify_dispatch` (f64) still reports max_err 0.0 on every
+folds away: `test_dispatch` (f64) still reports max_err 0.0 on every
 shape.
 
 Numerics: the result differs from a bf16-accumulated one by construction.
-The f64-naive-reference check (`verify_f32_routes.mojo`, which covers every
+The f64-naive-reference check (`tests/test_dtypes.mojo`, which covers every
 dispatch route in bf16) measures max_rel about 0.006, which is the single
 f32-to-bf16 rounding of C (about 2^-9 relative) on top of f32 accumulation,
 against a 0.02 tolerance.
 
-Measured on the Machine-A-class box (2.80 GHz Skylake, 4 cores), bench_focus
+Measured on the Machine-A-class box (2.80 GHz Skylake, 4 cores), bench/focus.mojo
 10 epochs, before -> after: decode 2 -> 42 GFLOPS (0.29 -> 3.87 WIN, past
 the L3 roofline the harness holds B hot against), prefill 1 -> 216 (0.006 ->
 1.22 WIN), up-m512 1 -> 405 (0.005 -> 1.85 WIN), sq2048 1 -> 242 (0.005 ->
 1.10 WIN). All 16 shapes land WIN or tie, no losses; the fuller table is in
 SOL.md idea 2 (DONE). The f32 ceiling for this part measured ~581 GFLOPS FMA
-peak in the same boot, and `bench_focus` now measures its SOL banner in the
+peak in the same boot, and `bench/focus.mojo` now measures its SOL banner in the
 compute dtype so the bf16 %SOL column is a real roofline instead of the
 emulated-FMA rate.
 
@@ -624,7 +624,7 @@ emulated-FMA rate.
 
 MC blocking (block M so an MC-tall packed-A block stays L2-resident across a
 worker's j-tiles, instead of re-reading the full M x KC panel per j-tile) is the
-classic GotoBLAS third loop. Tried on the x86 `_packed_gemm` (a comptime-gated BLOCK_M variant that pre-packs
+classic GotoBLAS third loop. Tried on the x86 `packed_gemm` (a comptime-gated BLOCK_M variant that pre-packs
 the worker's j-tile B slabs, then sweeps MC-row blocks outside the j-tile loop) it
 did not pay. An interleaved A/B blocked-vs-flat (10 epochs, peak-of-12) measured
 sq1024 0.973 and sq1536 0.982 (2-sigma LOSE), sq384/sq512/sq768/sq2048 ~1.0 (tie):
@@ -638,7 +638,7 @@ pack-B-only / TileK=K path above (which reads linalg's source rather than guessi
 at the structure from the asm).
 
 
-## AMX bf16: the tdpbf16ps tile kernel (`amx.mojo`)
+## AMX bf16: the tdpbf16ps tile kernel (`matmul/amx.mojo`)
 
 SOL.md idea 3. Machine-B-class parts (Granite Rapids) report `amx_tile` +
 `amx_bf16`: one `tdpbf16ps` instruction multiplies a 16x32 bf16 tile by a
@@ -648,7 +648,7 @@ linalg bf16 path (~370 GFLOPS on this part) nor the repo's f32-compute bf16
 path (idea 2, ~300-600 GFLOPS) touches the tile units, so the whole ceiling
 was unclaimed.
 
-The kernel (`amx.mojo`) keeps the repo's N-parallel shape: each worker owns a
+The kernel (`matmul/amx.mojo`) keeps the repo's N-parallel shape: each worker owns a
 contiguous range of 32-column j-tiles. Per j-tile it pair-interleaves B into
 the VNNI layout (`SIMD.interleave` on two 16-lane bf16 rows emits exactly the
 (b[2k][j], b[2k+1][j]) pair row `tdpbf16ps` wants), then sweeps M in 32-row
@@ -688,19 +688,19 @@ Dispatch gate: bf16 only, above the tiny cutoff, `m % 32 == 0`,
 `n % 16 == 0`, `k % 32 == 0` (an n % 32 == 16 trailing panel runs a 2x1 tile
 column), and `amx_bf16_usable()`. Everything else - every other dtype, every
 non-conforming shape, every non-AMX machine - falls through to the existing
-cascade unchanged (`verify_dispatch` f64 still max_err 0.0). The gate covers
-13 of the 16 bench_focus shapes, including every headline shape except decode
+cascade unchanged (`test_dispatch` f64 still max_err 0.0). The gate covers
+13 of the 16 bench/focus.mojo shapes, including every headline shape except decode
 (M = 1 stays on the GEMV) and the two odd-geometry shapes (oddN, sq300).
 
 Numerics: `tdpbf16ps` accumulates each bf16 pair's f32 products into the f32
 tile per pair-step, which is not bit-identical to the AVX-512 path's
-sequential f32 FMA over k. `verify_f32_routes` covers the AMX shapes (plus
+sequential f32 FMA over k. `test_dtypes` covers the AMX shapes (plus
 the 16-column-tail and single-panel edges) against the naive f64 reference:
 max_rel ~0.004, the same single f32-to-bf16 C rounding as the AVX-512 bf16
 path, well inside the 0.02 gate.
 
 Measured on the 2.10 GHz Granite Rapids Machine-B-class box (4 cores, 2 MB/core
-L2), `bench_focus --dtype bf16` quick pass, before (f32-compute path) -> after
+L2), `bench/focus.mojo --dtype bf16` quick pass, before (f32-compute path) -> after
 (AMX):
 
 | Shape | before GFLOPS | after GFLOPS | after/linalg |
@@ -732,30 +732,30 @@ Two follow-ups landed after the first pass:
    the live columns from the f32 scratch into C. M and K remainders stay
    excluded: those would read past the source A rows (`tileloadd` has no
    masking), so `amx_shape_ok` requires m % 32 == k % 32 == 0 and any n. The
-   gate predicate is shared between `matmul_dispatch` and `bench_focus` so
+   gate predicate is shared between `matmul_dispatch` and `bench/focus.mojo` so
    the dispatch and the roofline pick can never disagree.
 
 2. **The bf16 %SOL column uses a measured tile-unit ceiling.** The SOL banner
    used to measure only the AVX-512 FMA peak in the compute dtype, so AMX
-   shapes read 250-370% of "SOL". `sol.mojo` now measures the tdpbf16ps peak
+   shapes read 250-370% of "SOL". `matmul/sol.mojo` now measures the tdpbf16ps peak
    (`amx_bf16_peak_gflops`: four independent tile accumulator chains per
    core, tmm0-3 fed from preloaded tmm4-7, covering the instruction's
    accumulation latency the same way the 16 FMA chains cover the FMA pipes;
-   0 when AMX is not usable), `MachineSol` carries it, and `bench_focus`
+   0 when AMX is not usable), `MachineSol` carries it, and `bench/focus.mojo`
    judges a bf16 shape against it exactly when `amx_shape_ok` says the
    dispatch routes it to the tiles.
 
 Honesty note on validation: the session's VM migrated from the Granite
 Rapids box to a Skylake-class host (no AMX) between the first pass and this
 one, which validated the fallback for real - the repo compiles and runs on
-the non-AMX host, `verify_f32_routes` (including the new partial-N shapes)
+the non-AMX host, `test_dtypes` (including the new partial-N shapes)
 passes on the AVX-512 routes, and the bf16 suite still WINs there - but it
 means the partial-N tile path and the tdpbf16ps peak have not yet executed
 on AMX hardware. The pack/store helpers (the only changed logic; the tile
 intrinsics are untouched from the validated first pass) are additionally
 checked by a host-side unit test of the VNNI zero-padding and the masked C
-narrowing. The first AMX box to run `mojo verify_f32_routes.mojo` and
-`mojo bench_focus.mojo --dtype bf16` confirms both on the tiles; oddN is
+narrowing. The first AMX box to run `mojo -I . tests/test_dtypes.mojo` and
+`mojo -I . bench/focus.mojo --dtype bf16` confirms both on the tiles; oddN is
 expected to move from ~550 GFLOPS to its N=11008 twin's ~2 TFLOPS class.
 
 ## Dead end: the prefill-band C-traffic and pack-overlap ideas (SOL.md idea 4)

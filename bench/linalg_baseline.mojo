@@ -1,4 +1,4 @@
-from matrix import Matrix
+from matmul import Matrix
 from linalg.matmul import matmul as linalg_matmul
 from layout import Coord, TileTensor, row_major
 from std.collections import List

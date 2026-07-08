@@ -1,11 +1,9 @@
-# Correctness check for matmul_dispatch against a naive reference.
+# Correctness check for matmul_dispatch (float64) against a naive reference.
 #
 # Exercises every dispatch branch and the packed micro-kernel's edge cases
 # (full MR panels, NR remainders, and M tails) across both projection
-# orientations. test_gemm.mojo covers only a local reference matmul, so this
-# file is where matmul_dispatch itself gets exercised.
-from gemm import matmul_dispatch
-from matrix import Matrix
+# orientations. Run from the repo root: mojo -I . tests/test_dispatch.mojo
+from matmul import Matrix, matmul_dispatch
 from std.math import abs
 
 

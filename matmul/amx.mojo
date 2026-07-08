@@ -1,4 +1,4 @@
-"""AMX bf16 GEMM: tdpbf16ps tile microkernel (SOL.md idea 3).
+"""AMX bf16 GEMM: tdpbf16ps tile microkernel (docs/SOL.md idea 3).
 
 Intel AMX does a 16x32 (bf16) by 32x16 (bf16, pair-interleaved) tile FMA into
 a 16x16 f32 accumulator tile in ONE instruction (`tdpbf16ps`), ~1024
@@ -40,21 +40,21 @@ in `amx_bf16_usable()`. Each worker invocation runs `ldtilecfg` (all 8 tiles
 16 rows x 64 bytes) and `tilerelease` around its j-tile range.
 
 The dispatch gate (`amx_shape_ok` + `amx_bf16_usable`, both checked in
-gemm.matmul_dispatch) keeps every other dtype and machine byte-identical:
+dispatch.matmul_dispatch) keeps every other dtype and machine byte-identical:
 this path runs only for bf16 with m % 32 == k % 32 == 0 (any n; a partial
 trailing 16-column panel packs zero-padded and masks its C store) on a CPU
 that reports AMX-TILE + AMX-BF16 and grants the tile-data xstate.
 
 Numerics: tdpbf16ps truncates the f32 products of each bf16 pair and adds
 them into the f32 accumulator per pair-step, which is not bit-identical to
-the AVX-512 path's sequential f32 FMA over k. verify_f32_routes gates the
+the AVX-512 path's sequential f32 FMA over k. tests/test_dtypes.mojo gates the
 result against a naive f64 reference at the same tolerance as the f32
 compute path.
 """
 
-from cpu_cache import cpuid
-from matrix import Matrix
-from tile import Tile
+from matmul.cpu_cache import cpuid
+from matmul.matrix import Matrix
+from matmul.tile import Tile
 from std.algorithm.functional import parallelize
 from std.ffi import _Global, external_call
 from std.math import ceildiv

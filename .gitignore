@@ -1,15 +1,8 @@
 .venv/
 __pycache__/
 *.mojopkg
+*.mojoc
 *.o
 *.so
-bench_matmul
-bench_decode
-bench_prefill
-bench_focus
-bench_linalg
-sme
-main
-test_gemm
 sol/sol_fma
 sol/sol_bw

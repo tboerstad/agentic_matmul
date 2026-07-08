@@ -1,17 +1,18 @@
-# Correctness check for the small-box dispatch band in f32/bf16.
+# Correctness check for the f32 and bf16 dispatch routes.
 #
-# verify_dispatch.mojo runs float64 only, and the small-box gates are
+# test_dispatch.mojo runs float64 only, and the small-box gates are
 # byte-based, so the f32 routes differ from the f64 ones on the same shapes
-# (half the bytes per element, double the NR granularity; see DESIGN.md
+# (half the bytes per element, double the NR granularity; see docs/DESIGN.md
 # "Small-box f32 routing"). This file exercises the f32/bf16 band those gates
 # actually produce: the no-pack keepers, the tail-heavy square-ish evictions,
 # and the 2D-grid picks. It also carries the bf16 route coverage, since bf16
-# rides the f32-shaped dispatch (it computes in f32; see _compute_dtype in
-# gemm.mojo). The reference is a float64 naive matmul over the same
-# dtype-rounded inputs, with a relative tolerance scaled for the
+# rides the f32-shaped dispatch (it computes in f32; see compute_dtype in
+# matmul/microkernel.mojo). The reference is a float64 naive matmul over the
+# same dtype-rounded inputs, with a relative tolerance scaled for the
 # lower-precision storage.
-from gemm import matmul_dispatch
-from matrix import Matrix
+#
+# Run from the repo root: mojo -I . tests/test_dtypes.mojo
+from matmul import Matrix, matmul_dispatch
 from std.math import abs
 
 
@@ -55,7 +56,7 @@ def main() raises:
     var ks = [256, 288, 300, 320, 352, 512, 512, 999, 306]
     for s in range(len(ms)):
         check[DType.float32](ms[s], ns[s], ks[s], 1e-4)
-    # bf16 stores in bf16 and computes in f32 (SOL.md idea 2): the packed
+    # bf16 stores in bf16 and computes in f32 (docs/SOL.md idea 2): the packed
     # panels widen at pack time, the no-pack/GEMV paths widen on load, and C
     # rounds to bf16 once per tile store. The remaining error vs the f64
     # reference is that single 8-mantissa-bit C rounding (~2^-9 relative),

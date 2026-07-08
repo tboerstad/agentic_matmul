@@ -1,10 +1,7 @@
-from std.sys import simd_width_of
-
-
 # ===========================================================================
 # Tile: a window into a row-major buffer
 #
-# Without it the kernels in gemm.mojo would index B and C by raw offset, like
+# Without it the kernels in this package would index B and C by raw offset, like
 # `c_ptr + i * n + j0 + jr` or `bp_worker + jp * kc * NR + pk * NR`. Each offset
 # is correct, and each hides its meaning behind arithmetic. A `Tile` names that
 # arithmetic once: a rows x cols rectangle whose rows sit `stride` elements apart

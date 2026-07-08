@@ -47,7 +47,7 @@ Measured with an AVX-512 read sweep at cache-sized footprints (`sol/sol_bw.c`):
 | L1 read | ~205 GB/s (ILP-limited) | |
 
 Roofline ridge points (f64, 4 cores): compute peak / DRAM BW = 5.4 flops/byte,
-compute peak / L3 BW = 2.9 flops/byte. Every `bench_focus` shape except decode
+compute peak / L3 BW = 2.9 flops/byte. Every `bench/focus.mojo` shape except decode
 has arithmetic intensity 10 to 170 flops/byte, so **the whole suite except
 decode is compute-bound** with SOL = 310 GFLOPS (f64). Decode
 (1x11008x2048) has AI = 0.25 flops/byte; its B matrix is 180 MB, which fits
@@ -56,7 +56,7 @@ B ever streams from DRAM).
 
 ## Where the kernels stand vs SOL (f64, this boot)
 
-`bench_focus` 10 epochs, mean of per-epoch peak GFLOPS, same boot as the
+`bench/focus.mojo` 10 epochs, mean of per-epoch peak GFLOPS, same boot as the
 310 GFLOPS FMA measurement:
 
 | Shape | dispatch | linalg | % of SOL (dispatch) |
@@ -110,11 +110,11 @@ Two headlines:
   the tdpbf16ps tile kernel (idea 3 below, DONE) and run 1.1-2.4 TFLOPS,
   past even the f16 column's AVX-512 ceiling.
 
-## SOTA baselines (bench_sota.py, this boot, separate processes)
+## SOTA baselines (bench/sota.py, this boot, separate processes)
 
 Prefill (96x11008x2048, f64), peak GFLOPS: MKL 233, NumPy multi 216,
 NumPy 1-thread 209, SciPy dgemm 159. Dispatch's 237 interleaved mean-of-peaks
-still leads, and MKL is now the strongest external baseline (bench_sota
+still leads, and MKL is now the strongest external baseline (bench/sota.py
 gained MKL since the README tables were written).
 
 Decode (1x11008x2048, f64), peak GFLOPS: MKL 24.7, NumPy 1-thread 23.4,
@@ -130,21 +130,21 @@ a single thread.
 # Five ideas for the next agents
 
 Ordered by expected value. Judge every kernel change with `mojo
-bench_focus.mojo` (2-sigma verdict), never a single ratio.
+bench/focus.mojo` (2-sigma verdict), never a single ratio.
 
 ## 1. SOL-aware verdicts: report % of roofline, not just ratio-vs-linalg — DONE
 
-Implemented. `sol.mojo` is a Mojo port of `sol/sol_fma.c` and `sol/sol_bw.c`
-(plus an L3-size probe added to `cpu_cache.mojo`): it self-measures the
+Implemented. `matmul/sol.mojo` is a Mojo port of `sol/sol_fma.c` and `sol/sol_bw.c`
+(plus an L3-size probe added to `matmul/cpu_cache.mojo`): it self-measures the
 all-core FMA peak (in the dtype under test), L3 and DRAM read bandwidth, and
-the detected L3 size in the same process as the kernel run. `bench_focus` now
+the detected L3 size in the same process as the kernel run. `bench/focus.mojo` now
 measures those ceilings once up front, prints a SOL banner, and adds a **%SOL**
 column (dispatch GFLOPS / roofline, where roofline = min(FMA peak, BW ×
 arithmetic intensity) with the bandwidth chosen as L3 when the working set fits
 the detected L3, else DRAM) plus a `compute`/`bw` bound tag on every shape.
 
 The lens change is immediate: on a Machine-A-class box (2.80 GHz, 1 MB/core L2,
-33 MB L3), `bench_focus` reports `sq2048` as a LOSE vs linalg (0.987) yet at
+33 MB L3), `bench/focus.mojo` reports `sq2048` as a LOSE vs linalg (0.987) yet at
 92% of SOL (at the wall), and `prefill` as a WIN vs linalg (1.117) at only 63%
 of SOL (the real gap). Decode reads above 100% of its cold-DRAM roofline
 because its 180 MB B cannot fit this 33 MB L3, so the harness's keep-B-hot reps
@@ -155,12 +155,12 @@ and Mojo nightlies, where the linalg denominator keeps moving. The original
 motivation held: the linalg-relative lens repeatedly pointed agents at the
 wrong work (the near-wall squares vs the real prefill gap). The tables above in
 this file are from a specific Machine-B boot and will differ from any given
-run; trust the `bench_focus` banner for the machine you are on.
+run; trust the `bench/focus.mojo` banner for the machine you are on.
 
 ## 2. Fix bf16: 4-5 GFLOPS today, 0.02x linalg, a 60x bug-class win — DONE
 
 Implemented as prescribed: bf16 keeps bf16 storage for A, B and C and
-computes in f32 (`gemm._compute_dtype`). The upconversion rides the pack for
+computes in f32 (`gemm.compute_dtype`). The upconversion rides the pack for
 the packed kernels (`_pack_a_panel`/`_pack_b_slab` widen as they copy, so
 packed panels are f32 and the hot K-sweep is exactly the f32 microkernel),
 the no-pack and GEMV paths widen on load (`load_a_col`/`load_b_row` take a
@@ -172,10 +172,10 @@ compute dtype, so bf16 rides the f32-measured dispatch map; the storage-byte
 gates initially routed bf16 sq320 onto the no-pack path at 0.54 vs linalg,
 and routing by compute bytes brought it back (DESIGN.md "bf16: keep bf16
 storage, compute in f32"). Every cast folds away when storage equals
-compute: verify_dispatch (f64) still prints max_err 0.0.
+compute: test_dispatch (f64) still prints max_err 0.0.
 
 Measured on a Machine-A-class box (2.80 GHz Skylake, 4 cores, no
-avx512_bf16), bench_focus 10 epochs, 2-sigma verdicts, before -> after:
+avx512_bf16), bench/focus.mojo 10 epochs, 2-sigma verdicts, before -> after:
 
 | Shape | before (disp / ratio) | after (disp / ratio) |
 |---|---|---|
@@ -189,16 +189,16 @@ avx512_bf16), bench_focus 10 epochs, 2-sigma verdicts, before -> after:
 All 16 shapes: 14 WIN, 2 tie (sq128, sq256), no losses. The wide-N band
 lands at 360-405 GFLOPS, past the ~350 the f16 path gets from linalg and
 approaching the f32 kernels on the same shapes. Correctness is gated by
-`verify_f32_routes.mojo`, which now covers every dispatch route in bf16
+`tests/test_dtypes.mojo`, which now covers every dispatch route in bf16
 against a naive f64 reference: max_rel ~0.006, the single f32-to-bf16
-rounding of C. `bench_focus` measures its SOL banner in the compute dtype,
+rounding of C. `bench/focus.mojo` measures its SOL banner in the compute dtype,
 so the bf16 %SOL column is a real f32-peak roofline instead of the
 emulated-FMA rate. `avx512_bf16`'s `vdpbf16ps` remains an optional second
 step on machines that have it (this one does not).
 
 ## 3. AMX tile microkernel for bf16: raise the ceiling ~15x — DONE
 
-Implemented as prescribed (`amx.mojo`, dispatched from `matmul_dispatch`;
+Implemented as prescribed (`matmul/amx.mojo`, dispatched from `matmul_dispatch`;
 design details in DESIGN.md "AMX bf16"). The xstate request is the one
 `arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)` syscall via
 `external_call`, memoized with the cpuid AMX-TILE/AMX-BF16 check; the tile
@@ -214,11 +214,11 @@ and each 32x32 C block is a 2x2 grid of f32 accumulator tiles that stays in
 tile registers across the whole K sweep (C stored once, then narrowed to
 bf16). Gated to bf16 with m % 32 == n % 16 == k % 32 == 0 above the tiny
 cutoff on a machine that grants AMX; everything else falls through to the
-existing cascade unchanged (verify_dispatch f64 max_err 0.0, and the f64
+existing cascade unchanged (test_dispatch f64 max_err 0.0, and the f64
 suite re-ran clean).
 
 Measured on this Machine-B-class box (2.10 GHz Granite Rapids, 4 cores),
-bench_focus --dtype bf16, 10 epochs, 2-sigma verdicts, mean dispatch GFLOPS:
+bench/focus.mojo --dtype bf16, 10 epochs, 2-sigma verdicts, mean dispatch GFLOPS:
 
 | Shape | before (f32-compute path) | after (AMX) | vs linalg |
 |---|---|---|---|
@@ -236,14 +236,14 @@ inside the "even 25-30%" band above — and ~3.7x past the 666 GFLOPS AVX-512
 f32 ceiling. Two follow-ups have since landed (DESIGN.md "Second pass"): the
 gate now takes any N (a partial trailing panel packs zero-padded and masks
 its C store), which moves oddN (n=11007, previously a fall-through at ~550
-GFLOPS) onto the tiles, and `sol.mojo` measures a `tdpbf16ps` peak so the
+GFLOPS) onto the tiles, and `matmul/sol.mojo` measures a `tdpbf16ps` peak so the
 bf16 %SOL column judges AMX-routed shapes against the real tile ceiling
 instead of reading 250-370% of the AVX-512 peak. Still open: tune the AMX
 wide-N band (prefill at 1.05 TFLOPS is well under the squares' 2.4; the
 pack/stream traffic per flop is higher there, and nothing AMX-side has been
 tuned yet), and re-validate the any-N path on an AMX box (the session's VM
 migrated to a non-AMX Skylake host right after the first pass;
-verify_f32_routes carries the shapes).
+test_dtypes carries the shapes).
 
 ## 4. Take prefill from 76% to ~90% of SOL: C traffic and pack overlap — DEAD END (measured)
 
@@ -296,8 +296,8 @@ throughput vs f64 at the same bandwidth.
 ## Honorable mentions
 
 - Add MKL to the interleaved harness as a second baseline (it is now the
-  strongest external SOTA on this machine, and bench_sota's cross-process
-  numbers are not comparable to bench_focus ratios).
+  strongest external SOTA on this machine, and bench/sota.py's cross-process
+  numbers are not comparable to bench/focus.mojo ratios).
 - A one-shot per-machine autotune cache for the tunables the docs call
   hardware-specific (KC, TILE_N, MR, the L2/3 cut): measure once, store, load
   at dispatch. Machines A and B already want opposite KC picks.
