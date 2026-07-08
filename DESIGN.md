@@ -560,6 +560,66 @@ nothing (`verify_dispatch` max_err 0.0 across remainder widths, including the
 N=519..575 sweep that exercises every masked-column width on the square-ish
 branch).
 
+## bf16: keep bf16 storage, compute in f32 (`_compute_dtype`)
+
+AVX-512 has no bf16 SIMD FMA and LLVM has nothing to lower one to (the
+`avx512_bf16` extension adds only a dot-product instruction, and the Skylake
+Machine-A part lacks even that). A `SIMD[bfloat16]` FMA scalarizes into
+per-element emulation, so every kernel in the repo ran bf16 at 1-5 GFLOPS,
+0.005-0.07x linalg, while linalg itself sat near 200 GFLOPS by computing in
+f32. This was SOL.md idea 2: a bug-class loss worth ~60x, fixed by keeping
+bf16 storage for A, B and C and running all arithmetic in f32.
+
+Each kernel family widens at the cheapest seam it has:
+
+- **Packed kernels.** The pack stage already touches every element of A and
+  B, so `_pack_a_panel` and `_pack_b_slab` cast as they copy and the packed
+  panels become f32. The hot K-sweep is then exactly the f32 micro-kernel;
+  bf16 appears only at the C boundary, cast once per register-tile load and
+  store (a bf16-to-f32 widen is exact, a 16-bit shift; the f32-to-bf16
+  narrow is a handful of integer ops, paid once per tile).
+- **No-pack kernels** (`_nopack_gemm`, `_serial_gemm`, and the pack-B-only
+  paths' unpacked-A gathers). Widen on load: `load_a_col` and `load_b_row`
+  take a cast target, so the B vectors and A broadcast scalars convert in
+  registers on the way into the same f32 FMA nest.
+- **Decode GEMV.** B still streams in bf16, half the bytes of f32, which is
+  the whole point for a bandwidth-bound decode, and widens in registers. The
+  accumulator rows move to an f32 staging buffer because accumulating into
+  bf16 C directly would round the partial sum to 8 mantissa bits every KU
+  steps; each C row is narrowed once when its K-sweep finishes.
+
+Mechanically, `_compute_dtype[dtype]()` maps bf16 to f32 and is the identity
+for every other dtype. `RegisterTile` is parameterized on the compute dtype
+and its C load/store methods are generic over the storage dtype, casting at
+the boundary. Every kernel's SIMD geometry (NELTS, and with it NR and
+TILE_N) follows the compute dtype, so bf16 inherits f32's tile shapes and
+its measured tunables. The byte-based routing gates (`_box_fits_l2`,
+`_small_box`, `_l2_resident_kc`) also size in compute-dtype bytes: the
+windows were measured where storage and compute match, the packed panels
+genuinely occupy f32 bytes in cache, and the no-pack kernels those gates
+admit pay a per-load widening tax the windows never priced in. Before that
+last piece, bf16 sq320 slid under the storage-byte gate onto the no-pack
+path and ran 0.54 vs linalg; routed as f32 (the balanced 2D grid) it is a
+1.18 +/- 0.06 WIN over 10 epochs. When storage equals compute every cast
+folds away: `verify_dispatch` (f64) still reports max_err 0.0 on every
+shape.
+
+Numerics: the result differs from a bf16-accumulated one by construction.
+The f64-naive-reference check (`verify_f32_routes.mojo`, which covers every
+dispatch route in bf16) measures max_rel about 0.006, which is the single
+f32-to-bf16 rounding of C (about 2^-9 relative) on top of f32 accumulation,
+against a 0.02 tolerance.
+
+Measured on the Machine-A-class box (2.80 GHz Skylake, 4 cores), bench_focus
+10 epochs, before -> after: decode 2 -> 42 GFLOPS (0.29 -> 3.87 WIN, past
+the L3 roofline the harness holds B hot against), prefill 1 -> 216 (0.006 ->
+1.22 WIN), up-m512 1 -> 405 (0.005 -> 1.85 WIN), sq2048 1 -> 242 (0.005 ->
+1.10 WIN). All 16 shapes land WIN or tie, no losses; the fuller table is in
+SOL.md idea 2 (DONE). The f32 ceiling for this part measured ~581 GFLOPS FMA
+peak in the same boot, and `bench_focus` now measures its SOL banner in the
+compute dtype so the bf16 %SOL column is a real roofline instead of the
+emulated-FMA rate.
+
 ## Dead end: x86 M-blocking (GotoBLAS loop 3) for the squares
 
 MC blocking (block M so an MC-tall packed-A block stays L2-resident across a

@@ -29,10 +29,11 @@
 #   --quick          one epoch, prints bare ratios with no stdev (old behavior;
 #                    fast edit-loop sanity check, NOT for judging a change)
 #   --dtype T        element type: f64 (default), f32, f16, or bf16. The whole
-#                    A/B/C path and both kernels run in T. f16/bf16 accumulate in
-#                    the same low-precision type, so dispatch and linalg diverge
+#                    A/B/C path and both kernels run in T. f16 accumulates in
+#                    f16 and bf16 dispatch computes in f32 (storage stays bf16;
+#                    see gemm._compute_dtype), so dispatch and linalg diverge
 #                    numerically; the ratio still measures throughput, not accuracy.
-from gemm import matmul_dispatch
+from gemm import matmul_dispatch, _compute_dtype
 from matrix import Matrix
 from sol import MachineSol, measure_sol
 from linalg.matmul import matmul as linalg_matmul
@@ -257,10 +258,12 @@ def run_stats[dtype: DType](sol: MachineSol, epochs: Int, runs: Int) raises:
 
 
 # Run the chosen mode (quick vs stats) for one compile-time dtype. The machine
-# SOL is measured once up front (in the dtype under test) so every shape can be
-# reported as a % of its roofline.
+# SOL is measured once up front so every shape can be reported as a % of its
+# roofline. The FMA peak is measured in the dtype the kernels actually compute
+# in (f32 for bf16 storage), which is the ceiling the kernels can reach; the
+# bandwidth rooflines still use the storage element size via size_of.
 def run[dtype: DType](quick: Bool, epochs: Int, runs: Int) raises:
-    var sol = measure_sol[dtype]()
+    var sol = measure_sol[_compute_dtype[dtype]()]()
     if quick:
         run_quick[dtype](sol, runs)
     else:

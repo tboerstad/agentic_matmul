@@ -22,7 +22,13 @@ byte-based small-box gates admit twice the N×K area in f32 while the no-pack /
 1D-column hazards scale with the doubled NR=64, which had sunk sq300-f32 to
 0.25× linalg and sq320-f32 to 0.73×; routing those through `_square_ish`'s
 balanced 2D grid lifts them 3.8× and 1.5× to ~parity (see DESIGN.md
-"Small-box f32 routing").
+"Small-box f32 routing"). bfloat16 keeps bf16 storage and computes in f32
+(AVX-512 has no bf16 SIMD FMA, so a bf16 accumulator emulates element-wise
+at 1-5 GFLOPS): the pack stages widen A/B panels to f32 as they copy, the
+no-pack and GEMV paths widen on load, and C narrows once per tile store.
+That took every bf16 shape from 0.005-0.07× linalg to a WIN or tie over 10
+epochs (prefill 1 → 216 GFLOPS at 1.22× linalg, decode 2 → 42 at 3.9×; see
+DESIGN.md "bf16: keep bf16 storage, compute in f32" and SOL.md idea 2).
 
 See SOL.md for the speed-of-light analysis (measured FMA peak and memory
 bandwidth ceilings, per-shape rooflines, % of SOL standings, and five
@@ -365,5 +371,5 @@ python bench_sota.py             # NumPy/SciPy/MKL benchmarks
 bash sol/run.sh                  # measure this machine's SOL (FMA peak + memory BW)
 mojo test_gemm.mojo              # Correctness tests
 mojo verify_dispatch.mojo        # dispatch correctness vs naive (all branches + edge cases)
-mojo verify_f32_routes.mojo      # f32/bf16 small-box routing correctness (byte gates differ from f64)
+mojo verify_f32_routes.mojo      # f32 small-box routing + bf16 all-route correctness (vs f64 naive)
 ```

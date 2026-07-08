@@ -43,9 +43,10 @@ def fma_peak_gflops[dtype: DType](iters: Int = 20_000_000) -> Float64:
     a runtime value), so the loop executes and the FMA pipes stay full. The
     reduced accumulators escape through `sinks` so the work is not dead-code
     eliminated. A single warm chain runs first to reach steady turbo, as the C
-    benchmark does. For `bf16` (and any type LLVM has no SIMD FMA for) this
-    reports the emulated-FMA rate, which is the honest current ceiling for that
-    lowering, not the f32-convert ceiling ideas 2/3 in SOL.md would unlock."""
+    benchmark does. Pass the dtype the kernels actually FMA in: the bf16
+    kernels compute in f32 (gemm._compute_dtype, SOL.md idea 2), so their
+    ceiling is the f32 peak; a raw bf16 chain would measure LLVM's
+    element-wise emulation instead, which nothing in the repo runs anymore."""
     comptime W = simd_width_of[dtype]()
     var nw = num_physical_cores()
     var gfs = alloc[Float64](nw)

@@ -5,9 +5,11 @@
 # (half the bytes per element, double the NR granularity; see DESIGN.md
 # "Small-box f32 routing"). This file exercises the f32/bf16 band those gates
 # actually produce: the no-pack keepers, the tail-heavy square-ish evictions,
-# and the 2D-grid picks. The reference is a float64 naive matmul over the
-# same dtype-rounded inputs, with a relative tolerance scaled for the
-# lower-precision accumulation.
+# and the 2D-grid picks. It also carries the bf16 route coverage, since bf16
+# rides the f32-shaped dispatch (it computes in f32; see _compute_dtype in
+# gemm.mojo). The reference is a float64 naive matmul over the same
+# dtype-rounded inputs, with a relative tolerance scaled for the
+# lower-precision storage.
 from gemm import matmul_dispatch
 from matrix import Matrix
 from std.math import abs
@@ -53,8 +55,28 @@ def main() raises:
     var ks = [256, 288, 300, 320, 352, 512, 512, 999, 306]
     for s in range(len(ms)):
         check[DType.float32](ms[s], ns[s], ks[s], 1e-4)
-    # bf16 accumulates in bf16: loose tolerance, just guard against a wrong
-    # route producing garbage (wrong offsets, unwritten tiles).
-    check[DType.bfloat16](300, 300, 300, 0.15)
-    check[DType.bfloat16](320, 320, 320, 0.15)
+    # bf16 stores in bf16 and computes in f32 (SOL.md idea 2): the packed
+    # panels widen at pack time, the no-pack/GEMV paths widen on load, and C
+    # rounds to bf16 once per tile store. The remaining error vs the f64
+    # reference is that single 8-mantissa-bit C rounding (~2^-9 relative),
+    # so the tolerance is 0.02 rather than f32's 1e-4. Cover every dispatch
+    # route: tiny serial, decode GEMV, small batch, thin-N, small box,
+    # narrow-N, square-ish (incl. the 2D grid), wide-N, and tall-K, with
+    # M/N/K remainders and multi-k-panel accumulation.
+    check[DType.bfloat16](33, 47, 51, 0.02)     # tiny serial (odd dims)
+    check[DType.bfloat16](1, 2048, 512, 0.02)   # decode GEMV, n % nw chunks
+    check[DType.bfloat16](1, 999, 777, 0.02)    # decode GEMV, odd n and k
+    check[DType.bfloat16](4, 2048, 512, 0.02)   # small batch (MR = M = 4)
+    check[DType.bfloat16](128, 16, 512, 0.02)   # thin-N M-parallel no-pack
+    check[DType.bfloat16](128, 50, 512, 0.02)   # thin-N with scalar N tail
+    check[DType.bfloat16](256, 128, 512, 0.02)  # small box, no-pack keeper
+    check[DType.bfloat16](300, 300, 300, 0.02)  # 2D-grid pick, M/N tails
+    check[DType.bfloat16](320, 320, 320, 0.02)  # 2D grid, clean columns
+    check[DType.bfloat16](64, 100, 300, 0.02)   # narrow-N NR=32 (n % NR)
+    check[DType.bfloat16](512, 480, 512, 0.02)  # square-ish pack-B-only
+    check[DType.bfloat16](513, 479, 600, 0.02)  # square-ish, M+N tails
+    check[DType.bfloat16](96, 2048, 768, 0.02)  # wide-N packed prefill
+    check[DType.bfloat16](257, 2048, 1100, 0.02)  # wide-N SHARED_A, k-panels
+    check[DType.bfloat16](257, 512, 2048, 0.02)   # tall-K SHARED_A, M tail
+    check[DType.bfloat16](512, 512, 2048, 0.02)   # tall-K big-KC panel
     print("all passed")
