@@ -828,7 +828,9 @@ lose on everything as the group plus A plus the streaming source lines
 overflow the 2 MB L2.
 
 The 10-epoch `bench/focus.mojo --dtype bf16` table (2-sigma, mean dispatch
-GFLOPS, same boot, before -> after) is in SOL.md idea 3.
+GFLOPS, same boot, before -> after) is in SOL.md idea 3: prefill 1077 ->
+1689, up-m512 1712 -> 2867, oddN 1614 -> 2787, sq2048 2347 -> 3342, M512-g
+1753 -> 2478, every AMX-routed shape a WIN and none lost outside noise.
 
 ## Dead end: the prefill-band C-traffic and pack-overlap ideas (SOL.md idea 4)
 

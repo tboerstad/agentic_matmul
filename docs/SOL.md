@@ -238,12 +238,43 @@ gate now takes any N (a partial trailing panel packs zero-padded and masks
 its C store), which moves oddN (n=11007, previously a fall-through at ~550
 GFLOPS) onto the tiles, and `matmul/sol.mojo` measures a `tdpbf16ps` peak so the
 bf16 %SOL column judges AMX-routed shapes against the real tile ceiling
-instead of reading 250-370% of the AVX-512 peak. Still open: tune the AMX
-wide-N band (prefill at 1.05 TFLOPS is well under the squares' 2.4; the
-pack/stream traffic per flop is higher there, and nothing AMX-side has been
-tuned yet), and re-validate the any-N path on an AMX box (the session's VM
-migrated to a non-AMX Skylake host right after the first pass;
-test_dtypes carries the shapes).
+instead of reading 250-370% of the AVX-512 peak.
+
+A third pass (DESIGN.md "Third pass: j-tile groups with a row-outer B
+pack") re-validated both on a Granite Rapids box and then restructured the
+loop: each worker packs B in groups of j-tiles sized to 3/8 of the L2,
+row-outer (one visit per B row pair for the whole group, which is what the
+wide-N pack was missing), and sweeps M blocks outer with the group's j-tiles
+inner so the A block is reused from L2. bench/focus.mojo --dtype bf16, 10
+epochs, same boot, mean dispatch GFLOPS before -> after (bit-identical
+output):
+
+| Shape | before | after | gain | vs linalg |
+|---|---|---|---|---|
+| prefill | 1077 | **1689** | 1.57x | 5.15 WIN |
+| up-m256 | 1601 | **2229** | 1.39x | 6.52 WIN |
+| up-m512 | 1712 | **2867** | 1.67x | 8.17 WIN |
+| oddN | 1614 | **2787** | 1.73x | 8.06 WIN |
+| sq2048 | 2347 | **3342** | 1.42x | 9.10 WIN |
+| sq1024 | 2299 | **2764** | 1.20x | 7.53 WIN |
+| M512-g | 1753 | **2478** | 1.41x | 6.96 WIN |
+| dn-m512 | 1712 | 1914 | 1.12x | 5.43 WIN |
+| sq384 | 1993 | 2023 | 1.02x | 5.95 WIN |
+| sq512 | 2208 | 2293 | 1.04x | 6.59 WIN |
+| box512 | 1464 | 1655 | 1.13x | 5.02 WIN |
+| sq320 | 1450 | 1614 | 1.11x | 5.71 WIN |
+
+The wide-N band, the open item above, moved the most: prefill 1.08 -> 1.69
+TFLOPS and up-m512 to 2.87. The squares now reach 33% of the measured
+10.1 TFLOPS tile peak (sq2048 3.34 TFLOPS). dn-m512 (K=11008, one 704 KB
+j-tile per group, so no grouping) gains only from the fixed pack prefetch.
+Nothing lost outside noise; the tiny shapes (sq128, sq300, decode) do not
+route to the tiles and are unchanged.
+
+Still open on the AMX path: the K-sweep itself streams 4 KB of A and B
+tiles from L2 per 64 cycles of tdpbf16ps, close to the L2 fill bandwidth,
+so the remaining 3x to the tile peak likely needs a packed A (contiguous
+1 KB tiles, prefetch-friendly) or K-blocking that keeps one operand in L1.
 
 ## 4. Take prefill from 76% to ~90% of SOL: C traffic and pack overlap — DEAD END (measured)
 
