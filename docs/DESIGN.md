@@ -726,7 +726,8 @@ Two follow-ups landed after the first pass:
    which dropped oddN (512x11007x2048) back to the AVX-512 routes at ~550
    GFLOPS while its N=11008 twin ran ~2000 on the tiles, for one missing
    column. An N remainder is cheap to support exactly, because the kernel
-   already owns both sides of the boundary: `_pack_vnni_panel` zero-fills the
+   already owns both sides of the boundary: the VNNI pack (now
+   `_pack_vnni_group`, see the third pass below) zero-fills the
    dead columns of a partial trailing panel (the tile FMA runs unmasked and
    the zero columns contribute nothing), and `_amx_store_c_tile` narrows only
    the live columns from the f32 scratch into C. M and K remainders stay
@@ -757,6 +758,79 @@ checked by a host-side unit test of the VNNI zero-padding and the masked C
 narrowing. The first AMX box to run `mojo -I . tests/test_dtypes.mojo` and
 `mojo -I . bench/focus.mojo --dtype bf16` confirms both on the tiles; oddN is
 expected to move from ~550 GFLOPS to its N=11008 twin's ~2 TFLOPS class.
+
+### Third pass: j-tile groups with a row-outer B pack (1.4-1.7x)
+
+Back on a Granite Rapids box (2.10 GHz, 4 cores, 2 MB/core L2; the second
+pass's partial-N path and tdpbf16ps peak both confirmed on the tiles: oddN
+runs 1.6 TFLOPS, the measured tile peak is 6.8-10.1 TFLOPS depending on the
+boot). The first-pass kernel sat at 11-24% of that peak, with the wide-N
+band (prefill 1.08 TFLOPS) far under the squares (2.3-2.4). Two costs
+explain the gap, both in the loop structure rather than the tile ops:
+
+1. **The per-j-tile B pack is a strided gather.** A wide B's rows are N x 2
+   bytes apart (22 KB for N=11008, more than a 4 KB page), so packing one
+   32-column j-tile touched 2048 rows for 64 bytes each: a TLB miss and an
+   L3 line fetch per row, for 128 KB of useful data. At M=96 that pack is
+   amortized over only three 32-row M blocks, and it dominated prefill.
+   (The old pack's prefetch also only ever prefetched even rows, since it
+   stepped 16 rows ahead from an even row.)
+2. **A is re-streamed per j-tile.** Every j-tile swept the whole A once. For
+   the shapes whose A does not fit L2 (sq1024 2 MB, sq2048 8 MB, M512-g
+   4 MB, dn-m512 11 MB) that is an L3 read of 2 KB per 64 cycles of tile
+   compute per core, about the per-core L3 read bandwidth: the squares were
+   L3-bound on A, which is why they stalled at ~24% of the tile peak.
+
+The fix is one restructuring. Each worker walks its j-tile range in
+**groups** (`_amx_group_tiles`: as many 32-column j-tiles as fit their
+packed B in 3/8 of the per-core L2, 6 at K=2048 on a 2 MB L2, 1 at
+K=11008). Per group it packs B **row-outer** (`_pack_vnni_group`: one visit
+per row pair reads the group's contiguous 6 x 64-byte span, so the TLB miss
+and the line fetch are paid once per group), then runs **M blocks outer, the
+group's j-tiles inner**, so each 32-row A block is pulled from L3 once per
+group and hits L2 for the other five. The tile ops, the 2x2 accumulator
+grid, the C-stored-once K sweep and the partial-N handling are unchanged,
+and the result is bit-identical to the first-pass kernel (same
+accumulation order per C tile).
+
+Interleaved A/B against the first-pass kernel (peak over 10 reps, same
+process), group budget swept at 384 KB .. 1.5 MB:
+
+| Shape | ungrouped | 512 KB | **768 KB** | 1 MB | 1.5 MB |
+|---|---|---|---|---|---|
+| prefill (96x11008x2048) | 1128 | 1.49x | **1.56x** | 1.53x | 1.35x |
+| up-m256 | 1850 | 1.39x | **1.42x** | 1.34x | 1.22x |
+| up-m512 | 1908 | 1.45x | **1.70x** | 1.68x | 1.41x |
+| oddN (512x11007x2048) | 1954 | 1.55x | 1.59x | **1.64x** | 1.39x |
+| sq2048 | 2367 | 1.53x | **1.56x** | 1.50x | 1.33x |
+| sq1024 | 2536 | 1.20x | **1.20x** | 1.19x | 1.11x |
+| M512-g (512x4096x4096) | 1866 | 1.42x | 1.49x | **1.58x** | 1.36x |
+| sq512 | 1979 | 1.10x | **1.16x** | 1.14x | 1.12x |
+| m32wide (32x11008x2048) | 518 | **1.79x** | 1.71x | 1.52x | 1.44x |
+| box512 (512x128x512) | 1663 | 0.90x | 0.90x | 0.99x | 0.98x |
+
+768 KB (3/8 of L2) is best or within noise everywhere: the smaller budgets
+give back 5-15% on the large-M band (less A reuse per group), the larger
+ones give back 5-20% on the small-M band, where the whole A (384 KB at
+prefill) also wants to stay resident next to the group. box512 has 4
+j-tiles in total, one per worker, so grouping cannot apply and its 10 µs
+runtime swings +/-10% run to run. Splitting the gain: plain grouping with
+the old per-panel pack was +22-32% on the large-A shapes and a 4-17% LOSS
+on prefill (more L2 pressure, same pack cost); the row-outer pack on top
+turned prefill into +48% and added another 10-25% to everything wide.
+
+Two things that did not work, measured in the same harness: software
+prefetch of the next K-step's A and B lines into L1 (2 or 4 steps ahead,
+32 + 16 prefetches per step) lost 5-25% on every shape, so the hardware
+prefetcher already covers the L2-resident streams and the extra
+instructions only compete with the tile loads; and group budgets over 1 MB
+lose on everything as the group plus A plus the streaming source lines
+overflow the 2 MB L2.
+
+The 10-epoch `bench/focus.mojo --dtype bf16` table (2-sigma, mean dispatch
+GFLOPS, same boot, before -> after) is in SOL.md idea 3: prefill 1077 ->
+1689, up-m512 1712 -> 2867, oddN 1614 -> 2787, sq2048 2347 -> 3342, M512-g
+1753 -> 2478, every AMX-routed shape a WIN and none lost outside noise.
 
 ## Dead end: the prefill-band C-traffic and pack-overlap ideas (SOL.md idea 4)
 
