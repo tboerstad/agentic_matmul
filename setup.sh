@@ -13,10 +13,13 @@ if [ ! -f pyproject.toml ]; then
     uv init
 fi
 
-# Create venv and install the latest Mojo nightly (MAX 26.5 → Mojo 1.0.0b3)
+# Create venv and install the Mojo nightly the code targets (MAX 26.5 →
+# Mojo 1.0.0b3). Pinned: the 26.6 nightlies (Mojo 1.1.0rc0) removed the
+# `read` capture keyword, `ImmutOrigin`, and moved `parallelize`/`alloc`,
+# so they no longer compile this repo. Bump the pin together with a port.
 uv venv
 source .venv/bin/activate
-uv pip install modular --index https://whl.modular.com/nightly/simple/ --prerelease allow
+uv pip install "modular==26.5.0.dev2026070806" --index https://whl.modular.com/nightly/simple/ --prerelease allow
 
 # Install the Python benchmark deps (numpy/scipy/mkl) so `python bench/sota.py`
 # works out of the box, including the Intel MKL dgemm comparison.

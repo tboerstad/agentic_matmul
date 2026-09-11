@@ -90,4 +90,10 @@ def main() raises:
     check[DType.bfloat16](32, 31, 1024, 0.02)   # AMX, 16 + 15 partial panels
     check[DType.bfloat16](64, 9, 4096, 0.02)    # AMX, single partial panel
     check[DType.bfloat16](512, 11007, 128, 0.02)  # AMX, oddN-like wide
+    # Group boundaries of the j-tile grouping (matmul/amx.mojo
+    # _amx_group_tiles): K=2048 packs 6 tiles per 768 KB group, so each
+    # worker's 86 tiles end in a short group with the partial 15-column
+    # tail; K=4096 packs 3 per group over 7 tiles split across 4 workers.
+    check[DType.bfloat16](64, 11007, 2048, 0.02)  # AMX, short last group + tail
+    check[DType.bfloat16](32, 200, 4096, 0.02)    # AMX, 2-tile groups, 8-col tail
     print("all passed")

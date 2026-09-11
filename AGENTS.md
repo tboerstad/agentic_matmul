@@ -38,7 +38,7 @@ Granite Rapids; both 4 cores, AVX-512, KVM). Your results WILL differ.**
 
 ## First-time setup after cloning
 
-1. Run `bash setup.sh` to install dependencies (uv, latest Mojo nightly — MAX 26.5 → Mojo 1.0.0b3)
+1. Run `bash setup.sh` to install dependencies (uv, the pinned Mojo nightly — MAX 26.5 → Mojo 1.0.0b3). The pin matters: the 26.6 nightlies (Mojo 1.1.0rc0) removed the `read` capture keyword (now `imm`), `ImmutOrigin`, and moved `parallelize`/`alloc`/`memset_zero`, so they do not compile this repo. Porting to 1.1 is its own task; do not mix it into a kernel change.
 2. Activate the venv: `source .venv/bin/activate`
 3. Verify the setup works: `mojo -I . examples/demo.mojo`
 

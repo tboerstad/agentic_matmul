@@ -34,10 +34,13 @@ additionally dispatches to a `tdpbf16ps` tile kernel (`matmul/amx.mojo`, LLVM AM
 intrinsics via `llvm_intrinsic`; docs/SOL.md idea 3) for shapes with M % 32 == K % 32 == 0 (any N):
 2x2 f32 accumulator tiles stay in tile registers across the whole K sweep,
 A is read unpacked by `tileloadd`'s strided gather, and B is VNNI
-pair-interleaved per j-tile. That raises the bf16 ceiling roughly 7x past
-both linalg and the machine's AVX-512 f32 peak (sq2048 ~2.7 TFLOPS, the
-heavy band 1.8-2.4 TFLOPS, prefill ~1.1 TFLOPS on the 2.10 GHz 4-core
-Granite Rapids box; see docs/DESIGN.md "AMX bf16").
+pair-interleaved per group of j-tiles (a row-outer pack sized to 3/8 of the
+L2, with the A block reused across the group). That raises the bf16 ceiling
+roughly 9-10x past both linalg and the machine's AVX-512 f32 peak (sq2048
+~3.6 TFLOPS, the heavy wide-N band 2.6-3.2 TFLOPS, prefill ~1.7 TFLOPS on
+the 2.10 GHz 4-core Granite Rapids box; the j-tile grouping alone was
+1.4-1.7x over the first tile kernel, see docs/DESIGN.md "AMX bf16", third
+pass).
 
 See docs/SOL.md for the speed-of-light analysis (measured FMA peak and memory
 bandwidth ceilings, per-shape rooflines, % of SOL standings, and five
